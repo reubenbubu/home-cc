@@ -1,7 +1,13 @@
 mod commands;
-mod error;
-mod inventory;
+// Public so the small diagnostic programs in examples/ can use them.
+pub mod error;
+pub mod history;
+pub mod inventory;
+pub mod net;
 mod secrets;
+pub mod settings;
+pub mod ssh;
+pub mod stats;
 
 use inventory::Inventory;
 use tauri::Manager;

@@ -9,6 +9,9 @@ pub enum Error {
     Keychain(#[from] keyring::Error),
     #[error("{0}")]
     Invalid(String),
+    /// Scanning or pinging failed. The text is shown to the owner as it is.
+    #[error("{0}")]
+    Network(String),
     #[error("not found: {0}")]
     NotFound(String),
 }
