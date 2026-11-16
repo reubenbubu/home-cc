@@ -35,7 +35,6 @@ pub fn delete(key: &str) -> Result<()> {
 }
 
 /// For back-end use only (SSH, Proxmox). Not exposed as a command.
-#[allow(dead_code)]
 pub fn get(key: &str) -> Result<Option<String>> {
     match entry(key)?.get_password() {
         Ok(v) => Ok(Some(v)),
