@@ -47,6 +47,14 @@ windows = { version = "0.62.2", features = [
     "Win32_Networking_WinSock",
 ] }
 
+# Debug builds: keep line numbers for our own code only. Full debug info for
+# every dependency makes the build folder several GB bigger for no gain.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 codegen-units = 1
 lto = true
