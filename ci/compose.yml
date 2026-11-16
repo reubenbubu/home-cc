@@ -1,0 +1,19 @@
+# Local CI in Docker. From the repo root:
+#   npm run ci         # checks, tests and Linux packages (into ci/out/)
+#   npm run ci:check   # checks and tests only
+name: home-cc-ci
+
+services:
+  ci:
+    build: .
+    volumes:
+      - ..:/src:ro
+      - ./out:/out
+      - work:/work
+      - cache:/cache
+      - cargo-registry:/opt/cargo/registry
+
+volumes:
+  work:
+  cache:
+  cargo-registry:

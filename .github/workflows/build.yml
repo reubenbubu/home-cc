@@ -1,8 +1,8 @@
 name: Build
 
+# Started by hand only (Actions tab -> Build -> Run workflow), to save the
+# free minutes on a private repo. Day-to-day checks run locally: npm run ci
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 jobs:

@@ -8,9 +8,11 @@ it does and the build plan.
 
 ## Getting installers
 
-Every push builds a Windows installer (`.msi` and `.exe`) and Linux packages
-(`.deb` and `.AppImage`) on GitHub Actions. Open the latest run under the
-**Actions** tab and download them from **Artifacts** at the bottom.
+GitHub Actions can build a Windows installer (`.msi` and `.exe`) and Linux
+packages (`.deb` and `.AppImage`), but only when started by hand, to save the
+free minutes: under the **Actions** tab pick **Build**, then **Run workflow**.
+When it finishes, download them from **Artifacts** at the bottom of the run.
+For everyday use, build locally instead (see below).
 
 ## Running from source
 
@@ -34,6 +36,29 @@ npm run tauri build   # make an installer for this system
 npm run check                                   # type-check the screens
 cargo test --manifest-path src-tauri/Cargo.toml # back-end tests
 ```
+
+### Local CI in Docker
+
+To run the same checks as GitHub Actions without using its minutes (needs
+Docker; nothing else has to be installed for the build itself):
+
+```sh
+npm run ci         # type-check, back-end tests, then build the Linux packages
+npm run ci:check   # type-check and back-end tests only
+```
+
+The `.deb` and `.AppImage` land in `ci/out/`. The first run downloads and
+compiles everything (about 10 minutes). After that the caches live in Docker
+volumes: checks take seconds, and a full run takes about 3 minutes, most of it
+the optimised release build.
+The build works on a copy of the source inside the container, so nothing in
+your checkout changes. Without npm on the machine, run
+`docker compose -f ci/compose.yml run --rm --build ci` directly (add `check`
+for checks only). To clear the caches:
+`docker compose -f ci/compose.yml down -v`.
+
+Windows installers can't be built this way; run `npm run tauri build` on a
+Windows machine.
 
 ## Layout
 
