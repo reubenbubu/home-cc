@@ -48,25 +48,29 @@ Proposed Rust libraries (to confirm during step 2):
 
 ## 3. Your network
 
-**OPEN:** fill in what you have, roughly. This drives what to build first.
-
-- Mesh system (brand and model): _?_
-- Router (if separate from the mesh): _?_
-- Proxmox host(s): _?_
-- Linux machines and VMs: _?_
-- Windows PCs: _?_
-- Docker hosts: _?_
-- Home IP range (for example 192.168.1.0/24): _?_
+- **Mesh:** TP-Link Deco BE85, 4 nodes.
+- **Main PC (Windows):** the owner's daily machine. This is where home-cc runs.
+- **NAS / server PC (Windows):** stores files, runs some services, and hosts two
+  Linux VMs:
+  - **Homelab VM (Linux):** home services, mostly as Docker compose stacks.
+  - **Dev VM (Linux):** used for development.
+- **Proxmox PC:** runs the Pi-holes, plus Prometheus and Grafana for monitoring.
+- **Docker hosts:** at least the homelab VM. **OPEN:** any others?
+- **OPEN:** what runs the two VMs on the NAS (Hyper-V, VirtualBox, VMware)?
+  This decides whether the app can start and stop them, or only see them.
+- **OPEN:** home IP range (for example 192.168.68.0/22, the Deco default). The
+  app can also work this out by itself.
 
 ## 4. How the app reaches each machine
 
 | What | How | What you set up once |
 | --- | --- | --- |
-| Mesh nodes | Depends on the brand (see 5.1) | Possibly a login for the mesh admin |
+| Deco mesh nodes | Detected on the network by maker and MAC address (see 5.1) | Nothing |
 | Linux machines | SSH | An SSH key added to each machine |
 | Windows PCs | SSH (Windows' built-in OpenSSH server) | Turn on OpenSSH Server in Windows settings |
 | Docker | Through the same SSH connection to each host | Nothing extra |
 | Proxmox | Proxmox's built-in HTTPS API | An API token created in Proxmox |
+| Prometheus (optional) | Its HTTP query API | Nothing, if it already collects machine stats |
 
 Using SSH for Docker means no Docker ports are opened on the network, which is
 safer than exposing the Docker API.
@@ -86,11 +90,12 @@ Each feature lists what "done" looks like.
 Done when: a scan finds all the owner's known machines and mesh nodes, and
 names survive a restart.
 
-**OPEN:** how mesh nodes can be detected depends on the brand. Some (for
-example TP-Link Deco, Eero) only have a phone app and a cloud service, so the
-app would spot nodes by their maker and MAC address. Others (for example
-Asus AiMesh, OpenWrt-based mesh) have a local admin page or API with more
-detail, such as which device is connected to which node.
+Deco BE85 notes: Deco has no official local API; it is managed through the
+phone app and TP-Link's cloud. So the app finds the 4 nodes on the network by
+their TP-Link MAC addresses, and lets the owner name each one (for example
+"Living room"). Showing which device is connected to which node would need the
+Deco's unofficial local admin interface. That is a possible later add-on, not
+part of the first version.
 
 ### 5.2 Ping and status
 
@@ -112,6 +117,12 @@ turning it on shows it as up again.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.
+
+Prometheus is already running on the Proxmox PC. If it already collects
+machine stats (node_exporter on Linux, windows_exporter on Windows), the app
+can read stats and history from Prometheus instead of asking each machine.
+SSH stays as the fallback for machines Prometheus doesn't cover. **OPEN:** which
+machines does Prometheus already watch?
 
 ### 5.4 Terminal
 
@@ -139,9 +150,10 @@ closes the connection.
 Done when: the owner can follow a container's logs, restart it, and run a
 cleanup on any host without opening a terminal.
 
-**OPEN:** do you mostly run containers with `docker compose` files, single
-`docker run` commands, or both? This decides how the "manage Dockerfiles" part
-is shaped.
+The owner mostly uses compose files, so the app is built around compose
+stacks: each stack shows as a group with its containers inside it, and the
+main actions (up, down, pull new images and restart, edit the compose file)
+work on the whole stack. Single containers still get the controls above.
 
 ### 5.6 Proxmox
 
@@ -175,7 +187,7 @@ from the app.
 
 ## 8. Open questions
 
-1. What mesh system do you have? (5.1)
-2. Roughly what machines are on the network? (section 3)
-3. Do you use compose files, single containers, or both? (5.5)
-4. Svelte for the screens is a proposal. Any preference, such as React?
+1. What runs the two Linux VMs on the NAS PC? (section 3)
+2. Which machines run Docker besides the homelab VM? (section 3)
+3. Which machines does Prometheus already watch? (5.3)
+4. Svelte or React for the screens? (section 2)
