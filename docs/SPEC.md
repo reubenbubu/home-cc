@@ -35,16 +35,19 @@ Not goals for now:
   never in plain config files.
 - **Settings and inventory:** a local SQLite file in the user's app data folder.
 
-Proposed Rust libraries (to confirm during step 2):
+Rust libraries:
 
 | Job | Library |
 | --- | --- |
 | SSH and terminals | `russh` |
-| Docker | `bollard` |
-| Proxmox API | `reqwest` (plain HTTPS calls) |
-| Ping and scanning | `surge-ping`, plus ARP and mDNS lookups |
+| Docker | `bollard` (to confirm in step 4) |
+| Proxmox API | `reqwest` (plain HTTPS calls; to confirm in step 4) |
+| Ping and scanning | `ping-async`, plus the system's neighbour (ARP) table, reverse DNS, mDNS and NetBIOS lookups |
 | Keychain | `keyring` |
-| Local database | `sqlx` with SQLite |
+| Local database | `rusqlite` with SQLite |
+
+`ping-async` replaced the first choice, `surge-ping`, because that one needs
+administrator rights on Windows. Nothing in the app needs them.
 
 ## 3. Your network
 
