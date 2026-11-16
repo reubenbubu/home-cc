@@ -28,7 +28,7 @@ Not goals for now:
 
 - **App shell:** Tauri 2, building native installers for Windows and Linux.
 - **Back end:** Rust. All network work (SSH, Docker, Proxmox, scanning) happens here.
-- **Screens:** TypeScript with a light front-end framework (proposed: Svelte),
+- **Screens:** TypeScript with Svelte,
   plus xterm.js for terminals.
 - **Secrets:** passwords, SSH keys and API tokens are stored in the operating
   system's keychain (Windows Credential Manager, or the Linux Secret Service),
@@ -208,4 +208,4 @@ The app must work well on all three and when moved between them.
 1. What runs the two Linux VMs on the NAS PC? (section 3)
 2. Which machines run Docker besides the homelab VM? (section 3)
 3. Which machines does Prometheus already watch? (5.3)
-4. Svelte or React for the screens? (section 2)
+4. Which visual style (see the style mockups)?
