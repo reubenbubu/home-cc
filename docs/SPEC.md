@@ -167,7 +167,25 @@ work on the whole stack. Single containers still get the controls above.
 Done when: the owner can see every VM, start and stop it, and take a snapshot
 from the app.
 
-## 6. Safety
+## 6. Screens and layout
+
+The owner uses three monitors: 2560x1440, 3440x1440 ultrawide, and 1920x1080.
+The app must work well on all three and when moved between them.
+
+- The layout resizes smoothly with the window. Nothing is fixed to one size, and
+  there's no sideways scrolling at any of these widths.
+- Content reflows to use the space. Cards and tables add columns on wider
+  screens: for example 2 to 3 columns of machine cards at 1080p, 3 to 4 at
+  1440p, and 5 to 6 on the ultrawide.
+- On the ultrawide, the app can show panels side by side, for example the
+  machine list, a terminal and container logs all at once.
+- Text and controls follow Windows' display scaling, so they stay a readable
+  size if a monitor is scaled to 125% or 150%.
+- The app remembers its window size and position, and which monitor it was on.
+- Done when: every screen is checked at all three resolutions, at 100% and
+  125% scaling, with no cut-off text or overlapping parts.
+
+## 7. Safety
 
 - Anything that deletes or stops things (remove container, cleanup, force stop
   VM, roll back snapshot) asks for confirmation first.
@@ -175,7 +193,7 @@ from the app.
 - The app talks only to machines on the home network that the owner has added
   or approved.
 
-## 7. Build order
+## 8. Build order
 
 1. **This spec.**
 2. **App skeleton:** Tauri app that builds on Windows and Linux, with a sidebar
@@ -185,7 +203,7 @@ from the app.
    stats over SSH (5.3).
 4. **Act on things:** terminal tabs (5.4), then Docker (5.5), then Proxmox (5.6).
 
-## 8. Open questions
+## 9. Open questions
 
 1. What runs the two Linux VMs on the NAS PC? (section 3)
 2. Which machines run Docker besides the homelab VM? (section 3)
