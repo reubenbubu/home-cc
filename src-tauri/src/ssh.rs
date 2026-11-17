@@ -1116,13 +1116,15 @@ async fn load_key_files(login: &Login) -> Vec<KeyFile> {
 }
 
 /// The user's home folder: from HOME on Linux and macOS, from the user profile on Windows.
-fn home_dir() -> Option<PathBuf> {
+/// Also used by `keysetup`, which puts new keys in the .ssh folder in it.
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::home_dir().filter(|p| !p.as_os_str().is_empty())
 }
 
 /// The key files to try, each with the name to call it by in messages: the file chosen
-/// in Settings, or else the usual ones that exist in the user's .ssh folder.
-fn key_candidates(chosen: Option<&Path>, home: Option<&Path>) -> Vec<(PathBuf, String)> {
+/// in Settings, or else the usual ones that exist in the user's .ssh folder. `keysetup`
+/// uses the same list to show which key this PC logs in with.
+pub(crate) fn key_candidates(chosen: Option<&Path>, home: Option<&Path>) -> Vec<(PathBuf, String)> {
     if let Some(chosen) = chosen.filter(|p| !p.as_os_str().is_empty()) {
         // "~/.ssh/key" is how people write it; nothing expands it for us.
         let path = match (chosen.strip_prefix("~"), home) {

@@ -57,7 +57,7 @@ const SCREENS = [
     async before(page) {
       // The sample data has one machine in each state that waits for the owner; all must be in the picture.
       await page.getByText("This machine's identity has changed").waitFor();
-      await page.getByText("First connection to Media PC").waitFor();
+      await page.getByText("Before the stored password is used for Media PC").waitFor();
       await page.getByText("home-cc has stopped trying this machine").waitFor();
     },
   },
@@ -80,6 +80,68 @@ const SCREENS = [
       await page.getByRole("button", { name: "Edit NAS" }).click();
       await page.getByText("A password is stored").waitFor();
       await page.getByText("Identity home-cc remembers").waitFor();
+    },
+  },
+  // Key login, in the form (components/KeySetup.svelte), with each way it can end in the sample data.
+  {
+    name: "machines-keys",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Edit Homelab VM" }).click();
+      const form = page.locator("form");
+      await form.getByRole("button", { name: "Show key login" }).click();
+      await form.getByText("This PC's key", { exact: true }).waitFor();
+      await form.getByRole("button", { name: "Set up key login", exact: true }).click();
+      await form.getByText("Key login works.").waitFor();
+    },
+  },
+  {
+    name: "machines-keys-approve",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Edit Media PC" }).click();
+      const form = page.locator("form");
+      await form.getByRole("button", { name: "Show key login" }).click();
+      await form.getByRole("button", { name: "Set up key login", exact: true }).click();
+      await form.getByText("Before the password is used for Media PC, check its identity.").waitFor();
+    },
+  },
+  {
+    name: "machines-keys-refused",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Edit NAS" }).click();
+      const form = page.locator("form");
+      await form.getByRole("button", { name: "Show key login" }).click();
+      await form.getByRole("button", { name: "Set up key login", exact: true }).click();
+      await form.getByText("still didn't work").waitFor();
+    },
+  },
+  {
+    // From the card of a machine whose login failed: the form opens with key login showing.
+    name: "machines-keys-card",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await page.locator("article", { hasText: "Pi-hole 1" }).getByRole("button", { name: "Set up key login" }).click();
+      const form = page.locator("form");
+      await form.getByText("This PC's key", { exact: true }).waitFor();
+      await form.getByRole("button", { name: "Set up key login", exact: true }).click();
+      await form.getByText("no password is typed or stored").waitFor();
+    },
+  },
+  {
+    name: "machines-keys-new",
+    path: "/machines?nokey",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Edit Homelab VM" }).click();
+      const form = page.locator("form");
+      await form.getByRole("button", { name: "Show key login" }).click();
+      await form.getByText("This PC has no SSH key yet").waitFor();
     },
   },
   { name: "settings", path: "/settings", ready: "form" },

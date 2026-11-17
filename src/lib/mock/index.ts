@@ -11,6 +11,8 @@ import type {
   Disk,
   Found,
   HostKey,
+  KeySetupOutcome,
+  LocalKey,
   MachineStats,
   MachineStatsEntry,
   Os,
@@ -473,6 +475,112 @@ export function installMock() {
   /** For "?awkward": set once an approval has been overtaken by a newer identity. */
   let raced = false;
 
+  // Key login. This PC has an ed25519 key, unless "?nokey" is in the address (to show making one).
+  const samplePublicKey = (seed: number, comment: string) => {
+    const rand = seeded(seed);
+    let text = "AAAAC3NzaC1lZDI1NTE5AAAAI";
+    for (let i = 0; i < 43; i++) text += BASE64[Math.floor(rand() * 64)] ?? "A";
+    return `ssh-ed25519 ${text} ${comment}`;
+  };
+  const keyPath = "C:\\Users\\sam\\.ssh\\id_ed25519";
+  const noKey: LocalKey = {
+    path: null,
+    name: null,
+    fromSettings: false,
+    publicKey: null,
+    algorithm: null,
+    fingerprint: null,
+    problem: null,
+    note: null,
+    others: [],
+    newKeyPath: keyPath,
+  };
+  const madeKey = (): LocalKey => ({
+    ...noKey,
+    path: keyPath,
+    name: "id_ed25519",
+    publicKey: samplePublicKey(77, "sam@DESKTOP-MAIN"),
+    algorithm: "ssh-ed25519",
+    fingerprint: sampleKey(77).fingerprint,
+    newKeyPath: null,
+  });
+  let localKey: LocalKey = query.has("nokey") ? noKey : madeKey();
+  /** Machines that hold this PC's key already. */
+  const keyed = new Set<number>();
+  /** Identities a key setup showed, waiting for the owner's approval. */
+  const keyOffers = new Map<number, HostKey>();
+
+  /** A key setup by the same rules as the back end: a password (typed or stored) only goes to an approved
+   *  identity, a changed identity stops everything, and a key login is tried at the end. The sample machines:
+   *  the Linux VMs take the key and then key login works; Media PC wants its identity approved first; NAS takes
+   *  the key but still refuses a key login (Windows administrator file); Pi-hole 1 has no password stored, and
+   *  refuses root's password. */
+  async function setupKeyLogin(d: MockDevice, password: string | null): Promise<KeySetupOutcome> {
+    const user = d.sshUser;
+    if (!user) throw "This machine has no SSH user. Add one and save, then try again.";
+    if (!localKey.publicKey) throw "This PC has no SSH key yet. Make one first (above).";
+    await sleep(1300);
+    if (d.pattern === "gone") {
+      throw `Couldn't connect to ${d.name} to set up key login. ${d.host} did not answer. Check that it is switched on and on the network.`;
+    }
+    const key = serverKey(d);
+    const known = pinned.get(d.id) ?? null;
+    if (known && known.fingerprint !== key.fingerprint) {
+      keyOffers.set(d.id, key);
+      return { outcome: "approve", offeredKey: key, expectedFingerprint: known.fingerprint };
+    }
+    // Remembered on first contact (not approved), as the stats timer does.
+    if (!known) pinned.set(d.id, key);
+    const windows = d.os === "windows";
+    if (d.access === "password" && !keyed.has(d.id)) {
+      if (!password && !hasPassword(d)) {
+        throw (
+          `home-cc couldn't get in to ${d.name} with a key, and no password is typed or stored for it. Type ${user}'s ` +
+          "password in the box above, then press Set up key login again. It is used for this once and stored only if " +
+          `you press Save. What home-cc saw: Could not log in to ${d.host} as ${user}. The key file id_ed25519 was not ` +
+          "accepted. Check the user name, and that this PC's public key has been added to that machine, or store a password for it."
+        );
+      }
+      if (!approved.has(d.id)) {
+        keyOffers.set(d.id, key);
+        return { outcome: "approve", offeredKey: key, expectedFingerprint: null };
+      }
+      if (user === "root") {
+        throw (
+          `Could not log in to ${d.host} as root. The key file id_ed25519 and ` +
+          `${password ? "the password typed in the form" : "the stored password"} were not accepted. Check the user name ` +
+          "and the password. Many Linux systems don't let root log in with a password over SSH (PermitRootLogin in " +
+          "/etc/ssh/sshd_config). Use another user, or add the key by hand."
+        );
+      }
+    }
+    const file = windows
+      ? "C:\\ProgramData\\ssh\\administrators_authorized_keys"
+      : user === "root" ? "/root/.ssh/authorized_keys" : `/home/${user}/.ssh/authorized_keys`;
+    const already = keyed.has(d.id);
+    keyed.add(d.id);
+    const what = already ? `This PC's key was already in ${file} on ${d.name}` : `home-cc added this PC's key to ${file} on ${d.name}`;
+    if (d.name === "NAS") {
+      return {
+        outcome: "done",
+        file,
+        alreadyThere: already,
+        keyLoginWorks: false,
+        windows,
+        message: `${what}, but logging in with the key alone still didn't work. What home-cc saw: Could not log in to ${d.host} as ${user}. The key file id_ed25519 was not accepted.`,
+        advice:
+          `${user} is an administrator, so the key has to be in C:\\ProgramData\\ssh\\administrators_authorized_keys ` +
+          "(home-cc put it there), open to Administrators and SYSTEM only. Check C:\\ProgramData\\ssh\\sshd_config on NAS " +
+          "(PubkeyAuthentication must not be no; after a change, run Restart-Service sshd in PowerShell as administrator), " +
+          "and Windows' own log of the refusal: Event Viewer, Applications and Services Logs, OpenSSH, Operational.",
+      };
+    }
+    // From now on the key gets in by itself.
+    d.access = "key";
+    retryPaused(d.id);
+    return { outcome: "done", file, alreadyThere: already, keyLoginWorks: true, windows, message: `Key login works. ${what}, and then logged in with the key alone.`, advice: null };
+  }
+
   // Scan simulation.
   let scanTimer: ReturnType<typeof setInterval> | null = null;
   let scanCancelled = false;
@@ -745,6 +853,31 @@ export function installMock() {
       // Exactly the identity the owner was shown, replacing any stored before.
       pinned.set(d.id, offered);
       approved.add(d.id);
+    },
+
+    local_ssh_key: () => ({ ...localKey }),
+    create_ssh_key: async ({ passphrase }: { passphrase: string | null }) => {
+      if (localKey.publicKey) throw "This PC already has an SSH key, so home-cc didn't make another.";
+      await sleep(700);
+      localKey = madeKey();
+      if (passphrase) secrets.add("ssh-key-passphrase");
+      return { ...localKey };
+    },
+    setup_key_login: ({ deviceId, password }: { deviceId: number; password: string | null }) => setupKeyLogin(find(deviceId), password),
+    approve_key_setup_identity: ({ deviceId, fingerprint }: { deviceId: number; fingerprint: string }) => {
+      const d = find(deviceId);
+      const offered = keyOffers.get(d.id);
+      if (!offered || offered.fingerprint !== fingerprint) {
+        throw "This machine has shown a different identity since, or its address changed. Try setting up key login again and check the identity it shows then.";
+      }
+      pinned.set(d.id, offered);
+      approved.add(d.id);
+      keyOffers.delete(d.id);
+      // The card was waiting for this approval too: it reads the machine again.
+      setTimeout(() => {
+        if (d.sshUser && entries.has(d.id)) readStats(d);
+        emit("stats-changed");
+      }, 600);
     },
   };
 

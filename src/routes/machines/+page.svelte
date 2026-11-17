@@ -18,6 +18,7 @@
   import { macToSend, repointed } from "$lib/net";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import KeySetup from "$lib/components/KeySetup.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
   import Problem from "$lib/components/Problem.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
@@ -357,6 +358,17 @@
           <span class="mono path">C:\ProgramData\ssh\administrators_authorized_keys</span>, not in the user's own .ssh folder.
         </p>
       {/if}
+      <!-- Starts afresh for each machine opened in the form. -->
+      {#key editing}
+        <KeySetup
+          device={typeof editing === "number" ? (devices.byId.get(editing) ?? null) : null}
+          os={form.os}
+          typed={{ host: form.host, user: form.sshUser ?? "", port: Number(form.sshPort) || 22 }}
+          {password}
+          {hasPassword}
+          onpasswordremoved={() => (hasPassword = false)}
+        />
+      {/key}
       <label>Notes <input bind:value={form.notes} /></label>
       {#if formError}<Problem problem={formError} />{/if}
       <div class="form-actions">
