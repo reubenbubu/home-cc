@@ -19,7 +19,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::task::JoinSet;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 pub struct Pace {
@@ -61,11 +61,13 @@ pub struct NameMemory {
     known: HashMap<String, (Ipv4Addr, Instant)>,
     /// Names with a lookup still out.
     asking: HashSet<String>,
+    /// Told each time a lookup ends, for whoever is waiting on one.
+    answer_in: Arc<Notify>,
 }
 
 impl NameMemory {
     pub fn new(keep: Duration) -> Self {
-        Self { keep, known: HashMap::new(), asking: HashSet::new() }
+        Self { keep, known: HashMap::new(), asking: HashSet::new(), answer_in: Arc::new(Notify::new()) }
     }
 
     /// A lookup has ended, in this round or long after it.
@@ -80,6 +82,7 @@ impl NameMemory {
                 self.known.remove(name);
             }
         }
+        self.answer_in.notify_waiters();
     }
 
     fn address(&self, name: &str) -> Option<Ipv4Addr> {
@@ -184,6 +187,11 @@ pub async fn os_lookup(name: String) -> Option<Ipv4Addr> {
 /// moves on after `wait`. A name not answered by then is taken to be where
 /// `memory` last saw it, if that was not long ago, and otherwise counts as
 /// not found. Its lookup runs on, for the next round to use.
+///
+/// A name whose lookup is still out from an earlier call is not asked about
+/// a second time. If `memory` has an address for it, that is used at once;
+/// if it has none, the lookup that is out is waited for like a new one, so
+/// a name is never called not found without having had `wait` to answer.
 pub async fn resolve<F, Fut>(
     targets: &[Target],
     own: &HashSet<Ipv4Addr>,
@@ -197,27 +205,43 @@ where
 {
     let names: BTreeSet<&str> = targets.iter().map(|t| t.host.trim()).filter(|host| is_name(host)).collect();
     if !names.is_empty() {
-        let mut lookups = JoinSet::new();
-        {
+        // The names this call waits for an answer about.
+        let mut awaited: Vec<&str> = Vec::new();
+        let answer_in = {
             let mut remembered = lock(memory);
             let keep = remembered.keep;
             remembered.known.retain(|_, (_, learned)| learned.elapsed() <= keep);
             for name in names {
-                // A lookup left over from an earlier round will answer for this name.
-                if !remembered.asking.insert(name.to_string()) {
+                if remembered.asking.insert(name.to_string()) {
+                    let (name, memory, job) = (name.to_string(), memory.clone(), lookup(name.to_string()));
+                    // On its own, not tied to this call: it must end and free
+                    // the name even if the caller gives up on the round.
+                    tokio::spawn(async move {
+                        let answer = job.await;
+                        lock(&memory).answered(&name, answer);
+                    });
+                } else if remembered.address(name).is_some() {
+                    // A lookup left over from an earlier round will answer
+                    // for this name; until then there is its last address.
                     continue;
                 }
-                let (name, memory, job) = (name.to_string(), memory.clone(), lookup(name.to_string()));
-                lookups.spawn(async move {
-                    let answer = job.await;
-                    lock(&memory).answered(&name, answer);
-                });
+                awaited.push(name);
+            }
+            remembered.answer_in.clone()
+        };
+        // The ones still out at the end are left to finish by themselves.
+        let deadline = Instant::now() + wait;
+        loop {
+            // Made before looking, so an answer that comes in between is not missed.
+            let told = answer_in.notified();
+            let still_out = {
+                let remembered = lock(memory);
+                awaited.iter().any(|name| remembered.asking.contains(*name))
+            };
+            if !still_out || tokio::time::timeout_at(deadline, told).await.is_err() {
+                break;
             }
         }
-        let deadline = Instant::now() + wait;
-        while let Ok(Some(_)) = tokio::time::timeout_at(deadline, lookups.join_next()).await {}
-        // The ones still out are left to finish by themselves.
-        lookups.detach_all();
     }
     let remembered = lock(memory);
     let locate = |host: &str| match host.parse::<Ipv4Addr>() {
@@ -780,6 +804,82 @@ mod tests {
         assert_eq!(round().await, at("192.168.68.61"));
         tokio::time::sleep(Duration::from_millis(450)).await;
         assert_eq!(round().await, [probe(0, Place::Nowhere)]);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_still_out_from_an_earlier_round_is_waited_for_when_nothing_is_remembered() {
+        // A name that has never resolved yet, and a name service that takes
+        // longer than the first round has patience for.
+        let service = NameService::answering(60);
+        service.slowness.store(80, Ordering::SeqCst);
+        let (memory, own, targets) = (memory(300_000), HashSet::new(), named(&["nas.local"]));
+        let round =
+            |wait_ms| resolve(&targets, &own, service.lookup(), Duration::from_millis(wait_ms), &memory);
+
+        assert_eq!(round(10).await, [probe(0, Place::Nowhere)]);
+        // The next call starts no second lookup, but it does not come back
+        // empty-handed at once either: it waits for the one that is out, and
+        // only until that has answered.
+        let started = std::time::Instant::now();
+        assert_eq!(round(3_000).await, [at(0, "192.168.68.60")]);
+        assert!(started.elapsed() < Duration::from_millis(1_500), "{:?}", started.elapsed());
+        assert_eq!(service.asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_lookup_that_is_still_out_has_the_same_limit() {
+        let service = NameService::answering(60);
+        service.slowness.store(30_000, Ordering::SeqCst);
+        let (memory, own, targets) = (memory(300_000), HashSet::new(), named(&["nas.local", "192.168.68.9"]));
+        let round =
+            |wait_ms| resolve(&targets, &own, service.lookup(), Duration::from_millis(wait_ms), &memory);
+        let nowhere = [probe(0, Place::Nowhere), at(1, "192.168.68.9")];
+
+        assert_eq!(round(10).await, nowhere);
+        let started = std::time::Instant::now();
+        assert_eq!(round(120).await, nowhere);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(120) && took < Duration::from_secs(5), "{took:?}");
+        assert_eq!(service.asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_still_out_is_not_waited_for_when_an_address_is_remembered() {
+        let service = NameService::answering(60);
+        let (memory, own, targets) = (memory(300_000), HashSet::new(), named(&["nas.local"]));
+        let round =
+            |wait_ms| resolve(&targets, &own, service.lookup(), Duration::from_millis(wait_ms), &memory);
+        assert_eq!(round(1_000).await, [at(0, "192.168.68.60")]);
+
+        // The name service stops answering; a round gives up on it...
+        service.slowness.store(30_000, Ordering::SeqCst);
+        assert_eq!(round(10).await, [at(0, "192.168.68.60")]);
+        // ...and the next one goes by what is remembered, without waiting.
+        let started = std::time::Instant::now();
+        assert_eq!(round(3_000).await, [at(0, "192.168.68.60")]);
+        assert!(started.elapsed() < Duration::from_millis(1_500), "{:?}", started.elapsed());
+        assert_eq!(service.asked.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_goes_on_and_frees_its_name_when_the_round_is_given_up() {
+        let service = NameService::answering(60);
+        service.slowness.store(60, Ordering::SeqCst);
+        let (memory, own, targets) = (memory(300_000), HashSet::new(), named(&["nas.local"]));
+        // The caller drops the round while it is waiting for the name.
+        let given_up = tokio::time::timeout(
+            Duration::from_millis(10),
+            resolve(&targets, &own, service.lookup(), Duration::from_secs(3), &memory),
+        );
+        assert!(given_up.await.is_err());
+        // The answer still arrives and is there for the next round, which
+        // has no need to ask or wait.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        service.slowness.store(30_000, Ordering::SeqCst);
+        let again = resolve(&targets, &own, service.lookup(), Duration::from_millis(10), &memory).await;
+        assert_eq!(again, [at(0, "192.168.68.60")]);
+        assert!(memory.lock().unwrap().asking.contains("nas.local"), "a new lookup was started");
+        assert_eq!(service.asked.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

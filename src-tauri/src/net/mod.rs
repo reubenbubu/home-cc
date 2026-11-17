@@ -281,8 +281,9 @@ pub fn own_devices() -> BTreeSet<i64> {
 ///
 /// The names are looked up as `check` does it and share its memory: all at
 /// once, for 3 seconds at the most, and a name that is slow to answer is
-/// taken to be where it was in the last few minutes. Must run inside the
-/// tokio runtime.
+/// taken to be where it was in the last few minutes. A name `check` is
+/// still asking about, with nothing known for it yet, gets those 3 seconds
+/// too before it is left out. Must run inside the tokio runtime.
 pub async fn locate(targets: Vec<Target>) -> Vec<(i64, Located)> {
     locate_on(targets, own_ips(), status::os_lookup, status::NAME_WAIT, &status::KEPT.names).await
 }
@@ -565,6 +566,35 @@ mod tests {
             locate_on(vec![target(1, "nas.lan", None)], own(), quiet, Duration::from_millis(50), &kept.names)
                 .await;
         assert_eq!(located, [(1, Located::At(ip("192.168.68.60")))]);
+    }
+
+    #[tokio::test]
+    async fn locate_waits_for_a_lookup_a_status_round_left_running() {
+        // A device just added by name: nothing is remembered for it, and the
+        // name service takes longer than the status round waited.
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow = |_name: String| {
+            let asked = asked.clone();
+            async move {
+                asked.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Some(ip("192.168.68.60"))
+            }
+        };
+        let kept = kept();
+        let targets = vec![target(1, "nas.local", None)];
+        let probes =
+            status::resolve(&targets, &own().await, slow, Duration::from_millis(10), &kept.names).await;
+        assert_eq!(probes.iter().map(|p| p.place).collect::<Vec<_>>(), [status::Place::Nowhere]);
+
+        // The scan asks where it is while that lookup is still out. It must
+        // not be left out (the scan would add it a second time): the answer
+        // is waited for, and no second lookup is started.
+        let started = std::time::Instant::now();
+        let located = locate_on(targets, own(), slow, Duration::from_secs(3), &kept.names).await;
+        assert_eq!(located, [(1, Located::At(ip("192.168.68.60")))]);
+        assert!(started.elapsed() < Duration::from_millis(1_500), "{:?}", started.elapsed());
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
