@@ -388,8 +388,7 @@ impl Docker {
     /// A login problem the machine stats already ran into, so the Docker screen
     /// doesn't knock on the same door again by itself.
     fn stats_login_problem(app: &AppHandle, device_id: i64) -> Option<Problem> {
-        let entries = app.state::<Monitor>().stats_entries(&app.state::<Inventory>()).ok()?;
-        let entry = entries.into_iter().find(|e| e.device_id == device_id && e.paused)?;
+        let entry = app.state::<Monitor>().stats_entry(device_id).filter(|e| e.paused)?;
         let kind = match entry.error_kind? {
             StatsErrorKind::NewHost => ProblemKind::NewHost,
             StatsErrorKind::HostKeyChanged => ProblemKind::HostKeyChanged,
