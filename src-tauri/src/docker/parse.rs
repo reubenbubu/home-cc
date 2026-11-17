@@ -24,6 +24,9 @@ pub struct Container {
     /// Without the leading "/" Docker keeps on names.
     pub name: String,
     pub image: String,
+    /// The local image it runs ("sha256:…"). Can differ from what `image` names now, after a newer image
+    /// was pulled for that tag and the container wasn't recreated.
+    pub image_id: Option<String>,
     /// "running", "exited", "paused", "restarting", "created", "removing" or "dead".
     pub state: String,
     /// "healthy", "unhealthy" or "starting", for containers that have a health check.
@@ -75,7 +78,7 @@ pub struct ContainerStats {
 /// of JSON per container. `index` is used for Health because a container without a
 /// health check has no such key, and Docker's templates stop at a missing key.
 pub const INSPECT_FORMAT: &str = concat!(
-    r#"{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"#,
+    r#"{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"imageId":{{json .Image}},"#,
     r#""state":{{json .State.Status}},"startedAt":{{json .State.StartedAt}},"#,
     r#""finishedAt":{{json .State.FinishedAt}},"exitCode":{{json .State.ExitCode}},"#,
     r#""health":{{with index .State "Health"}}{{json .Status}}{{else}}null{{end}},"#,
@@ -114,6 +117,7 @@ fn container(line: &str) -> Option<Container> {
         id: id.to_ascii_lowercase(),
         name: if name.is_empty() { id[..12].to_string() } else { name },
         image: text(v.get("image").and_then(Value::as_str).unwrap_or("")),
+        image_id: v.get("imageId").and_then(Value::as_str).filter(|i| is_image_id(i)).map(str::to_ascii_lowercase),
         exit_code: if running { None } else { v.get("exitCode").and_then(Value::as_i64) },
         started_at: v.get("startedAt").and_then(Value::as_str).and_then(unix_time),
         finished_at: v.get("finishedAt").and_then(Value::as_str).and_then(unix_time),
@@ -135,6 +139,11 @@ fn split_files(list: &str) -> Vec<String> {
 /// A full or short container id: hex only, so it is safe to put in a command.
 pub fn is_container_id(id: &str) -> bool {
     (12..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A local image id as Docker gives it: "sha256:" and 64 hex characters.
+pub fn is_image_id(id: &str) -> bool {
+    id.strip_prefix("sha256:").is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// `NetworkSettings.Ports`: {"80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8080"}, ...], "443/tcp": null}.
@@ -591,7 +600,7 @@ mod tests {
     fn inspect_sample() -> String {
         [
             format!(
-                r#"{{"id":"{ID_A}","name":"/media-jellyfin-1","image":"jellyfin/jellyfin:latest","state":"running","startedAt":"2026-11-13T18:39:38.798262602Z","finishedAt":"0001-01-01T00:00:00Z","exitCode":0,"health":"healthy","labels":{{"com.docker.compose.project":"media","com.docker.compose.project.config_files":"/srv/media/compose.yml,/srv/media/compose.override.yml","com.docker.compose.project.working_dir":"/srv/media","com.docker.compose.service":"jellyfin"}},"ports":{{"8096/tcp":[{{"HostIp":"0.0.0.0","HostPort":"8096"}},{{"HostIp":"::","HostPort":"8096"}}],"8920/tcp":null,"1900/udp":[{{"HostIp":"192.168.68.21","HostPort":"1900"}}]}}}}"#
+                r#"{{"id":"{ID_A}","name":"/media-jellyfin-1","image":"jellyfin/jellyfin:latest","imageId":"sha256:{ID_B}","state":"running","startedAt":"2026-11-13T18:39:38.798262602Z","finishedAt":"0001-01-01T00:00:00Z","exitCode":0,"health":"healthy","labels":{{"com.docker.compose.project":"media","com.docker.compose.project.config_files":"/srv/media/compose.yml,/srv/media/compose.override.yml","com.docker.compose.project.working_dir":"/srv/media","com.docker.compose.service":"jellyfin"}},"ports":{{"8096/tcp":[{{"HostIp":"0.0.0.0","HostPort":"8096"}},{{"HostIp":"::","HostPort":"8096"}}],"8920/tcp":null,"1900/udp":[{{"HostIp":"192.168.68.21","HostPort":"1900"}}]}}}}"#
             ),
             "template parsing error: template: :1:237: something odd".to_string(),
             format!(
@@ -611,6 +620,7 @@ mod tests {
         let jelly = list.iter().find(|c| c.id == ID_A).unwrap();
         assert_eq!(jelly.name, "media-jellyfin-1", "no leading slash");
         assert_eq!(jelly.state, "running");
+        assert_eq!(jelly.image_id, Some(format!("sha256:{ID_B}")));
         assert_eq!(jelly.health.as_deref(), Some("healthy"));
         assert_eq!(jelly.exit_code, None, "a running container has no exit code");
         assert_eq!(jelly.started_at, Some(1_794_595_178));
@@ -639,6 +649,7 @@ mod tests {
         assert_eq!(sonarr.health, None, "\"none\" is no health check");
         assert_eq!(sonarr.exit_code, None, "restarting counts as running");
         assert_eq!(sonarr.config_files, Vec::<String>::new());
+        assert_eq!(sonarr.image_id, None, "output without the image id still reads");
     }
 
     #[test]

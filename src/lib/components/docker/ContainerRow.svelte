@@ -1,11 +1,11 @@
 <script lang="ts">
   // One container in a stack: what it is, how it is doing, and its controls. Stopping and removing ask first,
   // in the row itself.
-  import type { Container, ContainerStats } from "$lib/docker/api";
+  import type { Container, ContainerStats, ImageUpdate } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
   import { devices } from "$lib/devices.svelte";
-  import { containerKey, execCommand, isRunning, portShown, portText, publishedPorts, stateText, stateTone } from "$lib/docker/logic";
+  import { containerKey, execCommand, isRunning, portShown, portText, publishedPorts, stateText, stateTone, updateMark } from "$lib/docker/logic";
   import { bytes } from "$lib/format";
   import { icons } from "$lib/icons";
   import { openTerminal } from "$lib/terminals.svelte";
@@ -18,6 +18,7 @@
     stats,
     now,
     logsOpen = false,
+    update,
     onlogs,
   }: {
     hostId: number;
@@ -26,8 +27,12 @@
     now: number;
     /** True while this container's log is open. */
     logsOpen?: boolean;
+    /** Its image compared with its registry, once checked. */
+    update?: ImageUpdate;
     onlogs: (c: Container) => void;
   } = $props();
+
+  const mark = $derived(updateMark(update));
 
   let asking = $state<"stop" | "remove" | null>(null);
 
@@ -73,7 +78,10 @@
     <span class="dot {tone}" role="img" aria-label={stateText(c, now)}></span>
     <div class="names">
       <span class="name ellipsis" title={c.name}>{label}</span>
-      <span class="image muted small mono ellipsis" title={c.image}>{c.image}</span>
+      <span class="image-line">
+        {#if mark}<span class="mark {mark.tone}" title={mark.title}>{mark.text}</span>{/if}
+        <span class="image muted small mono ellipsis" title={c.image}>{c.image}</span>
+      </span>
     </div>
   </div>
   <div class="info">
@@ -147,7 +155,26 @@
   .who { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
   .names { display: flex; flex-direction: column; min-width: 0; }
   .name { font-weight: 500; }
-  .image { font-size: 0.8rem; }
+  .image { font-size: 0.8rem; min-width: 0; }
+  .image-line { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; }
+  /* What the last update check says about the image: "Update", "Built here", "Can't check". */
+  /* Kept whole; the image name gives way first. Cut short only when the line is narrower than the mark. */
+  .mark {
+    flex: none;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 0.4rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+  .mark.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .mark.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
   .state { min-width: 0; color: var(--text-soft); }
   .state.bad { color: var(--bad); }
   .state.warn { color: var(--warn); }

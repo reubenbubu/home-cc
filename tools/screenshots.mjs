@@ -38,7 +38,8 @@ const SIZES = [
 ];
 
 const SCREENS = [
-  { name: "overview", path: "/", ready: ".card" },
+  // With the Containers panel's count of image updates, which comes after the hosts are read and checked.
+  { name: "overview", path: "/", ready: ".card", before: (page) => page.getByText("6 updates", { exact: true }).waitFor({ timeout: 15_000 }) },
   { name: "network", path: "/network", ready: "table" },
   {
     name: "network-scanning",
@@ -306,8 +307,20 @@ const SCREENS = [
     name: "docker",
     path: "/docker",
     ready: "article",
-    // CPU and memory are read after the list; the picture should have them.
-    before: (page) => page.getByText("612 MB").waitFor(),
+    // CPU and memory are read after the list, and the images checked for updates; the picture should have them.
+    async before(page) {
+      await page.getByText("612 MB").waitFor();
+      await page.getByText("5 updates in 2 stacks and 1 other container").waitFor();
+    },
+  },
+  {
+    name: "docker-updates",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Update all…" }).click();
+      await page.getByRole("heading", { name: "Updates on Homelab VM" }).waitFor();
+    },
   },
   {
     name: "docker-logs",
@@ -1428,6 +1441,171 @@ async function checkFlows(browser, url) {
         await page.getByRole("button", { name: "Yes, remove them from Homelab VM" }).click();
         await page.getByText(/^Removed \d+ things?, freeing about/).waitFor();
         await page.getByText("postgres:14: Error response from daemon").waitFor();
+      },
+    },
+    {
+      what: "Docker updates: newer images are marked on their rows and counted on the stack cards, the host tab and in one line",
+      path: "/docker",
+      async run(page) {
+        await page.getByText("5 updates in 2 stacks and 1 other container").waitFor();
+        const tab = page.getByRole("tab", { name: /Homelab VM/ });
+        await tab.locator(".badge", { hasText: /^6 updates$/ }).waitFor();
+        const media = page.getByRole("article", { name: "Stack media" });
+        await media.getByText("3 updates", { exact: true }).waitFor();
+        await page.getByRole("article", { name: "Stack photos" }).getByText("2 updates", { exact: true }).waitFor();
+        const row = (name) => page.locator(".row", { has: page.getByRole("button", { name: `Logs of ${name}` }) });
+        const mark = async (name) => ((await row(name).locator(".mark").count()) ? (await row(name).locator(".mark").textContent()).trim() : null);
+        const want = {
+          "media-sonarr-1": "Update",
+          "media-prowlarr-1": "Update",
+          "media-jellyfin-1": null,
+          "speedtest-tracker": "Update",
+          dashboard: "Built here",
+          "nas-backup": "Can't check",
+        };
+        for (const [name, text] of Object.entries(want)) {
+          const got = await mark(name);
+          if (got !== text) throw new Error(`${name} is marked "${got}", not "${text}"`);
+        }
+        const title = await row("media-sonarr-1").locator(".mark").getAttribute("title");
+        if (!/[0-9a-f]{12} → [0-9a-f]{12}/.test(title ?? "")) throw new Error(`the mark doesn't say old → new: "${title}"`);
+        if ((await page.getByRole("tab", { name: /Monitoring/ }).locator(".badge").count()) !== 0) throw new Error("an up-to-date host has a count");
+        // The image that couldn't be checked opens the updates, which say why.
+        await page.getByRole("button", { name: "1 image couldn't be checked" }).click();
+        await page.getByText("401 Unauthorized").first().waitFor();
+        await page.getByText("wants a login this host doesn't have").waitFor();
+      },
+    },
+    {
+      what: "Docker updates: Check for updates asks the host again, not just the last answer, and says when it last checked",
+      path: "/docker",
+      async run(page) {
+        await page.getByText(/^checked (just now|\d+ s ago)$/).waitFor();
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          window.__checks = [];
+          tauri.invoke = (cmd, args, ...rest) => {
+            if (cmd === "docker_check_updates") window.__checks.push(args);
+            return invoke(cmd, args, ...rest);
+          };
+        });
+        await page.getByRole("button", { name: "Check for updates" }).click();
+        await page.getByText("Checking for newer images…").waitFor();
+        await page.getByText("Checking for newer images…").waitFor({ state: "detached" });
+        const asked = await page.evaluate(() => window.__checks);
+        if (!asked.some((a) => a.auto === false && a.images == null)) throw new Error(`asked ${JSON.stringify(asked)}`);
+        await page.getByText(/^checked (just now|\d+ s ago)$/).waitFor();
+      },
+    },
+    {
+      what: "Docker updates: a stack's Update lists what it pulls and restarts, asks first, updates only what is ticked and clears their marks",
+      path: "/docker",
+      async run(page) {
+        await page.getByText("5 updates in 2 stacks and 1 other container").waitFor();
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          window.__updates = [];
+          tauri.invoke = (cmd, args, ...rest) => {
+            if (cmd === "docker_update_stack") window.__updates.push(args);
+            return invoke(cmd, args, ...rest);
+          };
+        });
+        const media = page.getByRole("article", { name: "Stack media" });
+        await media.getByRole("button", { name: "Update…" }).click();
+        const panel = page.getByRole("region", { name: "Image updates on Homelab VM" });
+        await panel.getByRole("heading", { name: "Update media" }).waitFor();
+        const box = (service) => panel.getByRole("checkbox", { name: new RegExp(`^${service}\\b`) });
+        if (!(await box("sonarr").isChecked()) || !(await box("radarr").isChecked())) throw new Error("a running service with an update wasn't ticked");
+        if (await box("prowlarr").isChecked()) throw new Error("a stopped service was ticked: updating it would start it");
+        await panel.getByText("Stopped now: updating starts media-prowlarr-1").waitFor();
+        await panel.getByText("Restarts media-sonarr-1").waitFor();
+        await panel.getByText(/^[0-9a-f]{12} → [0-9a-f]{12}$/).first().waitFor();
+        if (await panel.getByText("photos").count()) throw new Error("another stack's updates are in this stack's list");
+        await panel.getByRole("button", { name: "Update 2 containers in 1 stack" }).click();
+        if ((await page.evaluate(() => window.__updates)).length) throw new Error("it updated without asking");
+        await panel.getByRole("button", { name: "Yes, pull and restart them" }).click();
+        await media.getByText("Updating…").waitFor();
+        await panel.getByText("Updated media.").waitFor({ timeout: 15_000 });
+        await panel.getByRole("button", { name: "Clean up…" }).waitFor();
+        const sent = await page.evaluate(() => window.__updates);
+        if (sent.length !== 1 || sent[0].stack !== "media" || JSON.stringify(sent[0].services) !== '["radarr","sonarr"]') {
+          throw new Error(`updated ${JSON.stringify(sent)}`);
+        }
+        await media.getByText("1 update", { exact: true }).waitFor();
+        const sonarr = page.locator(".row", { has: page.getByRole("button", { name: "Logs of media-sonarr-1" }) });
+        await sonarr.locator(".mark").waitFor({ state: "detached" });
+        await page.getByText("3 updates in 2 stacks and 1 other container").waitFor();
+        await page.getByRole("tab", { name: /Homelab VM/ }).locator(".badge", { hasText: /^4 updates$/ }).waitFor();
+        await media.getByText("What Docker said").waitFor();
+      },
+    },
+    {
+      what: "Docker updates: Update all lists every stack with updates and updates them after one yes",
+      path: "/docker",
+      async run(page) {
+        await page.getByRole("button", { name: "Update all…" }).click();
+        const panel = page.getByRole("region", { name: "Image updates on Homelab VM" });
+        await panel.getByRole("heading", { name: "Updates on Homelab VM" }).waitFor();
+        await panel.getByText("immich-machine-learning", { exact: true }).waitFor();
+        await panel.getByText("sonarr", { exact: true }).waitFor();
+        await panel.getByText("Containers outside any stack").waitFor();
+        await panel.getByRole("button", { name: "Update 4 containers in 2 stacks" }).click();
+        await panel.getByRole("button", { name: "Yes, pull and restart them" }).click();
+        await panel.getByText("Updated media, photos.").waitFor({ timeout: 20_000 });
+        await page.getByText("1 update in 1 stack and 1 other container").waitFor();
+      },
+    },
+    {
+      what: "Docker updates: a container outside any stack is offered its new image only, and is told to recreate it by hand",
+      path: "/docker",
+      async run(page) {
+        const others = page.getByRole("article", { name: "Other containers" });
+        await others.getByText("1 update", { exact: true }).waitFor();
+        await others.getByRole("button", { name: "Pull new images…" }).click();
+        const panel = page.getByRole("region", { name: "Containers outside any stack" });
+        await panel.getByText("won't recreate them").waitFor();
+        await panel.getByRole("button", { name: "Pull image" }).click();
+        await panel.getByRole("button", { name: "Yes, pull it" }).click();
+        await panel.getByText("New image pulled. Recreate speedtest-tracker by hand to use it.").waitFor();
+        const row = page.locator(".row", { has: page.getByRole("button", { name: "Logs of speedtest-tracker" }) });
+        await row.getByText("New image pulled").waitFor();
+        // Still counted as an update: the container runs the old image until it is recreated.
+        await page.getByText("5 updates in 2 stacks and 1 other container").waitFor();
+      },
+    },
+    {
+      what: "Drafts: update ticks stay after looking at another screen, and closing the updates lets them go",
+      path: "/docker",
+      async run(page) {
+        await page.getByText("5 updates in 2 stacks and 1 other container").waitFor();
+        await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Update…" }).click();
+        const panel = page.getByRole("region", { name: "Image updates on Homelab VM" });
+        const box = (service) => panel.getByRole("checkbox", { name: new RegExp(`^${service}\\b`) });
+        await box("sonarr").uncheck();
+        await box("prowlarr").check();
+        await awayAndBack(page, "Machines", "Docker");
+        await panel.getByRole("heading", { name: "Update media" }).waitFor();
+        if (await box("sonarr").isChecked()) throw new Error("sonarr was ticked again");
+        if (!(await box("prowlarr").isChecked())) throw new Error("prowlarr lost its tick");
+        await panel.getByRole("button", { name: "Update 2 containers in 1 stack" }).waitFor();
+        await panel.getByRole("button", { name: "Close the updates" }).click();
+        await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Update…" }).click();
+        await panel.getByRole("heading", { name: "Update media" }).waitFor();
+        if (!(await box("sonarr").isChecked()) || (await box("prowlarr").isChecked())) throw new Error("after Close the ticks weren't the usual ones");
+      },
+    },
+    {
+      what: "the Overview's Containers panel counts each host's updates in its one line",
+      path: "/",
+      async run(page) {
+        const panel = page.locator("section.panel", { has: page.getByRole("heading", { name: "Containers" }) });
+        const homelab = panel.locator("li", { has: page.getByRole("button", { name: /Homelab VM/ }) });
+        await homelab.getByText(/\d+ running · \d+ stacks · 6 updates · read/).waitFor({ timeout: 15_000 });
+        const monitoring = panel.locator("li", { has: page.getByRole("button", { name: /Monitoring/ }) });
+        await monitoring.getByText(/\d+ running · 1 stack\s+· read/).waitFor({ timeout: 15_000 });
+        if (await monitoring.getByText(/update/).count()) throw new Error("an up-to-date host mentions updates");
       },
     },
     {

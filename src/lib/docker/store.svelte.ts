@@ -12,11 +12,17 @@ import {
   type HostMode,
   type Overview,
   type StackAction,
+  type UpdateCheck,
 } from "./api";
-import { containerKey, keptSelection, shownHosts, stackKey } from "./logic";
+import { containerKey, keptSelection, shownHosts, stackKey, uncheckedImages, updatesByKey } from "./logic";
 
 /** The open host is read again this often while the screen is open. */
 export const REFRESH_SECS = 15;
+/** The screens check a host's images for updates by themselves this often (UPDATES_EVERY in the back end, which
+ *  has the last word), so registries such as Docker Hub aren't asked more than needed. */
+export const UPDATES_EVERY_SECS = 6 * 3600;
+/** After a check of the screens' own failed, they try again no sooner than this. */
+const UPDATES_RETRY_SECS = 15 * 60;
 /** Every host is read again this often while the Overview screen is open. */
 export const OVERVIEW_SECS = 60;
 /** Looks for Docker going on at once. */
@@ -49,6 +55,22 @@ class DockerStore {
   /** Machines being looked at for Docker. */
   probing = new SvelteSet<number>();
   actions = new SvelteMap<string, Action>();
+  /** Each host's last check for image updates. */
+  updates = new SvelteMap<number, UpdateCheck>();
+  /** Why the last check of a host couldn't be done at all (per image problems are in the check itself). */
+  updateErrors = new SvelteMap<number, string>();
+  /** Hosts being checked for updates right now. */
+  checking = new SvelteSet<number>();
+  /** Stack updates under way, per host: the stack being updated now. */
+  updating = new SvelteMap<number, string>();
+  /** How the last update of each host's stacks went, for its panel. */
+  updateResults = new SvelteMap<number, { done: string[]; failed: string[] }>();
+  /** Checks under way, so one the owner asks for waits for the one running. */
+  #checks = new Map<number, Promise<void>>();
+  /** Images (by updateKey) asked about by themselves (a container recreated since the check), so each is asked once. */
+  #askedImages = new Map<number, Set<string>>();
+  /** When the screens' own full check of each host last started (Unix seconds). */
+  #autoAt = new Map<number, number>();
 
   shown = $derived(shownHosts(this.hosts));
   byId = $derived(new Map(this.hosts.map((h) => [h.deviceId, h])));
@@ -132,11 +154,82 @@ class DockerStore {
       this.#put(view.host);
       if (view.overview) this.overviews.set(id, view.overview);
       this.readErrors.delete(id);
+      if (view.overview && !view.host.problem) this.#updatesDue(id);
     } catch (e) {
       this.readErrors.set(id, errorText(e));
     } finally {
       this.reading.delete(id);
     }
+  }
+
+  /** After a host was read: check its images when the screens' own check is due (the back end decides), or ask
+   *  about the images of containers that have no answer yet, once each. Never while it is being updated. */
+  #updatesDue(id: number) {
+    if (this.checking.has(id) || this.updating.has(id)) return;
+    const now = Date.now() / 1000;
+    const check = this.updates.get(id);
+    if (!check || check.checkedAt == null || now - check.checkedAt >= UPDATES_EVERY_SECS) {
+      if (this.updateErrors.has(id) && now - (this.#autoAt.get(id) ?? 0) < UPDATES_RETRY_SECS) return;
+      this.#autoAt.set(id, now);
+      void this.checkUpdates(id, true);
+      return;
+    }
+    const o = this.overviews.get(id);
+    if (!o) return;
+    const asked = this.#askedImages.get(id) ?? new Set<string>();
+    const fresh = uncheckedImages(o, updatesByKey(check), asked);
+    if (fresh.images.length === 0) return;
+    for (const k of fresh.keys) asked.add(k);
+    this.#askedImages.set(id, asked);
+    void this.checkUpdates(id, true, fresh.images);
+  }
+
+  /** Check a host's images for newer ones. `auto` for the screens' own checks, which the back end runs at most
+   *  every few hours (answering with the last check otherwise) and skips while a check is running; the owner's
+   *  wait for it. `images`: only these. */
+  async checkUpdates(id: number, auto: boolean, images: string[] | null = null): Promise<void> {
+    const running = this.#checks.get(id);
+    if (running) {
+      if (auto) return;
+      await running;
+    }
+    const job = (async () => {
+      this.checking.add(id);
+      try {
+        const check = await dockerApi.checkUpdates(id, auto, images);
+        if (check) this.updates.set(id, check);
+        this.updateErrors.delete(id);
+      } catch (e) {
+        this.updateErrors.set(id, errorText(e));
+      } finally {
+        this.checking.delete(id);
+        this.#checks.delete(id);
+      }
+    })();
+    this.#checks.set(id, job);
+    await job;
+  }
+
+  /** Update the ticked services of some stacks, one stack after the other, as the stack actions run (each card
+   *  shows its progress and what Docker said). Then check those images again. */
+  async updateStacks(hostId: number, plan: { stack: string; services: string[]; images: string[] }[]) {
+    if (this.updating.has(hostId) || plan.length === 0) return;
+    const result = { done: [] as string[], failed: [] as string[] };
+    this.updateResults.delete(hostId);
+    for (const p of plan) {
+      this.updating.set(hostId, p.stack);
+      const ok = await this.#run(hostId, stackKey(hostId, p.stack), "Updating", () => dockerApi.updateStack(hostId, p.stack, p.services));
+      (ok ? result.done : result.failed).push(p.stack);
+    }
+    this.updating.delete(hostId);
+    this.updateResults.set(hostId, result);
+    await this.checkUpdates(hostId, false, [...new Set(plan.flatMap((p) => p.images))]);
+  }
+
+  /** For a container outside any stack: pull its image only, then check it again. */
+  async pullImage(hostId: number, c: Container) {
+    const ok = await this.#run(hostId, containerKey(hostId, c.id), "Pulling the new image", () => dockerApi.pullImage(hostId, c.image));
+    if (ok) await this.checkUpdates(hostId, false, [c.image]);
   }
 
   async readStats(id: number) {
@@ -210,17 +303,21 @@ class DockerStore {
     return this.actions.get(key);
   }
 
-  async #run(hostId: number, key: string, doing: string, job: () => Promise<{ output: string }>) {
-    if (this.actions.get(key)?.doing) return;
+  /** Returns whether the job worked. */
+  async #run(hostId: number, key: string, doing: string, job: () => Promise<{ output: string }>): Promise<boolean> {
+    if (this.actions.get(key)?.doing) return false;
     this.actions.set(key, { doing, output: null, error: null });
+    let ok = false;
     try {
       const { output } = await job();
       this.actions.set(key, { doing: null, output: output || null, error: null });
+      ok = true;
     } catch (e) {
       this.actions.set(key, { doing: null, output: null, error: errorText(e) });
     }
     await this.read(hostId, false);
     void this.#statsIfFine(hostId);
+    return ok;
   }
 
   containerAction(hostId: number, c: Container, action: ContainerAction) {

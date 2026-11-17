@@ -7,7 +7,7 @@
   import { goto } from "$app/navigation";
   import { devices } from "$lib/devices.svelte";
   import { docker } from "$lib/docker/store.svelte";
-  import { summarise } from "$lib/docker/logic";
+  import { hostUpdates, summarise, updatesByKey } from "$lib/docker/logic";
   import { relTime } from "$lib/format";
   import { clock } from "$lib/clock.svelte";
   import { icons } from "$lib/icons";
@@ -44,6 +44,7 @@
     {#each hosts as { host, name } (host.deviceId)}
       {@const o = docker.overviews.get(host.deviceId)}
       {@const s = o ? summarise(o) : null}
+      {@const newer = o ? hostUpdates(o, updatesByKey(docker.updates.get(host.deviceId))).count : 0}
       {@const problem = host.problem ?? null}
       <li>
         <button class="host" onclick={() => open(host.deviceId)} title="Open {name} on the Docker screen">
@@ -56,6 +57,7 @@
         {#if s}
           <div class="sub muted small">
             {s.running === 1 ? "1 running" : `${s.running} running`}{s.stacks ? ` · ${s.stacks === 1 ? "1 stack" : `${s.stacks} stacks`}` : ""}
+            {#if newer}· <span class="newer" title="Containers with a newer image in their registry">{newer === 1 ? "1 update" : `${newer} updates`}</span>{/if}
             · read {relTime(o?.readAt, clock.now)}
           </div>
         {:else if !problem}
@@ -99,6 +101,7 @@
   .count { flex: none; font-weight: 500; }
   .of { color: var(--muted); }
   .sub { margin: 0.15rem 0 0 1.35rem; }
+  .newer { color: var(--accent); font-weight: 600; }
   .problem { display: flex; gap: 0.35rem; margin: 0.25rem 0 0 1.35rem; color: var(--text-soft); overflow-wrap: anywhere; }
   .problem :global(svg) { flex: none; margin-top: 0.15rem; color: var(--warn); }
   .attention { list-style: none; margin: 0.3rem 0 0 1.35rem; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }

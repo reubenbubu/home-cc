@@ -17,6 +17,7 @@ mod logs;
 pub mod parse;
 pub mod scripts;
 mod store;
+pub mod updates;
 
 use crate::error::{Error, Result};
 use crate::inventory::{Device, DeviceKind, Inventory, Os, now};
@@ -51,6 +52,9 @@ const LONG: Duration = Duration::from_secs(30 * 60);
 const MAX_LOGS_PER_HOST: usize = 3;
 /// What an action's answer keeps of docker's output.
 const OUTPUT_LINES: usize = 60;
+/// The screens check a host's images for updates by themselves at most this often. The owner's "Check for
+/// updates" asks straight away.
+const UPDATES_EVERY: i64 = 6 * 3600;
 
 /// What stops Docker from being used on a machine, with what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -215,6 +219,23 @@ pub struct Docker {
     problems: Mutex<HashMap<i64, Option<Problem>>>,
     logs: Mutex<HashMap<u32, LogStream>>,
     next_log: AtomicU32,
+    /// The last update check of each host, kept while the app runs.
+    updates: Mutex<HashMap<i64, HostUpdates>>,
+    /// One update check per host at a time.
+    checking: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// What the registries said about a host's images, by image name, and when every image was last asked.
+#[derive(Default, Clone)]
+struct HostUpdates {
+    checked_at: Option<i64>,
+    remote: HashMap<String, updates::Remote>,
+    view: Option<updates::UpdateCheck>,
+}
+
+/// Whether the screens' own check of a host is due.
+fn updates_due(checked_at: Option<i64>, now: i64) -> bool {
+    checked_at.is_none_or(|at| now - at >= UPDATES_EVERY)
 }
 
 /// Machines that may be Docker hosts: tracked, with an SSH user, and not Windows (the
@@ -680,17 +701,108 @@ impl Docker {
             StackAction::Pull | StackAction::Build | StackAction::Up => LONG,
             StackAction::Down | StackAction::Restart => SLOW,
         };
-        let out = self.run(app, &d, &script, limit).await?;
+        self.run_action(app, &d, &script, limit).await
+    }
+
+    /// Run a compose or pull script; on failure, give the end of what it printed.
+    async fn run_action(&self, app: &AppHandle, d: &Device, script: &str, limit: Duration) -> Result<ActionOutput> {
+        let out = self.run(app, d, script, limit).await?;
         if out.exit_status == Some(0) {
             return Ok(ActionOutput { output: tail(&out) });
         }
-        let p = self.refused(&d, &out);
+        let p = self.refused(d, &out);
         if p.kind == ProblemKind::Other {
             // Compose's own output says what went wrong; give the end of it, not just the first line.
             let what = tail(&out);
             return Err(Error::Network(if what.is_empty() { p.message } else { what }));
         }
         Err(p.into())
+    }
+
+    /// Update some services of a stack: pull their new images and recreate only those containers.
+    pub async fn update_stack(&self, app: &AppHandle, device_id: i64, project: &str, services: &[String]) -> Result<ActionOutput> {
+        let d = Self::device(app, device_id)?;
+        if services.is_empty() || services.len() > 200 || !services.iter().all(|s| scripts::is_service_name(s)) {
+            return Err(Error::Invalid("Those aren't service names home-cc can pass on safely.".into()));
+        }
+        let place = Self::stack_place(app, &d, project)?;
+        let compose = Self::compose(app, &d)?;
+        let script = scripts::stack_update(compose, &place, services).expect("compose is there");
+        self.run_action(app, &d, &script, LONG).await
+    }
+
+    /// Pull the image of a container that isn't in a compose stack. The container keeps running the image it
+    /// was started with: how it was started isn't known, so home-cc doesn't recreate it.
+    pub async fn pull_image(&self, app: &AppHandle, device_id: i64, image: &str) -> Result<ActionOutput> {
+        let d = Self::device(app, device_id)?;
+        if updates::image_ref(image).is_none_or(|r| r.digest.is_some()) {
+            return Err(Error::Invalid(format!("{image} isn't an image name home-cc can pull by tag.")));
+        }
+        self.run_action(app, &d, &scripts::pull_image(image), LONG).await
+    }
+
+    /// Check a host's images for updates (see updates.rs). `auto` is set for the screens' own checks: they
+    /// run at most every UPDATES_EVERY, and never on a host whose login was turned away; otherwise the last
+    /// answer comes back as it is. `only` asks the registries about these images alone, keeping the earlier
+    /// answers for the rest (after an update, say); the containers are always read afresh. Returns None
+    /// when nothing was ever checked.
+    pub async fn check_updates(&self, app: &AppHandle, device_id: i64, auto: bool, only: Option<Vec<String>>) -> Result<Option<updates::UpdateCheck>> {
+        let d = Self::device(app, device_id)?;
+        let host = self.host(app, &d)?;
+        let stored = |me: &Self| me.updates.lock().unwrap().get(&d.id).cloned().unwrap_or_default();
+        let skip = |me: &Self| auto && only.is_none() && !updates_due(stored(me).checked_at, now());
+        if auto && (gate(host.mode, host.problem.as_ref(), true) == Gate::Skip || skip(self)) {
+            return Ok(stored(self).view);
+        }
+        let turn = self.checking.lock().unwrap().entry(d.id).or_default().clone();
+        let _one_at_a_time = turn.lock().await;
+        // Checked by someone else while this one waited.
+        if skip(self) {
+            return Ok(stored(self).view);
+        }
+
+        let out = self.run(app, &d, &scripts::list_containers(), QUICK).await?;
+        let containers = parse::containers(&String::from_utf8_lossy(&out.stdout));
+        if out.exit_status != Some(0) && containers.is_empty() {
+            return Err(self.refused(&d, &out).into());
+        }
+        let pairs: std::collections::BTreeSet<(String, String)> = containers
+            .iter()
+            .filter(|c| parse::is_image_ref(&c.image))
+            .filter_map(|c| Some((c.image.clone(), c.image_id.clone()?)))
+            .collect();
+        let images: std::collections::BTreeSet<String> = pairs.iter().map(|(i, _)| i.clone()).take(updates::MAX_IMAGES).collect();
+        let ids: std::collections::BTreeSet<String> = pairs.iter().map(|(_, id)| id.clone()).collect();
+        let out = self.run(app, &d, &scripts::local_images(&ids, &images), QUICK).await?;
+        let local = updates::local_images(&String::from_utf8_lossy(&out.stdout));
+
+        let before = stored(self);
+        let mut remote = before.remote.clone();
+        let ask: Vec<(String, updates::ImageRef)> = images
+            .iter()
+            .filter(|i| match &only {
+                Some(list) => list.contains(i) || !remote.contains_key(*i),
+                None => true,
+            })
+            .filter_map(|i| {
+                let r = updates::image_ref(i)?;
+                let runs: Vec<&str> = pairs.iter().filter(|(p, _)| p == i).map(|(_, id)| id.as_str()).collect();
+                updates::from_registry(&r, &runs, &local, i).then(|| (i.clone(), r))
+            })
+            .collect();
+        if !ask.is_empty() {
+            let out = self.run(app, &d, &scripts::remote_digests(&ask), LONG).await?;
+            // An image the output didn't get to (cut short) keeps its earlier answer.
+            remote.extend(updates::remote_digests(&String::from_utf8_lossy(&out.stdout)));
+        }
+        remote.retain(|i, _| images.contains(i));
+        let checked_at = if only.is_none() { Some(now()) } else { before.checked_at };
+        let view = updates::UpdateCheck { device_id: d.id, checked_at, images: updates::compare_all(&pairs, &local, &remote) };
+        self.updates
+            .lock()
+            .unwrap()
+            .insert(d.id, HostUpdates { checked_at, remote, view: Some(view.clone()) });
+        Ok(Some(view))
     }
 
     pub fn forget_stack(&self, app: &AppHandle, device_id: i64, project: &str) -> Result<()> {
@@ -970,6 +1082,16 @@ mod tests {
         assert_eq!(gate(HostMode::Auto, Some(&refused), false), Gate::Go, "the owner pressed Try again");
         assert_eq!(gate(HostMode::Auto, Some(&group), true), Gate::Go, "the screen's own reads keep the login");
         assert_eq!(gate(HostMode::Auto, Some(&group), false), Gate::FreshLogin, "Try again picks up the new group");
+    }
+
+    #[test]
+    fn the_screens_check_for_updates_every_few_hours() {
+        let now = 100 * UPDATES_EVERY;
+        assert!(updates_due(None, now), "never checked");
+        assert!(!updates_due(Some(now - 60), now), "a minute ago");
+        assert!(!updates_due(Some(now - UPDATES_EVERY + 1), now));
+        assert!(updates_due(Some(now - UPDATES_EVERY), now));
+        assert!(UPDATES_EVERY >= 3 * 3600, "registries such as Docker Hub limit how often they are asked");
     }
 
     #[test]

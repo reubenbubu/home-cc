@@ -61,6 +61,9 @@ export interface Container {
   id: string;
   name: string;
   image: string;
+  /** The local image it runs ("sha256:…"). Differs from what `image` names now after a newer image was pulled
+   *  and the container wasn't recreated. Null on output that didn't say. */
+  imageId: string | null;
   /** "running", "exited", "paused", "restarting", "created", "removing" or "dead". */
   state: string;
   /** "healthy", "unhealthy" or "starting", for containers with a health check. */
@@ -156,6 +159,43 @@ export interface CleanupResult {
   failures: string[];
 }
 
+/** An image compared with its registry (src-tauri/src/docker/updates.rs).
+ *  - upToDate, available: the answer. builtHere: built or loaded on the host, so not from a registry.
+ *  - pinned: named by digest, so it can't change. needsLogin, unreachable, notFound, rateLimited, failed: the
+ *    registry couldn't answer; `message` says what it said. */
+export type UpdateState =
+  | "upToDate"
+  | "available"
+  | "builtHere"
+  | "pinned"
+  | "needsLogin"
+  | "unreachable"
+  | "notFound"
+  | "rateLimited"
+  | "failed";
+
+/** One image as containers run it (name and local image), compared with its registry. */
+export interface ImageUpdate {
+  image: string;
+  imageId: string;
+  state: UpdateState;
+  /** The digest the running image came from. */
+  current: string | null;
+  /** The digest the registry has for the tag now. */
+  latest: string | null;
+  /** The newer image is on the host already, but the container still runs the old one. */
+  downloaded: boolean;
+  message: string | null;
+}
+
+/** A host's last check for image updates. */
+export interface UpdateCheck {
+  deviceId: number;
+  /** Unix seconds of the last check of every image; null while only some were checked. */
+  checkedAt: number | null;
+  images: ImageUpdate[];
+}
+
 /** Sent as "docker-logs": new lines of a followed log. Each starts with Docker's timestamp. */
 export interface LogLines {
   id: number;
@@ -183,6 +223,15 @@ export const dockerApi = {
   /** Pull and build can take many minutes. */
   stackAction: (deviceId: number, stack: string, action: StackAction) =>
     invoke<ActionOutput>("docker_stack_action", { deviceId, stack, action }),
+  /** Asks the registries, from the host, without pulling. auto: the screens' own check, at most every few
+   *  hours (the last answer otherwise). images: only these, after an update. Null when never checked. */
+  checkUpdates: (deviceId: number, auto: boolean, images: string[] | null) =>
+    invoke<UpdateCheck | null>("docker_check_updates", { deviceId, auto, images }),
+  /** Pulls the services' new images and recreates only those containers. Can take many minutes. */
+  updateStack: (deviceId: number, stack: string, services: string[]) =>
+    invoke<ActionOutput>("docker_update_stack", { deviceId, stack, services }),
+  /** For a container outside any stack: pulls the image only. The container keeps running the old one. */
+  pullImage: (deviceId: number, image: string) => invoke<ActionOutput>("docker_pull_image", { deviceId, image }),
   forgetStack: (deviceId: number, stack: string) => invoke<void>("docker_forget_stack", { deviceId, stack }),
   /** The stack's compose files first, then compose files, Dockerfiles and .env files in its folder. */
   stackFiles: (deviceId: number, stack: string) => invoke<string[]>("docker_stack_files", { deviceId, stack }),

@@ -92,6 +92,7 @@ export const AREA_FILES: Record<Area, string[]> = {
     "src-tauri/src/docker/mod.rs (connections to Docker hosts and every action)",
     "src-tauri/src/docker/scripts.rs (what is run on the host) and src-tauri/src/docker/parse.rs (how docker's output is read)",
     "src-tauri/src/docker/logs.rs (following a log) and src-tauri/src/docker/store.rs (Docker hosts and stacks remembered)",
+    "src-tauri/src/docker/updates.rs (checking images for updates: image names, registry answers, the comparison)",
     "src-tauri/src/ssh.rs and src-tauri/src/monitor.rs (prepared_login: logging in)",
     "src/routes/docker/+page.svelte, src/lib/docker/ and src/lib/components/docker/ (the screen)",
   ],
