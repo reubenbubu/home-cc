@@ -1,7 +1,7 @@
 <script lang="ts">
   // One machine on the Machines screen: status, system, and bars for CPU, RAM
   // and each disk, or a plain explanation of why there are none.
-  import { api, OS_LABELS, secretKeys, type Device, type Disk, type HostKey } from "$lib/api";
+  import { api, KIND_LABELS, OS_LABELS, secretKeys, type Device, type Disk, type HostKey } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { ms, relTime, share, uptime, usedOfTotal } from "$lib/format";
   import { identityCommand, identityText } from "$lib/hostkey";
@@ -30,6 +30,8 @@
   const trustError = $derived(stats.trustErrors.get(device.id) ?? null);
   const ram = $derived(share(st?.memUsedKb, st?.memTotalKb));
   const ramWarn = $derived(ram != null && ram > settings.value.ramWarnPct);
+  /** An appliance with no SSH: up or down is all there is to show, and nothing is missing. */
+  const statusOnly = $derived(device.kind === "appliance" && !device.sshUser);
 
   /** What a problem on this card hands to an agent, besides the message. */
   function machineProblem(area: ProblemInfo["area"], what: string, error: string): ProblemInfo {
@@ -116,7 +118,7 @@
 
   <div class="sub muted small">
     <span class="mono">{device.host}</span>
-    <span class="ellipsis" title={st?.osName}>{st?.osName || OS_LABELS[device.os]}</span>
+    <span class="ellipsis" title={st?.osName}>{st?.osName || (statusOnly && device.os === "other" ? KIND_LABELS.appliance : OS_LABELS[device.os])}</span>
     {#if st?.uptimeSecs != null}<span class="nowrap">up {uptime(st.uptimeSecs)}</span>{/if}
   </div>
 
@@ -135,7 +137,13 @@
     />
   {/if}
 
-  {#if !device.sshUser}
+  {#if statusOnly}
+    <div class="state">
+      <p class="muted" title="Only checked for being up. One you can log in to over SSH (a NAS box, say) can show stats too: add an SSH user with Edit.">
+        {s ? `${s.up ? "Up" : "Down"}, last seen ${relTime(s.lastSeen ?? device.lastSeen, clock.now)}` : "Waiting for the first check…"}
+      </p>
+    </div>
+  {:else if !device.sshUser}
     <div class="state">
       <p class="muted">Add an SSH user to see stats.</p>
       <button class="btn small" onclick={() => onedit(device)}>Add SSH user</button>

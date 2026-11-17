@@ -2,7 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type DeviceKind = "pc" | "server" | "vm" | "container" | "mesh" | "other" | "ignore";
+/** "appliance": something with its own address that isn't a PC, such as a printer, TV or camera. */
+export type DeviceKind = "pc" | "server" | "vm" | "container" | "mesh" | "appliance" | "other" | "ignore";
 export type Os = "windows" | "linux" | "proxmox" | "other";
 
 export interface Device {
@@ -216,6 +217,7 @@ export const KIND_LABELS: Record<DeviceKind, string> = {
   vm: "VM",
   container: "Container",
   mesh: "Mesh node",
+  appliance: "Appliance",
   other: "Other",
   ignore: "Ignore",
 };

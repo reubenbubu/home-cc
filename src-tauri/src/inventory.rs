@@ -18,6 +18,10 @@ pub enum DeviceKind {
     Vm,
     Container,
     Mesh,
+    /// Something with its own address that isn't a PC: a printer, TV, smart
+    /// plug, camera, games console or the like. Watched like the machines,
+    /// usually without SSH.
+    Appliance,
     Other,
     /// Seen on the network but the owner doesn't want to track it.
     Ignore,
@@ -31,6 +35,7 @@ impl DeviceKind {
             DeviceKind::Vm => "vm",
             DeviceKind::Container => "container",
             DeviceKind::Mesh => "mesh",
+            DeviceKind::Appliance => "appliance",
             DeviceKind::Other => "other",
             DeviceKind::Ignore => "ignore",
         }
@@ -43,6 +48,7 @@ impl DeviceKind {
             "vm" => DeviceKind::Vm,
             "container" => DeviceKind::Container,
             "mesh" => DeviceKind::Mesh,
+            "appliance" => DeviceKind::Appliance,
             "ignore" => DeviceKind::Ignore,
             _ => DeviceKind::Other,
         }
@@ -505,6 +511,10 @@ impl Inventory {
                         .clone()
                         .or_else(|| f.vendor.as_ref().map(|v| format!("{v} device")))
                         .unwrap_or_else(|| f.ip.clone());
+                    // Anything but a mesh node is left as Other for the owner to
+                    // sort out. Not Appliance: the maker alone can't tell a printer
+                    // from a phone (Samsung, Espressif and others make both), and an
+                    // appliance is watched like a machine, so it is the owner's pick.
                     let kind = if f.looks_like_mesh { DeviceKind::Mesh } else { DeviceKind::Other };
                     tx.execute(
                         "INSERT INTO devices (name, host, kind, os, ssh_port, notes, mac, vendor, hostname,
@@ -682,6 +692,49 @@ mod tests {
         inv.remove(b.id).unwrap();
         assert_eq!(inv.list().unwrap().len(), 1);
         assert!(matches!(inv.remove(b.id), Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn every_kind_is_saved_and_read_back() {
+        let inv = Inventory::in_memory().unwrap();
+        let kinds = [
+            (DeviceKind::Pc, "pc"),
+            (DeviceKind::Server, "server"),
+            (DeviceKind::Vm, "vm"),
+            (DeviceKind::Container, "container"),
+            (DeviceKind::Mesh, "mesh"),
+            (DeviceKind::Appliance, "appliance"),
+            (DeviceKind::Other, "other"),
+            (DeviceKind::Ignore, "ignore"),
+        ];
+        for (kind, text) in kinds {
+            let mut d = input("printer", "192.168.68.40");
+            d.kind = kind;
+            let id = inv.add(d).unwrap().id;
+            assert_eq!(inv.get(id).unwrap().kind, kind);
+            // The same word in the database and for the screens.
+            let stored: String =
+                inv.conn().query_row("SELECT kind FROM devices WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+            assert_eq!(stored, text);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{text}\""));
+            assert_eq!(serde_json::from_str::<DeviceKind>(&format!("\"{text}\"")).unwrap(), kind);
+        }
+        // A word this build doesn't know (say, from a newer one) reads as Other.
+        assert_eq!(DeviceKind::parse("toaster"), DeviceKind::Other);
+    }
+
+    #[test]
+    fn a_scan_leaves_an_appliance_as_it_is() {
+        let inv = Inventory::in_memory().unwrap();
+        let id = scan_one(&inv, found("192.168.68.40", Some(MAC_A), Some("BRW1C2D3E4F5A6B")));
+        assert_eq!(inv.get(id).unwrap().kind, DeviceKind::Other, "a scan never guesses Appliance");
+        let mut printer = input("Printer", "192.168.68.40");
+        printer.kind = DeviceKind::Appliance;
+        printer.ssh_user = None;
+        inv.update(id, printer).unwrap();
+        scan(&inv, &[found("192.168.68.41", Some(MAC_A), Some("BRW1C2D3E4F5A6B"))], 200);
+        let d = inv.get(id).unwrap();
+        assert_eq!((d.kind, d.host.as_str()), (DeviceKind::Appliance, "192.168.68.41"));
     }
 
     #[test]

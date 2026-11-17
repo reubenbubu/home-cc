@@ -90,7 +90,8 @@ Each feature lists what "done" looks like.
   MAC address, maker (from the MAC) and name where one can be found.
 - Show mesh nodes as their own group.
 - Remember devices between runs. Let the owner rename them and mark which ones
-  are PCs, VMs, servers or "ignore".
+  are PCs, VMs, servers, appliances (printers, TVs, cameras and other things
+  with an address that aren't PCs) or "ignore".
 
 Done when: a scan finds all the owner's known machines and mesh nodes, and
 names survive a restart.
@@ -124,6 +125,10 @@ can take one more timer period to show as down.
   disk space per drive.
 - Warn (colour change) when a disk is above 85% full or RAM above 90%. Both
   levels can be changed.
+- Appliances are listed with the machines, with up or down, response time and
+  when they were last seen. Most have no SSH, so they have no stats and the app
+  doesn't ask for an SSH user; one that does have SSH (a NAS box, say) gets
+  stats like any other machine.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.
