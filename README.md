@@ -79,6 +79,12 @@ Windows machine.
   another screen is shown (in memory only, as it can hold a password). A form
   fills itself from its draft first, shows "Unsaved changes" with Discard, and
   clears the draft when it is saved, cancelled or closed. New forms do the same.
+  Choices that are about this PC's screen rather than the machines are kept in
+  the window's own storage, never in the back end: the order of the Machines
+  cards and collapsed groups (`src/lib/order.svelte.ts`) and the machines
+  silenced on the Overview (`src/lib/silence.svelte.ts`, its rules in
+  `overview.ts`). That storage can be missing, so every read and write is in a
+  try/catch and the screen still works without it.
   Every table can be sorted, grouped and filtered the same way. The rules are
   in `src/lib/table.ts` (tested by `table.test.mjs`): text in a person's order
   ("PC 2" before "PC 10"), numbers by value, IP addresses number by number,

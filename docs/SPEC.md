@@ -115,6 +115,12 @@ part of the first version.
 - Ping every known device on a regular timer (default every 30 seconds, adjustable).
 - Show up or down, response time, and when it was last seen.
 - Keep a short history so the owner can see if something drops out now and then.
+- A device that is down can be silenced on the Overview (the old laptop that is
+  known to be off): it leaves Needs attention and every Down count, and stays
+  on its card or tile marked "silenced", with Undo. The silence lasts until the
+  device is up again (also when it came back while the Overview wasn't open,
+  or the app was closed) or until the owner undoes it; there are no timed
+  silences. It is kept on this PC only, like the order of the cards.
 
 Done when: turning a machine off shows it as down within one timer period, and
 turning it on shows it as up again.

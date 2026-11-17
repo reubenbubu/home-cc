@@ -421,6 +421,19 @@ const SCREENS = [
     },
     after: forgetTableChoices,
   },
+  // The old laptop silenced on the Overview, and the TV not yet (a tile's icon button). Kept in the window's
+  // storage, so forgotten again afterwards.
+  {
+    name: "overview-silenced",
+    path: "/",
+    ready: ".card",
+    async before(page) {
+      await page.getByRole("button", { name: "Silence Old laptop" }).click();
+      await page.getByRole("button", { name: "Undo silencing Old laptop" }).waitFor();
+      await page.getByRole("button", { name: "Silence Living room TV" }).waitFor();
+    },
+    after: forgetSilences,
+  },
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
     name: "overview-check-problem",
@@ -531,6 +544,32 @@ async function forgetTableChoices(page) {
   await page.evaluate(() => {
     for (const key of Object.keys(localStorage)) if (key.startsWith("home-cc.table.")) localStorage.removeItem(key);
   });
+}
+
+/** Forgets the machines silenced on the Overview. */
+async function forgetSilences(page) {
+  await page.evaluate(() => localStorage.removeItem("home-cc.silenced"));
+}
+
+/** Runs in the page. From now on the back end reports the device of this name as up, seen just now ("up"),
+ *  as down, last seen an hour ago ("down"), or as it really is (null). */
+function reportAs([name, state]) {
+  const tauri = window.__TAURI_INTERNALS__;
+  tauri.realInvoke ??= tauri.invoke;
+  const invoke = tauri.realInvoke;
+  if (!state) {
+    tauri.invoke = invoke;
+    return;
+  }
+  tauri.invoke = async (cmd, ...rest) => {
+    const result = await invoke(cmd, ...rest);
+    if (cmd !== "device_statuses") return result;
+    const id = (await invoke("list_devices")).find((d) => d.name === name)?.id;
+    const now = Math.floor(Date.now() / 1000);
+    const as =
+      state === "up" ? { up: true, rttMs: 3.2, checkedAt: now, lastSeen: now } : { up: false, rttMs: null, checkedAt: now, lastSeen: now - 3600 };
+    return result.map((s) => (s.deviceId === id ? { ...s, ...as } : s));
+  };
 }
 
 /** The text of one column's cells (by its class, such as "c-name"), top to bottom, in the rows shown. */
@@ -1467,6 +1506,99 @@ async function checkFlows(browser, url) {
           if (!n.text) throw new Error(`${n.node} has no hostname`);
           if (!n.whole) throw new Error(`${n.node}'s hostname "${n.text}" is cut short`);
         }
+      },
+    },
+    {
+      what: "on the Overview a down machine can be silenced: out of Needs attention and the Down counts, still on its card, kept, and undone",
+      path: "/",
+      async run(page) {
+        const laptop = page.locator("article.card", { hasText: "Old laptop" });
+        const tv = page.locator(".chip", { hasText: "Living room TV" });
+        const said = page.locator(".issues").getByRole("link", { name: /^Old laptop is down/ });
+        const downStat = page.locator(".stat", { has: page.getByText("Down", { exact: true }) });
+        const downCount = async () => Number((await downStat.locator(".value").innerText()).trim());
+        const pcs = page.locator("#kind-pc");
+        await said.waitFor();
+        await laptop.getByText("down", { exact: true }).waitFor();
+        if (!(await pcs.innerText()).includes("· 1 down")) throw new Error(`the PCs heading reads "${await pcs.innerText()}"`);
+        // Offered only on a machine that is down.
+        if (await page.getByRole("button", { name: "Silence Main PC" }).count()) throw new Error("Silence is offered on a machine that is up");
+        const before = await downCount();
+
+        await laptop.getByRole("button", { name: "Silence Old laptop" }).click();
+        await laptop.getByText("silenced", { exact: true }).waitFor();
+        await said.waitFor({ state: "detached" });
+        // The same button turns into Undo, so the focus stays on it.
+        const focused = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+        if (focused !== "Undo silencing Old laptop") throw new Error(`after Silence the focus is on "${focused}"`);
+        const after = await downCount();
+        if (after !== before - 1) throw new Error(`the Down count went from ${before} to ${after}`);
+        const heading = (await pcs.innerText()).replace(/\s+/g, " ");
+        if (heading.includes("down") || !heading.includes("· 1 silenced")) throw new Error(`the PCs heading reads "${heading}"`);
+        await downStat.getByText(/· 1 silenced/).waitFor();
+        const dot = await laptop.getByRole("img").first().getAttribute("aria-label");
+        if (dot !== "Down, silenced") throw new Error(`the laptop's status dot says "${dot}"`);
+
+        // Kept on this PC: still silenced when the window is opened again.
+        await page.reload({ waitUntil: "networkidle" });
+        await laptop.getByRole("button", { name: "Undo silencing Old laptop" }).waitFor();
+        if (await said.count()) throw new Error("the silenced laptop is back in Needs attention after a reload");
+
+        // An appliance's tile too.
+        await tv.getByRole("button", { name: "Silence Living room TV" }).click();
+        await tv.getByText("silenced", { exact: true }).waitFor();
+        if (await page.locator(".issues").getByRole("link", { name: /^Living room TV is down/ }).count()) throw new Error("the silenced TV is still in Needs attention");
+        await downStat.getByText(/· 2 silenced/).waitFor();
+        await tv.getByRole("button", { name: "Undo silencing Living room TV" }).click();
+        await page.locator(".issues").getByRole("link", { name: /^Living room TV is down/ }).waitFor();
+
+        await laptop.getByRole("button", { name: "Undo silencing Old laptop" }).click();
+        await said.waitFor();
+        await laptop.getByRole("button", { name: "Silence Old laptop" }).waitFor();
+        if (!(await pcs.innerText()).includes("· 1 down")) throw new Error(`after Undo the PCs heading reads "${await pcs.innerText()}"`);
+        const stored = await page.evaluate(() => localStorage.getItem("home-cc.silenced"));
+        if (stored !== null) throw new Error(`after every Undo the window still keeps ${stored}`);
+      },
+    },
+    {
+      what: "on the Overview a silence ends when the machine is up again, so it counts as down when it goes again",
+      path: "/",
+      async run(page) {
+        const laptop = page.locator("article.card", { hasText: "Old laptop" });
+        const said = page.locator(".issues").getByRole("link", { name: /^Old laptop is down/ });
+        await laptop.getByRole("button", { name: "Silence Old laptop" }).click();
+        await said.waitFor({ state: "detached" });
+        // A round of checks finds it up.
+        await page.evaluate(reportAs, ["Old laptop", "up"]);
+        await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("check_now"));
+        await laptop.getByText("silenced", { exact: true }).waitFor({ state: "detached" });
+        if (await laptop.getByRole("button", { name: /Silence|Undo/ }).count()) throw new Error("a machine that is up offers Silence or Undo");
+        const stored = await page.evaluate(() => localStorage.getItem("home-cc.silenced"));
+        if (stored !== null) throw new Error(`the silence of a machine that is up again is still kept: ${stored}`);
+        // And down again: back in Needs attention, with Silence offered again.
+        await page.evaluate(reportAs, ["Old laptop", null]);
+        await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("check_now"));
+        await said.waitFor();
+        await laptop.getByRole("button", { name: "Silence Old laptop" }).waitFor();
+      },
+    },
+    {
+      what: "on the Overview a silenced Docker host that is off says nothing in Needs attention, not even that Docker couldn't be read",
+      path: "/",
+      async run(page) {
+        const vm = page.locator("article.card", { hasText: "Dev VM" });
+        const issues = page.locator(".issues");
+        await issues.getByRole("link", { name: "Dev VM: Docker couldn't be read" }).waitFor();
+        await page.evaluate(reportAs, ["Dev VM", "down"]);
+        await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("check_now"));
+        await issues.getByRole("link", { name: /^Dev VM is down/ }).waitFor();
+        await vm.getByRole("button", { name: "Silence Dev VM" }).click();
+        await vm.getByText("silenced", { exact: true }).waitFor();
+        const left = (await issues.getByRole("link").allInnerTexts()).filter((t) => t.startsWith("Dev VM"));
+        if (left.length) throw new Error(`Needs attention still says: ${left.join("; ")}`);
+        await vm.getByRole("button", { name: "Undo silencing Dev VM" }).click();
+        await issues.getByRole("link", { name: "Dev VM: Docker couldn't be read" }).waitFor();
+        await issues.getByRole("link", { name: /^Dev VM is down/ }).waitFor();
       },
     },
     // Terminals
