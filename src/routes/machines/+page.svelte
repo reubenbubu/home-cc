@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from "svelte";
+  import { flushSync, onDestroy, tick, untrack } from "svelte";
   import { flip } from "svelte/animate";
   import { page } from "$app/state";
   import { devices, isMachine } from "$lib/devices.svelte";
@@ -26,7 +26,6 @@
     moveItem,
     sameGroup,
     sections,
-    slotAt,
     tidyGroup,
     toEndOfGroup,
     type Box,
@@ -35,6 +34,7 @@
   import { icons } from "$lib/icons";
   import { isIpv4, isIpv6 } from "$lib/lookups";
   import { differs, rebased } from "$lib/drafts";
+  import { landing, pack, type Packing } from "$lib/masonry";
   import { macToSend, repointed } from "$lib/net";
   import { collapsedGroups, machineOrder, NO_GROUP } from "$lib/order.svelte";
   import { names } from "$lib/names.svelte";
@@ -512,6 +512,80 @@
   let scroller: HTMLElement | null = null;
   let scrollFrame = 0;
 
+  // Packing the cards: each card is only as tall as what it shows, and in turn goes in the column that is
+  // shortest so far, so a short card sits right under the one above it rather than beside a tall card's
+  // empty space (masonry.ts). Each card is measured as it changes (readings arriving, a warning, the form
+  // opening beside the cards, the window or the zoom changing), and each group's grid is laid out again
+  // before the screen is drawn. The cards stay in the owner's order in the page, for the keys and screen
+  // readers. Until a group's cards have all been measured, they show in plain rows.
+
+  /** Each card's height as drawn, by machine, in the grid's own pixels. */
+  let heights = $state<Record<number, number>>({});
+  /** Each group's grid as its styles have it now: how many columns, and the space between them. */
+  let grids = $state<Record<string, { columns: number; gap: number }>>({});
+  /** Each shown group's cards packed, as they are drawn (while a card is dragged, with it where it would land). */
+  const packings = $derived.by(() => {
+    const out = new Map<string, Packing>();
+    for (const s of groupsShown) {
+      const key = keyOf(s);
+      const grid = grids[key];
+      const sizes = cardsOf(s).map((m) => heights[m.id]);
+      if (grid && sizes.every((h) => h !== undefined)) out.set(key, pack(sizes, grid.columns, grid.gap));
+    }
+    return out;
+  });
+  const rowsOf = (p: Packing) => p.rows.map((h) => `${h}px`).join(" ");
+
+  /** Reads the grids the cards in `entries` are in, and their cards' heights. */
+  function measure(entries: ResizeObserverEntry[]) {
+    const changed = new Set<HTMLElement>();
+    for (const entry of entries) {
+      const grid = (entry.target as HTMLElement).parentElement;
+      if (grid?.dataset.cards !== undefined) changed.add(grid);
+    }
+    if (changed.size === 0) return;
+    // First the columns, as the cards are only as wide as those will be once they are laid out again.
+    const next = { ...grids };
+    let moved = false;
+    for (const grid of changed) {
+      const style = getComputedStyle(grid);
+      const columns = Math.max(1, parseInt(style.getPropertyValue("--columns"), 10) || 1);
+      const gap = parseFloat(style.columnGap) || 0;
+      const was = next[grid.dataset.cards ?? ""];
+      if (was?.columns === columns && Math.abs(was.gap - gap) < 0.1) continue;
+      next[grid.dataset.cards ?? ""] = { columns, gap };
+      moved = true;
+    }
+    if (moved) {
+      grids = next;
+      flushSync();
+    }
+    const sizes = { ...heights };
+    let grown = false;
+    for (const grid of changed) {
+      const scale = grid.offsetWidth ? grid.getBoundingClientRect().width / grid.offsetWidth : 1;
+      for (const slot of grid.querySelectorAll<HTMLElement>(":scope > .slot")) {
+        const id = Number(slot.dataset.card);
+        const h = slot.getBoundingClientRect().height / (scale || 1);
+        if (sizes[id] !== undefined && Math.abs(sizes[id] - h) < 0.1) continue;
+        sizes[id] = h;
+        grown = true;
+      }
+    }
+    if (grown) {
+      heights = sizes;
+      // Laid out again now, before the screen is drawn, so no card is ever seen in the wrong place.
+      flushSync();
+    }
+  }
+  const sizeWatch = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+  /** On each card's place in its grid. */
+  const watchSize = (el: HTMLElement) => {
+    sizeWatch?.observe(el);
+    return () => sizeWatch?.unobserve(el);
+  };
+  onDestroy(() => sizeWatch?.disconnect());
+
   // A machine that is removed loses its place, so the saved order only holds machines that exist.
   $effect(() => {
     if (!devices.loaded || devices.error) return;
@@ -843,15 +917,14 @@
       x: inside(at.x - hold.x, grid.offsetWidth - ghost.w),
       y: inside(at.y - hold.y, grid.offsetHeight - ghost.h),
     };
-    // Where the cards are laid out, not where a sliding card happens to be drawn at this moment.
-    const slots = [...grid.querySelectorAll<HTMLElement>(":scope > .slot")];
-    const to = slotAt(
-      slots.map((s) => ({ x: s.offsetLeft, y: s.offsetTop, w: s.offsetWidth, h: s.offsetHeight })),
-      at.x,
-      at.y,
-    );
+    // From the cards' measured heights, as they are packed, not where a sliding card happens to be drawn
+    // at this moment. Until they have all been measured the card stays where it is.
     const now = cardsOf(section).map((m) => m.id);
     const from = now.indexOf(drag.id);
+    const sizes = now.map((id) => heights[id]);
+    const layout = grids[drag.key];
+    if (!layout || sizes.some((h) => h === undefined)) return;
+    const to = landing(sizes, from, layout.columns, layout.gap, grid.clientWidth, at.x, at.y);
     if (to >= 0 && from >= 0 && to !== from) drag.order = moveItem(now, from, to);
   }
 
@@ -1007,6 +1080,7 @@
           {@const title = s.group ?? "Other machines"}
           {@const closed = grouped && collapsedGroups.has(key)}
           {@const down = s.items.filter((m) => status.get(m)?.up === false).length}
+          {@const packed = packings.get(key)}
           <!-- Named after its group; with no groups at all, the cards show as before, under no heading. -->
           <section class="group" aria-label={grouped ? title : "Machine stats"}>
             {#if grouped}
@@ -1042,9 +1116,24 @@
               </header>
             {/if}
             {#if !closed}
-              <div class="cards" id="group-cards-{n}">
+              <div
+                class="cards"
+                id="group-cards-{n}"
+                data-cards={key}
+                style:grid-template-rows={packed ? rowsOf(packed) : undefined}
+                style:row-gap={packed ? "0px" : undefined}
+              >
                 {#each cardsOf(s) as m, i (m.id)}
-                  <div class="slot" class:landing={drag?.id === m.id} animate:flip={{ duration: quick() }}>
+                  {@const place = packed?.places[i]}
+                  <div
+                    class="slot"
+                    class:landing={drag?.id === m.id}
+                    data-card={m.id}
+                    style:grid-column={place?.column}
+                    style:grid-row={place ? `${place.row} / ${place.rowEnd}` : undefined}
+                    {@attach watchSize}
+                    animate:flip={{ duration: quick() }}
+                  >
                     {@render card(m, i, s)}
                   </div>
                 {/each}
@@ -1309,21 +1398,28 @@
   /* Spec section 6: 2 to 3 cards across at 1080p, 3 to 4 at 1440p, 5 to 6 on the ultrawide.
      Counted from the room the cards really have, so it still holds with the form open. */
   .main { container-type: inline-size; }
-  .cards { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
+  /* --columns is read by the page too, to pack the cards into that many columns (masonry.ts). */
+  .cards {
+    --columns: 1;
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(var(--columns), minmax(0, 1fr));
+    gap: var(--gap);
+  }
   @container (min-width: 62rem) {
-    .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cards { --columns: 2; }
   }
   @container (min-width: 100rem) {
-    .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .cards { --columns: 3; }
   }
   @container (min-width: 140rem) {
-    .cards { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .cards { --columns: 4; }
   }
   @container (min-width: 190rem) {
-    .cards { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .cards { --columns: 5; }
   }
   @container (min-width: 230rem) {
-    .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .cards { --columns: 6; }
   }
 
   /* A heading per group, with the group's cards under it. */
@@ -1356,8 +1452,8 @@
     .chevron { transition: none; }
   }
 
-  /* Each card fills its place, so the cards in a row stay the same height. */
-  .slot { display: grid; min-width: 0; }
+  /* Each card is only as tall as what it shows: the page packs them, each under the one above it. */
+  .slot { display: grid; align-self: start; min-width: 0; }
   /* The dragged card's place: where it lands when let go. */
   .slot.landing {
     border-radius: var(--radius);

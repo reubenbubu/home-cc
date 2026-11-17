@@ -206,6 +206,12 @@ can take one more timer period to show as down.
 - The machine cards can be put in any order: drag a card by the grip in its
   header, or use the arrow keys on that grip. The order is remembered on this
   PC; new machines go at the end, and "Reset order" goes back to name order.
+- Each card is only as tall as what it shows (every drive stays on it). The
+  cards are packed: each in turn goes in the column that is shortest so far,
+  so a short card sits right under the card above it rather than beside a
+  tall card's empty space. They still read left to right, top to bottom as
+  far as that allows, and the keys and screen readers follow the owner's
+  order. Each group is packed on its own.
 - Machines can be put in groups the owner names ("Proxmox lab", say): with the
   Group field in a machine's form (which suggests the groups there are), or
   with the group menu on its card. The cards show under a heading per group
