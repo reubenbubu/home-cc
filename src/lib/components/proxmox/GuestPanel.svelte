@@ -1,9 +1,11 @@
 <script lang="ts">
   // One VM or container: start, resume, shut down, restart and force stop, its console, and its snapshots
   // (take, roll back, delete). Everything that stops it, rolls it back or deletes asks first (spec section 7).
+  import { untrack } from "svelte";
   import { errorText, proxmoxApi, type Device, type GuestAddresses, type ProxmoxGuest, type SnapshotList } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { devices } from "$lib/devices.svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import { icons } from "$lib/icons";
   import { openTerminal } from "$lib/terminals.svelte";
   import { relTime, share, uptime, usedOfTotal } from "$lib/format";
@@ -65,7 +67,22 @@
   let snapNote = $state("");
   let withRam = $state(false);
   let triedName = $state(false);
+  /** The name offered when the form was filled, to tell whether anything was typed. */
+  let suggested = $state("");
   const nameProblem = $derived(snapshotNameProblem(snapName));
+
+  // A snapshot being written is kept while another screen is shown (drafts.svelte.ts), for each guest.
+  type SnapshotForm = { name: string; note: string; withRam: boolean };
+  const draftKey = $derived(`proxmox-snapshot:${device.id}:${key}`);
+  $effect(() => {
+    if (snapsFor !== key) return;
+    drafts.keep<SnapshotForm>(draftKey, { name: snapName, note: snapNote, withRam }, { name: suggested, note: "", withRam: false });
+  });
+
+  function close() {
+    drafts.clear(draftKey);
+    onclose();
+  }
 
   async function loadSnapshots(forKey: string) {
     loadingSnaps = true;
@@ -81,15 +98,17 @@
     }
   }
 
-  // A different guest: start again with its own snapshots and a fresh name.
+  // A different guest: start again with its own snapshots and a fresh name, or what was being written for it.
   $effect(() => {
     if (snapsFor === key) return;
     snapsFor = key;
     snaps = null;
     snapsError = null;
-    snapName = suggestedSnapshotName(new Date());
-    snapNote = "";
-    withRam = false;
+    const draft = drafts.get<SnapshotForm>(untrack(() => draftKey));
+    suggested = suggestedSnapshotName(new Date());
+    snapName = draft?.name ?? suggested;
+    snapNote = draft?.note ?? "";
+    withRam = draft?.withRam ?? false;
     triedName = false;
     if (!guest.template) loadSnapshots(key);
   });
@@ -106,11 +125,16 @@
     triedName = true;
     if (nameProblem) return;
     const name = snapName.trim();
+    const forKey = key;
+    const takenDraft = draftKey;
     const ok = await snapshotJob("Taking snapshot…", `Snapshot "${name}" taken.`, () =>
       proxmoxApi.takeSnapshot(device.id, ref, name, snapNote, withRam && guest.kind === "qemu"),
     );
-    if (ok) {
-      snapName = suggestedSnapshotName(new Date());
+    if (ok) drafts.clear(takenDraft);
+    // Another guest may be open by now: its own form stays as it is.
+    if (ok && forKey === key) {
+      suggested = suggestedSnapshotName(new Date());
+      snapName = suggested;
       snapNote = "";
       triedName = false;
     }
@@ -179,7 +203,7 @@
       <h2 class="ellipsis" title={guestName(guest)}>{guestName(guest)}</h2>
       <span class="muted small">{guestId(guest)} on {guest.node}</span>
     </div>
-    <button class="btn small" onclick={onclose}>Close</button>
+    <button class="btn small" onclick={close}>Close</button>
   </header>
 
   <div class="state">

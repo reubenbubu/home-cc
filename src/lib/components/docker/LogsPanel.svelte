@@ -1,7 +1,8 @@
 <script lang="ts">
   // A container's log, live: the last lines first, then new ones as they come. Search shows only the lines
   // with the text, and the whole log held here can be saved to a file. Following stops when the panel closes.
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import { errorText, type Device } from "$lib/api";
   import { dockerApi, dockerEvents, type Container, type DockerHost } from "$lib/docker/api";
   import { dockerIcons } from "$lib/docker/icons";
@@ -31,8 +32,18 @@
 
   let lines = $state.raw<Held[]>([]);
   let dropped = $state(0);
-  let query = $state("");
-  let tail = $state(200);
+  // The search and how much of the log to show stay while another screen is shown (drafts.svelte.ts).
+  type LogsView = { query: string; tail: number };
+  const draftKey = untrack(() => `docker-logs:${host.deviceId}:${container.id}`);
+  const view = drafts.get<LogsView>(draftKey);
+  let query = $state(view?.query ?? "");
+  let tail = $state(view?.tail ?? 200);
+  $effect(() => drafts.keep<LogsView>(draftKey, { query, tail }, { query: "", tail: 200 }));
+
+  function close() {
+    drafts.clear(draftKey);
+    onclose();
+  }
   let phase = $state<"starting" | "following" | "ended">("starting");
   let ended = $state<string | null>(null);
   let error = $state<string | null>(null);
@@ -171,7 +182,7 @@
         {#if phase === "starting"}Starting…{:else if phase === "following"}<span class="live">Live</span>{:else}Not following{/if}
       </span>
     </div>
-    <button class="icon-btn" aria-label="Close the log" title="Close" onclick={onclose}><Icon path={dockerIcons.close} size={16} /></button>
+    <button class="icon-btn" aria-label="Close the log" title="Close" onclick={close}><Icon path={dockerIcons.close} size={16} /></button>
   </header>
 
   <div class="tools">

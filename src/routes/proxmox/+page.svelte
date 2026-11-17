@@ -2,12 +2,15 @@
   // Proxmox (spec 5.6): every Proxmox host the owner has added (a device whose System is Proxmox VE), one
   // at a time when there are several.
   import { devices } from "$lib/devices.svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import ProxmoxHost from "$lib/components/proxmox/ProxmoxHost.svelte";
 
   const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, undefined, { numeric: true });
   const hosts = $derived(devices.list.filter((d) => d.os === "proxmox" && d.kind !== "ignore").sort(byName));
 
-  let chosen = $state<number | null>(null);
+  // The host picked stays picked after another screen was shown.
+  let chosen = $state<number | null>(drafts.get<number>("proxmox-host") ?? null);
+  $effect(() => drafts.remember("proxmox-host", chosen));
   const host = $derived(hosts.find((h) => h.id === chosen) ?? hosts[0] ?? null);
 </script>
 

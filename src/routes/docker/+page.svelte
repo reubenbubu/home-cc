@@ -4,6 +4,7 @@
   import { onDestroy, onMount } from "svelte";
   import { clock } from "$lib/clock.svelte";
   import { devices } from "$lib/devices.svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import type { Container, Stack } from "$lib/docker/api";
   import { isLoginProblem, stackOrder } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
@@ -25,7 +26,9 @@
     | { kind: "cleanup"; hostId: number }
     | { kind: "hosts" };
 
-  let panel = $state<Panel | null>(null);
+  // The log, files, cleanup or hosts panel that was open is open again after another screen was shown.
+  let panel = $state<Panel | null>(drafts.get<Panel>("docker-panel") ?? null);
+  $effect(() => drafts.remember("docker-panel", panel));
 
   const host = $derived(docker.selected != null ? docker.byId.get(docker.selected) : undefined);
   const device = $derived(host ? devices.byId.get(host.deviceId) : undefined);

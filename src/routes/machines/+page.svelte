@@ -3,6 +3,8 @@
   import { flip } from "svelte/animate";
   import { page } from "$app/state";
   import { devices, isMachine } from "$lib/devices.svelte";
+  import { drafts } from "$lib/drafts.svelte";
+  import { keySetupDraft } from "$lib/keysetup.svelte";
   import { stats } from "$lib/stats.svelte";
   import {
     api,
@@ -18,10 +20,12 @@
   import { arrange, keyMove, moveItem, slotAt, type Box } from "$lib/arrange";
   import { icons } from "$lib/icons";
   import { isIpv4, isIpv6 } from "$lib/lookups";
+  import { differs } from "$lib/drafts";
   import { macToSend, repointed } from "$lib/net";
   import { machineOrder } from "$lib/order.svelte";
   import Address from "$lib/components/Address.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
+  import DraftNote from "$lib/components/DraftNote.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import KeySetup from "$lib/components/KeySetup.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
@@ -66,8 +70,44 @@
   /** Typed into the form; goes to the keychain on save and is never read back. */
   let password = $state("");
   let hasPassword = $state(false);
-  let showAll = $state(false);
+  let showAll = $state(drafts.get<boolean>("machines-show-all") ?? false);
+  $effect(() => drafts.remember("machines-show-all", showAll));
   let formEl = $state<HTMLFormElement>();
+
+  // The form, as typed, comes back after another screen was shown: which machine was open, every field and
+  // the password typed (in this window's memory only, see drafts.svelte.ts). One draft for each machine.
+  type MachineDraft = { form: DeviceInput; password: string };
+  const OPEN_KEY = "machine-form-open";
+  const draftKey = (id: number | "new") => `machine-form:${id}`;
+  /** The machine as saved when the form was opened, to tell what the form changes. */
+  let base = $state<DeviceInput>(blank());
+  /** The form was filled from a draft rather than from what is saved. */
+  let restored = $state(false);
+  const unsaved = $derived(restored && editing !== null && differs<MachineDraft>({ form, password }, { form: base, password: "" }));
+
+  $effect(() => {
+    drafts.remember(OPEN_KEY, editing);
+    if (editing === null) return;
+    drafts.keep<MachineDraft>(draftKey(editing), { form, password }, { form: base, password: "" });
+  });
+
+  /** Forgets what was typed for a machine: on save, Cancel, or when it is removed. */
+  function forget(id: number | "new") {
+    drafts.clear(draftKey(id), keySetupDraft(id));
+  }
+
+  function discard() {
+    if (editing === null) return;
+    drafts.clear(draftKey(editing));
+    form = { ...base };
+    password = "";
+    restored = false;
+  }
+
+  function cancel() {
+    if (editing !== null) forget(editing);
+    editing = null;
+  }
 
   const byName = (a: Device, b: Device) => a.name.localeCompare(b.name, undefined, { numeric: true });
   const machines = $derived(devices.list.filter((d) => d.kind !== "ignore" && isMachine(d)).sort(byName));
@@ -75,11 +115,15 @@
   const rows = $derived(showAll ? [...machines, ...rest] : machines);
 
   async function open(id: number | "new", input: DeviceInput) {
-    form = input;
-    typedHost = input.host.trim();
+    // What was typed for this machine before comes first; what is saved only when there is nothing.
+    const draft = drafts.get<MachineDraft>(draftKey(id));
+    base = { ...input };
+    form = draft?.form ?? input;
+    restored = !!draft;
+    typedHost = form.host.trim();
     stored = { host: input.host, sshPort: input.sshPort ?? 22, mac: input.mac || null };
     formError = null;
-    password = "";
+    password = draft?.password ?? "";
     hasPassword = false;
     editing = id;
     if (typeof id === "number") {
@@ -105,19 +149,26 @@
     open(d.id, { name: d.name, host: d.host, kind: d.kind, os: d.os, sshUser: d.sshUser ?? "", sshPort: d.sshPort, notes: d.notes, mac: d.mac ?? "" });
   }
 
-  // Links from other screens: /machines?add=1 and /machines?edit=<id>.
+  // Links from other screens: /machines?add=1 and /machines?edit=<id>. Without one, the form that was open
+  // when the owner left this screen opens again.
   let handled: string | null = null;
+  let reopen: number | "new" | null = drafts.get<number | "new">(OPEN_KEY) ?? null;
   $effect(() => {
     const query = page.url.search;
     if (query === handled) return;
     const params = page.url.searchParams;
-    if (params.has("add")) {
+    const want = params.has("add") ? "new" : params.has("edit") ? Number(params.get("edit")) : reopen;
+    if (want === "new") {
       handled = query;
+      reopen = null;
       untrack(startAdd);
-    } else if (params.has("edit")) {
-      const d = devices.byId.get(Number(params.get("edit")));
+    } else if (want !== null) {
+      const d = devices.byId.get(want);
       if (d) untrack(() => startEdit(d));
-      if (d || devices.loaded) handled = query;
+      if (d || devices.loaded) {
+        handled = query;
+        reopen = null;
+      }
     } else {
       handled = query;
     }
@@ -164,8 +215,10 @@
       } else {
         return;
       }
+      forget(editing);
       editing = null;
       password = "";
+      restored = false;
       // Saving a machine or its password makes the back end read it again by itself, and the result
       // arrives as a "stats-changed" event; this only clears what the old entry showed.
       stats.load();
@@ -183,9 +236,12 @@
       await api.setSecret(secretKeys.sshPassword(saved.id), password);
       return true;
     } catch (err) {
+      // The form now holds the saved machine; what is still typed (the password) is kept under it.
+      if (editing === "new") forget("new");
       editing = saved.id;
       stored = { host: saved.host, sshPort: saved.sshPort, mac: saved.mac };
       form.mac = saved.mac ?? "";
+      base = { name: saved.name, host: saved.host, kind: saved.kind, os: saved.os, sshUser: saved.sshUser ?? "", sshPort: saved.sshPort, notes: saved.notes, mac: saved.mac ?? "" };
       formError = formProblem("secrets", "Storing the password for a machine just saved", `Saved, but the password couldn't be stored: ${errorText(err)}`);
       return false;
     }
@@ -204,6 +260,7 @@
     listError = null;
     try {
       await devices.remove(d.id);
+      forget(d.id);
       if (editing === d.id) editing = null;
     } catch (err) {
       listError = { area: "devices", what: `Removing "${d.name}" on the Machines screen`, error: `Couldn't remove "${d.name}": ${errorText(err)}`, details: deviceDetails(d) };
@@ -687,9 +744,10 @@
       {/key}
       <label>Notes <input bind:value={form.notes} /></label>
       {#if formError}<Problem problem={formError} />{/if}
+      {#if unsaved}<DraftNote ondiscard={discard} />{/if}
       <div class="form-actions">
         <button class="btn primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
-        <button class="btn" type="button" onclick={() => (editing = null)}>Cancel</button>
+        <button class="btn" type="button" onclick={cancel}>Cancel</button>
       </div>
     </form>
   {/if}

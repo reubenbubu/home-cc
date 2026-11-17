@@ -18,3 +18,9 @@ class KeySetupAsk {
 }
 
 export const keySetupAsk = new KeySetupAsk();
+
+/** Where the key login part of the Machines form keeps whether it was open, and a passphrase typed for a new
+ *  key, while another screen is shown (drafts.svelte.ts). Cleared with the rest of the form. */
+export function keySetupDraft(deviceId: number | "new"): string {
+  return `key-setup:${deviceId}`;
+}

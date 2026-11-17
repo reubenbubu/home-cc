@@ -204,6 +204,36 @@ export function isUnnamedVolume(detail: string): boolean {
   return detail === "Unnamed volume";
 }
 
+/** Everything a preview offers, as a pick. */
+export function offeredKeys(p: CleanupPreview): CleanupPick {
+  return {
+    containers: p.containers.map((c) => c.key),
+    images: p.images.map((i) => i.key),
+    volumes: p.volumes.map((v) => v.key),
+    buildCache: p.buildCacheCount > 0,
+  };
+}
+
+/** The owner's ticks in a cleanup, kept while another screen is shown, with what was offered then. */
+export interface PickDraft {
+  pick: CleanupPick;
+  offered: CleanupPick;
+}
+
+/** The owner's ticks put back on a preview read afresh: what was offered before keeps its tick or its
+ *  missing tick, something new gets the usual choice, and something that has gone drops out. */
+export function restorePick(draft: PickDraft, p: CleanupPreview): CleanupPick {
+  const usual = defaultPick(p);
+  const group = (items: { key: string }[], picked: string[], offered: string[], fallback: string[]) =>
+    items.map((i) => i.key).filter((k) => (offered.includes(k) ? picked.includes(k) : fallback.includes(k)));
+  return {
+    containers: group(p.containers, draft.pick.containers, draft.offered.containers, usual.containers),
+    images: group(p.images, draft.pick.images, draft.offered.images, usual.images),
+    volumes: group(p.volumes, draft.pick.volumes, draft.offered.volumes, usual.volumes),
+    buildCache: p.buildCacheCount > 0 && (draft.offered.buildCache ? draft.pick.buildCache : usual.buildCache),
+  };
+}
+
 /** How many things the pick removes and the space that frees, from the preview's sizes. */
 export function pickTotals(p: CleanupPreview, pick: CleanupPick): { count: number; bytes: number } {
   let count = 0;

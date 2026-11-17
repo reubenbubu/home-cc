@@ -1,7 +1,9 @@
 <script lang="ts">
   // Every VM and container on a Proxmox host, with its state and what it uses, a quick start, resume or shut
   // down (which asks first), and "Manage" for everything else (restart, force stop, snapshots).
+  import { untrack } from "svelte";
   import type { ProxmoxGuest } from "$lib/api";
+  import { drafts } from "$lib/drafts.svelte";
   import { bytes, pct, uptime, usedOfTotal } from "$lib/format";
   import {
     actionWords,
@@ -32,7 +34,10 @@
     stale?: boolean;
   } = $props();
 
-  let showTemplates = $state(false);
+  // Still ticked after another screen was shown.
+  const templatesKey = untrack(() => `proxmox-templates:${deviceId}`);
+  let showTemplates = $state(drafts.get<boolean>(templatesKey) ?? false);
+  $effect(() => drafts.remember(templatesKey, showTemplates));
   const templates = $derived(guests.filter((g) => g.template).length);
   const shown = $derived(showTemplates ? guests : guests.filter((g) => !g.template));
   const multiNode = $derived(new Set(guests.map((g) => g.node)).size > 1);

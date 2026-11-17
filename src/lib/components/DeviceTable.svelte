@@ -4,10 +4,12 @@
   // "ignored" rows can be brought back or removed.
   // Columns have fixed widths and the least important ones drop out as the
   // table gets narrower, so it never scrolls sideways.
+  import { untrack } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { errorText, KIND_LABELS, type Device, type DeviceInput, type DeviceKind } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { devices, toInput } from "$lib/devices.svelte";
+  import { drafts as kept } from "$lib/drafts.svelte";
   import { ms, relTime } from "$lib/format";
   import { icons } from "$lib/icons";
   import { status } from "$lib/status.svelte";
@@ -27,10 +29,17 @@
 
   let error = $state<ProblemInfo | null>(null);
   const saving = new SvelteSet<number>();
+  // Names typed into "fresh" rows, and a rename not finished yet, stay while another screen is shown
+  // (drafts.svelte.ts). One of these tables for each group, so each keeps its own.
+  const namesKey = `device-names:${untrack(() => variant)}`;
+  const renameDraftKey = `device-rename:${untrack(() => variant)}`;
   /** Names typed into "fresh" rows but not saved yet. */
-  const drafts = new SvelteMap<number, string>();
-  let renaming = $state<number | null>(null);
-  let renameText = $state("");
+  const drafts = new SvelteMap<number, string>(kept.get<[number, string][]>(namesKey) ?? []);
+  const rename = kept.get<{ id: number; text: string }>(renameDraftKey);
+  let renaming = $state<number | null>(rename?.id ?? null);
+  let renameText = $state(rename?.text ?? "");
+  $effect(() => kept.keep<[number, string][]>(namesKey, [...drafts], []));
+  $effect(() => kept.remember(renameDraftKey, renaming === null ? null : { id: renaming, text: renameText }));
 
   async function save(d: Device, patch: Partial<DeviceInput>) {
     saving.add(d.id);

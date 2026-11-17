@@ -1,13 +1,17 @@
 <script lang="ts">
   // The API token for one Proxmox host: its ID and port (saved in home-cc) and its secret (kept in the
   // system keychain and never shown again), with how to make one in Proxmox.
+  import { untrack } from "svelte";
   import { errorText, type Device } from "$lib/api";
+  import { differs } from "$lib/drafts";
+  import { drafts } from "$lib/drafts.svelte";
   import { icons } from "$lib/icons";
   import { DEFAULT_TOKEN_ID, tokenCommands } from "$lib/proxmox";
   import { proxmox } from "$lib/proxmox.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
   import Address from "../Address.svelte";
   import ConfirmButton from "../ConfirmButton.svelte";
+  import DraftNote from "../DraftNote.svelte";
   import Icon from "../Icon.svelte";
   import Problem from "../Problem.svelte";
 
@@ -23,30 +27,62 @@
     onclose?: () => void;
   } = $props();
 
+  type TokenForm = { tokenId: string; port: number; secret: string };
+
   const stored = $derived(proxmox.settings.get(device.id));
-  let tokenId = $state("");
-  let port = $state(8006);
-  /** Typed here; goes to the keychain on save and is never read back. */
-  let secret = $state("");
+  // What was typed before the owner went to another screen comes back first (drafts.svelte.ts).
+  const draftKey = $derived(`proxmox-token:${device.id}`);
+  const draft = drafts.get<TokenForm>(untrack(() => draftKey));
+  let tokenId = $state(draft?.tokenId ?? "");
+  let port = $state(draft?.port ?? 8006);
+  /** Typed here; goes to the keychain on save and is never read back. Until then it is only in this window's
+   *  memory, also while another screen is shown. */
+  let secret = $state(draft?.secret ?? "");
   let saving = $state(false);
   let error = $state<ProblemInfo | null>(null);
-  let filledFor = $state<number | null>(null);
+  let filledFor = $state<number | null>(draft ? untrack(() => device.id) : null);
+  /** The form was filled from a draft rather than from what is saved. */
+  let restored = $state(!!draft);
 
-  // Fill the form once the stored settings are in, and again for another host.
+  const savedForm = $derived<TokenForm | undefined>(stored ? { tokenId: stored.tokenId ?? "", port: stored.port, secret: "" } : undefined);
+  const unsaved = $derived(restored && differs<TokenForm>({ tokenId, port, secret }, savedForm));
+
+  // Fill the form once the stored settings are in, and again for another host; a draft comes first.
   $effect(() => {
     const s = stored;
-    if (filledFor === device.id) return;
     if (!s) {
       proxmox.loadSettings(device.id).catch((e) => {
         error = problem("Reading the Proxmox token settings", `Couldn't read the saved settings: ${errorText(e)}`);
       });
       return;
     }
+    if (filledFor === device.id) return;
     tokenId = s.tokenId ?? "";
     port = s.port;
     secret = "";
     filledFor = device.id;
   });
+
+  // Kept while it differs from what is saved.
+  $effect(() => {
+    if (filledFor !== device.id) return;
+    drafts.keep<TokenForm>(draftKey, { tokenId, port, secret }, savedForm);
+  });
+
+  function discard() {
+    drafts.clear(draftKey);
+    restored = false;
+    secret = "";
+    if (stored) {
+      tokenId = stored.tokenId ?? "";
+      port = stored.port;
+    }
+  }
+
+  function close() {
+    drafts.clear(draftKey);
+    onclose?.();
+  }
 
   const commands = $derived(tokenCommands(tokenId));
 
@@ -56,7 +92,12 @@
     error = null;
     try {
       await proxmox.saveSettings(device.id, tokenId.trim(), Number(port) || 8006, secret);
+      // The form now shows what was saved, so nothing is left to keep as a draft.
+      tokenId = tokenId.trim();
+      port = Number(port) || 8006;
       secret = "";
+      restored = false;
+      drafts.clear(draftKey);
       onclose?.();
     } catch (err) {
       error = problem("Saving the Proxmox API token", errorText(err));
@@ -78,7 +119,7 @@
 <form class="panel setup" onsubmit={save}>
   <div class="head">
     <h2 class="section-title">API token for {device.name}</h2>
-    {#if onclose}<button type="button" class="btn small" onclick={onclose}>Close</button>{/if}
+    {#if onclose}<button type="button" class="btn small" onclick={close}>Close</button>{/if}
   </div>
 
   <div class="cols">
@@ -107,6 +148,7 @@
         never shown again, and only sent once you have approved the host's certificate.
       </p>
       {#if error}<Problem problem={error} />{/if}
+      {#if unsaved}<DraftNote ondiscard={discard} />{/if}
       <div class="actions">
         <button class="btn primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
       </div>

@@ -5,6 +5,8 @@ import {
   containerKey,
   commandShown,
   defaultPick,
+  offeredKeys,
+  restorePick,
   DOCKER_PATH,
   execCommand,
   keptSelection,
@@ -174,6 +176,39 @@ test("cleanup picks everything but named volumes, and adds up what it frees", ()
   assert.deepEqual(pickTotals(preview, { containers: [], images: [], volumes: ["photos_db"], buildCache: false }), { count: 1, bytes: 5000 });
   const empty = { containers: [], images: [], volumes: [], buildCacheCount: 0, buildCacheBytes: 0 };
   assert.equal(defaultPick(empty).buildCache, false);
+  assert.deepEqual(offeredKeys(preview), { containers: ["c1"], images: ["nginx:1", "sha256:abc"], volumes: ["photos_db", "f00"], buildCache: true });
+});
+
+test("the owner's cleanup ticks come back on a preview read afresh", () => {
+  const item = (key, detail = "") => ({ key, label: key, detail, sizeBytes: 1 });
+  const before = {
+    containers: [item("c1"), item("c2")],
+    images: [item("nginx:1")],
+    volumes: [item("photos_db", "Named volume of the photos stack"), item("f00", "Unnamed volume")],
+    buildCacheCount: 3,
+    buildCacheBytes: 7,
+  };
+  // The owner unticked c2 and the build cache, and ticked the named volume.
+  const draft = {
+    pick: { containers: ["c1"], images: ["nginx:1"], volumes: ["photos_db", "f00"], buildCache: false },
+    offered: offeredKeys(before),
+  };
+  assert.deepEqual(restorePick(draft, before), draft.pick);
+
+  // Read again: c1 has gone, c3 and a new unnamed volume are new, a new named volume too.
+  const after = {
+    ...before,
+    containers: [item("c2"), item("c3")],
+    volumes: [item("photos_db", "Named volume of the photos stack"), item("f00", "Unnamed volume"), item("b11", "Unnamed volume"), item("notes", "Named volume")],
+  };
+  assert.deepEqual(restorePick(draft, after), {
+    containers: ["c3"],
+    images: ["nginx:1"],
+    volumes: ["photos_db", "f00", "b11"],
+    buildCache: false,
+  });
+  // No build cache any more: nothing to tick.
+  assert.equal(restorePick({ ...draft, pick: { ...draft.pick, buildCache: true } }, { ...after, buildCacheCount: 0 }).buildCache, false);
 });
 
 test("a terminal into a container names it only as Docker could have", () => {

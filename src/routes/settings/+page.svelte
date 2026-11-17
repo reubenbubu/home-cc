@@ -1,21 +1,33 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, errorText, secretKeys, type AppInfo, type Settings } from "$lib/api";
+  import { differs } from "$lib/drafts";
+  import { drafts } from "$lib/drafts.svelte";
   import { icons } from "$lib/icons";
   import { settings } from "$lib/settings.svelte";
   import { zoom } from "$lib/zoom.svelte";
   import { ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN } from "$lib/zoom";
   import Address from "$lib/components/Address.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
+  import DraftNote from "$lib/components/DraftNote.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Problem from "$lib/components/Problem.svelte";
 
   type RangeChoice = "auto" | "custom" | string;
+  /** The form as typed, kept while another screen is shown (drafts.svelte.ts). */
+  type SettingsDraft = { form: Settings; rangeChoice: RangeChoice; customRange: string };
+  const DRAFT = "settings";
+  /** The passphrase box, kept apart: it is stored with its own button, not with Save. */
+  const PASSPHRASE_DRAFT = "settings-passphrase";
 
-  let form = $state<Settings>({ ...settings.value });
-  let rangeChoice = $state<RangeChoice>("auto");
-  let customRange = $state("");
-  let filled = false;
+  const draft = drafts.get<SettingsDraft>(DRAFT);
+  let form = $state<Settings>(draft?.form ?? { ...settings.value });
+  let rangeChoice = $state<RangeChoice>(draft?.rangeChoice ?? "auto");
+  let customRange = $state(draft?.customRange ?? "");
+  /** Filled from what is saved, or from a draft (which comes first). */
+  let filled = $state(!!draft);
+  /** The form was filled from a draft rather than from what is saved. */
+  let restored = $state(!!draft || drafts.has(PASSPHRASE_DRAFT));
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   /** What the refused save sent, as it was then (the form may have been edited since). */
@@ -24,7 +36,7 @@
   /** Field messages only show once Save has been tried. */
   let tried = $state(false);
 
-  let passphrase = $state("");
+  let passphrase = $state(drafts.get<string>(PASSPHRASE_DRAFT) ?? "");
   let hasPassphrase = $state<boolean | null>(null);
   let secretError = $state<string | null>(null);
   let storing = $state(false);
@@ -48,6 +60,27 @@
       fill(settings.value);
     }
   });
+
+  /** The range the form would save. */
+  const typedRange = $derived(rangeChoice === "auto" ? "" : rangeChoice === "custom" ? customRange.trim() : rangeChoice);
+  /** The form holds something Save hasn't saved (the custom range box only counts while it is chosen). */
+  const formChanged = $derived(filled && settings.loaded && differs<Settings>({ ...form, scanRange: typedRange }, settings.value));
+  const unsaved = $derived(restored && (formChanged || !!passphrase));
+
+  $effect(() => {
+    if (!filled || !settings.loaded) return;
+    if (formChanged) drafts.set<SettingsDraft>(DRAFT, { form, rangeChoice, customRange });
+    else drafts.clear(DRAFT);
+  });
+  $effect(() => drafts.keep(PASSPHRASE_DRAFT, passphrase, ""));
+
+  function discard() {
+    drafts.clear(DRAFT, PASSPHRASE_DRAFT);
+    restored = false;
+    passphrase = "";
+    tried = false;
+    if (settings.loaded) fill(settings.value);
+  }
 
   // A range picked from the list whose network has since gone (the list is read again below and after
   // every scan) is kept as typed text, so the choice never shows as an empty box.
@@ -114,6 +147,7 @@
       const sent = { ...form, scanRange };
       refusedSettings = JSON.stringify(sent);
       fill(await settings.save(sent));
+      drafts.clear(DRAFT);
       savedNote = true;
       tried = false;
     } catch (err) {
@@ -131,6 +165,7 @@
       await api.setSecret(secretKeys.sshKeyPassphrase, passphrase);
       hasPassphrase = true;
       passphrase = "";
+      drafts.clear(PASSPHRASE_DRAFT);
     } catch (err) {
       secretError = `Couldn't store the passphrase: ${errorText(err)}`;
     } finally {
@@ -298,6 +333,7 @@
   <div class="save-bar">
     <button class="btn primary" type="submit" disabled={saving || !settings.loaded}>{saving ? "Saving…" : "Save settings"}</button>
     {#if savedNote}<span class="saved" role="status"><Icon path={icons.check} size={15} /> Saved</span>{/if}
+    {#if unsaved}<DraftNote ondiscard={discard} />{/if}
     {#if tried && !valid}<span class="problem" role="alert">Some values need fixing before they can be saved.</span>{/if}
     {#if saveError}
       <Problem
