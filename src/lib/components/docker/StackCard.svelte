@@ -2,10 +2,11 @@
   // One compose stack: its state, the actions on the whole stack, and its containers. Also used, without a
   // stack, for the containers that aren't in one.
   import type { Device } from "$lib/api";
-  import type { Container, ContainerStats, DockerHost, Stack } from "$lib/docker/api";
+  import type { Container, ContainerStats, DockerHost, ImageUpdate, Stack } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { containerKey, stackKey, stackSummary } from "$lib/docker/logic";
+  import { containerKey, stackKey, stackSummary, updateOf } from "$lib/docker/logic";
+  import { count } from "$lib/format";
   import { dockerProblem } from "$lib/docker/problem";
   import ConfirmButton from "../ConfirmButton.svelte";
   import Icon from "../Icon.svelte";
@@ -21,8 +22,11 @@
     now,
     logsFor,
     filesFor,
+    updatesFor = false,
+    answers,
     onlogs,
     onfiles,
+    onupdates,
   }: {
     host: DockerHost;
     device: Device | undefined;
@@ -35,11 +39,19 @@
     logsFor: string | null;
     /** The stack whose files are open, if any. */
     filesFor: string | null;
+    /** True while this card's updates are open in the side panel. */
+    updatesFor?: boolean;
+    /** The host's last update check, by updateKey. */
+    answers: Map<string, ImageUpdate>;
     onlogs: (c: Container) => void;
     onfiles: (stack: Stack) => void;
+    /** Opens the updates of this stack, or of the containers outside any stack (null). */
+    onupdates: (stack: Stack | null) => void;
   } = $props();
 
   const containers = $derived(stack?.containers ?? others ?? []);
+  /** Containers with a newer image in their registry. */
+  const updateCount = $derived(containers.filter((c) => updateOf(answers, c)?.state === "available").length);
   const summary = $derived(stack ? stackSummary(stack) : null);
   const key = $derived(stack ? stackKey(host.deviceId, stack.name) : "");
   const action = $derived(stack ? docker.action(key) : undefined);
@@ -64,7 +76,13 @@
       {:else}
         <span class="muted small summary">Not part of a compose stack</span>
       {/if}
+      {#if updateCount}<span class="updates small">{count(updateCount, "update")}</span>{/if}
     </div>
+    {#if !stack && updateCount}
+      <div class="acts">
+        <button class="btn small" class:on={updatesFor} aria-pressed={updatesFor} onclick={() => onupdates(null)}>Pull new images…</button>
+      </div>
+    {/if}
     {#if stack}
       <div class="acts">
         {#if busy}
@@ -73,6 +91,17 @@
           {#if down}
             <button class="btn small primary" onclick={() => docker.stackAction(host.deviceId, stack.name, "up")}>Start</button>
           {:else}
+            {#if updateCount}
+              <button
+                class="btn small primary"
+                class:on={updatesFor}
+                aria-pressed={updatesFor}
+                title="Pull the newer images and recreate only the containers that use them; you confirm first"
+                onclick={() => onupdates(stack)}
+              >
+                Update…
+              </button>
+            {/if}
             <button class="btn small" title="Fetch newer images, then recreate what changed" onclick={() => docker.stackAction(host.deviceId, stack.name, "pull")}>
               Pull and restart
             </button>
@@ -132,7 +161,7 @@
         <span role="columnheader"><span class="sr-only">Actions</span></span>
       </div>
       {#each containers as c (c.id)}
-        <ContainerRow hostId={host.deviceId} container={c} stats={stats?.get(c.id)} {now} logsOpen={logsFor === c.id} {onlogs} />
+        <ContainerRow hostId={host.deviceId} container={c} stats={stats?.get(c.id)} {now} logsOpen={logsFor === c.id} update={updateOf(answers, c)} {onlogs} />
       {/each}
     </div>
   {/if}
@@ -156,13 +185,16 @@
     --cols: minmax(8rem, 1.6fr) minmax(7.5rem, 1.1fr) minmax(5rem, 1fr) 3.6rem 4.8rem 15.1rem;
   }
   header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; min-width: 0; }
-  .title { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; }
+  .title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.1rem 0.6rem; min-width: 0; }
   .title .dot { align-self: center; }
   h3 { margin: 0; font-size: 1.1rem; font-weight: 600; }
   .summary { white-space: nowrap; }
+  .updates { white-space: nowrap; color: var(--accent); font-weight: 600; }
   .acts { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   .acts .btn { display: inline-flex; align-items: center; gap: 0.35rem; }
   .acts .btn.on { border-color: var(--accent); color: var(--accent); }
+  /* A filled button that is pressed keeps its colours and gets a ring. */
+  .acts .btn.primary.on { color: var(--accent-ink); outline: 2px solid var(--accent); outline-offset: 2px; }
   .doing { display: inline-flex; align-items: center; gap: 0.5rem; color: var(--accent); }
   .folder { margin: -0.35rem 0 0; }
   .down { margin: 0; }

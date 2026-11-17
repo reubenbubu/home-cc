@@ -3,6 +3,7 @@
 
 use super::parse::{CleanupPreview, ContainerStats};
 use super::scripts::{ContainerAction, StackAction};
+use super::updates::UpdateCheck;
 use super::{ActionOutput, CleanupPick, CleanupResult, Docker, DockerHost, HostMode, HostView, SavedFile};
 use crate::error::{Error, Result};
 use tauri::{AppHandle, Manager, State};
@@ -56,6 +57,37 @@ pub async fn docker_stack_action(
     action: StackAction,
 ) -> Result<ActionOutput> {
     docker.stack_action(&app, device_id, &stack, action).await
+}
+
+/// Check the host's images for newer ones in their registries, without pulling. `auto` for the screens'
+/// own checks (at most every few hours; the last answer otherwise). `images`: only these, after an update.
+#[tauri::command]
+pub async fn docker_check_updates(
+    app: AppHandle,
+    docker: State<'_, Docker>,
+    device_id: i64,
+    auto: bool,
+    images: Option<Vec<String>>,
+) -> Result<Option<UpdateCheck>> {
+    docker.check_updates(&app, device_id, auto, images).await
+}
+
+/// Pull new images for some services of a stack and recreate just those.
+#[tauri::command]
+pub async fn docker_update_stack(
+    app: AppHandle,
+    docker: State<'_, Docker>,
+    device_id: i64,
+    stack: String,
+    services: Vec<String>,
+) -> Result<ActionOutput> {
+    docker.update_stack(&app, device_id, &stack, &services).await
+}
+
+/// Pull the image of a container outside any stack. The container itself isn't recreated.
+#[tauri::command]
+pub async fn docker_pull_image(app: AppHandle, docker: State<'_, Docker>, device_id: i64, image: String) -> Result<ActionOutput> {
+    docker.pull_image(&app, device_id, &image).await
 }
 
 /// Forget a stack that is down, so it no longer shows.

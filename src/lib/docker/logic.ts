@@ -1,6 +1,6 @@
 // The Docker screen's small decisions, kept free of Svelte and the back end so
 // they can be tested with plain Node (logic.test.mjs).
-import type { CleanupPick, CleanupPreview, Container, DockerHost, Overview, Port, Stack } from "./api";
+import type { CleanupPick, CleanupPreview, Container, DockerHost, ImageUpdate, Overview, Port, Stack, UpdateCheck, UpdateState } from "./api";
 
 export type Tone = "ok" | "warn" | "bad" | "idle";
 
@@ -219,13 +219,23 @@ export function cleanupDraftKey(hostId: number): string {
   return `docker-cleanup:${hostId}`;
 }
 
+/** Where a host's update ticks are kept while another screen is shown (drafts.svelte.ts). */
+export function updatesDraftKey(hostId: number): string {
+  return `docker-updates:${hostId}`;
+}
+
+/** The side panels whose ticks are kept per host, and where. */
+const HOST_DRAFTS: Record<string, (hostId: number) => string> = { cleanup: cleanupDraftKey, updates: updatesDraftKey };
+
 /** The drafts to let go when the Docker screen swaps or shuts its side panel. Leaving the screen keeps them,
- *  but a cleanup put away from the toolbar or replaced by another panel is put away as surely as with its
- *  own Close: opened again, it starts from the usual ticks, never from a named volume ticked earlier. */
+ *  but a cleanup or an update put away from the toolbar or replaced by another panel is put away as surely as
+ *  with its own Close: opened again, it starts from the usual ticks, never from a named volume ticked earlier.
+ *  An update panel that only changes between one stack and the whole host keeps its ticks. */
 export function draftsDroppedWith(from: { kind: string; hostId?: number } | null, to: { kind: string; hostId?: number } | null): string[] {
-  if (from?.kind !== "cleanup" || from.hostId == null) return [];
-  if (to?.kind === "cleanup" && to.hostId === from.hostId) return [];
-  return [cleanupDraftKey(from.hostId)];
+  const key = from && from.hostId != null ? HOST_DRAFTS[from.kind]?.(from.hostId) : undefined;
+  if (!key) return [];
+  if (to?.kind === from?.kind && to?.hostId === from?.hostId) return [];
+  return [key];
 }
 
 /** The owner's ticks in a cleanup, kept while another screen is shown, with what was offered then. */
@@ -350,4 +360,215 @@ export function summarise(o: Overview): HostSummary {
     stacks: o.stacks.filter((s) => s.containers.length > 0).length,
     attention,
   };
+}
+
+// --- Image updates (src-tauri/src/docker/updates.rs) ---
+
+/** Where an image's answer is kept: containers that run the same image name as the same local image share it. */
+export function updateKey(image: string, imageId: string): string {
+  return `${image}\n${imageId}`;
+}
+
+export function updatesByKey(check: UpdateCheck | null | undefined): Map<string, ImageUpdate> {
+  return new Map((check?.images ?? []).map((u) => [updateKey(u.image, u.imageId), u]));
+}
+
+/** A container's answer, if its image was checked. */
+export function updateOf(answers: Map<string, ImageUpdate>, c: Container): ImageUpdate | undefined {
+  return c.imageId ? answers.get(updateKey(c.image, c.imageId)) : undefined;
+}
+
+/** The states in which the registry couldn't answer. */
+export function isCheckFailure(state: UpdateState): boolean {
+  return state === "needsLogin" || state === "unreachable" || state === "notFound" || state === "rateLimited" || state === "failed";
+}
+
+/** "1a2b3c4d5e6f": a digest as short as Docker shows ids. */
+export function shortDigest(d: string | null | undefined): string {
+  if (!d) return "?";
+  return d.replace(/^sha256:/, "").slice(0, 12);
+}
+
+/** Why a registry couldn't answer, in a few words. */
+export function checkFailureText(u: ImageUpdate): string {
+  const said = u.message ? `: ${u.message}` : "";
+  switch (u.state) {
+    case "needsLogin":
+      return `the registry wants a login this host doesn't have (run docker login on the host)${said}`;
+    case "unreachable":
+      return `the host couldn't reach the registry${said}`;
+    case "notFound":
+      return `the registry doesn't have this tag${said}`;
+    case "rateLimited":
+      return `the registry asked to slow down; try again later${said}`;
+    default:
+      return u.message ?? "it couldn't be checked";
+  }
+}
+
+export interface UpdateMark {
+  text: string;
+  tone: "accent" | "muted" | "warn";
+  title: string;
+}
+
+/** What a container's row says about its image, or null when there is nothing to say (up to date, or not checked). */
+export function updateMark(u: ImageUpdate | undefined): UpdateMark | null {
+  if (!u) return null;
+  const move = `${shortDigest(u.current)} → ${shortDigest(u.latest)}`;
+  switch (u.state) {
+    case "available":
+      return u.downloaded
+        ? { text: "New image pulled", tone: "accent", title: `The newer image (${move}) is on the host, but the container still runs the old one until it is recreated` }
+        : { text: "Update", tone: "accent", title: `A newer image is in the registry: ${move}` };
+    case "builtHere":
+      return { text: "Built here", tone: "muted", title: "Built or loaded on this host rather than pulled, so there is no registry to compare with" };
+    case "pinned":
+      return { text: "Pinned", tone: "muted", title: "Named by digest, so it never changes" };
+    case "upToDate":
+      return null;
+    default:
+      return { text: "Can't check", tone: "warn", title: `Couldn't check for a newer image: ${checkFailureText(u)}` };
+  }
+}
+
+/** One service of a stack with a newer image, and the containers that restart for it. */
+export interface ServiceUpdate {
+  service: string;
+  image: string;
+  update: ImageUpdate;
+  containers: string[];
+  /** None of its containers runs: updating it starts it. */
+  stopped: boolean;
+}
+
+export interface StackUpdates {
+  stack: string;
+  services: ServiceUpdate[];
+  /** Containers that restart. */
+  count: number;
+}
+
+/** What a host has to update: stack by stack, the containers outside any stack, and the images that couldn't be checked. */
+export interface HostUpdates {
+  stacks: StackUpdates[];
+  others: { container: Container; update: ImageUpdate }[];
+  /** One per image name. */
+  failed: ImageUpdate[];
+  /** Containers with a newer image, in stacks or not. */
+  count: number;
+  /** Image names with no answer yet (a container recreated since the check, say), so "up to date" can't be said. */
+  unchecked: string[];
+  /** Whether every container's image has an answer. */
+  complete: boolean;
+}
+
+/** The image names of these containers that have no answer yet. A container without an image id can't be asked
+ *  about and doesn't count. */
+export function uncheckedIn(containers: Container[], answers: Map<string, ImageUpdate>): string[] {
+  return [...new Set(containers.filter((c) => c.imageId && !updateOf(answers, c)).map((c) => c.image))].sort();
+}
+
+/** "1 image not checked yet", "3 images not checked yet". */
+export function uncheckedText(n: number): string {
+  return `${n} ${n === 1 ? "image" : "images"} not checked yet`;
+}
+
+export function stackUpdates(s: Stack, answers: Map<string, ImageUpdate>): StackUpdates {
+  const services: ServiceUpdate[] = [];
+  for (const c of s.containers) {
+    const u = updateOf(answers, c);
+    if (u?.state !== "available") continue;
+    const service = c.service ?? c.name;
+    const known = services.find((x) => x.service === service);
+    if (known) {
+      known.containers.push(c.name);
+      known.stopped &&= !isRunning(c);
+    } else {
+      services.push({ service, image: c.image, update: u, containers: [c.name], stopped: !isRunning(c) });
+    }
+  }
+  services.sort((a, b) => a.service.localeCompare(b.service));
+  return { stack: s.name, services, count: services.reduce((n, x) => n + x.containers.length, 0) };
+}
+
+export function hostUpdates(o: Overview, answers: Map<string, ImageUpdate>): HostUpdates {
+  const stacks = stackOrder(o.stacks)
+    .map((s) => stackUpdates(s, answers))
+    .filter((s) => s.count > 0);
+  const others = o.others.flatMap((c) => {
+    const u = updateOf(answers, c);
+    return u?.state === "available" ? [{ container: c, update: u }] : [];
+  });
+  const all = [...o.stacks.flatMap((s) => s.containers), ...o.others];
+  const failed = new Map<string, ImageUpdate>();
+  for (const c of all) {
+    const u = updateOf(answers, c);
+    if (u && isCheckFailure(u.state) && !failed.has(u.image)) failed.set(u.image, u);
+  }
+  const unchecked = uncheckedIn(all, answers);
+  return {
+    stacks,
+    others,
+    failed: [...failed.values()].sort((a, b) => a.image.localeCompare(b.image)),
+    count: stacks.reduce((n, s) => n + s.count, 0) + others.length,
+    unchecked,
+    complete: unchecked.length === 0,
+  };
+}
+
+/** "3 updates in 2 stacks", "1 update in 1 stack and 1 other container", "1 update, a container outside any stack", "No updates". */
+export function updatesText(h: HostUpdates): string {
+  if (h.count === 0) return "No updates";
+  const inStacks = h.stacks.reduce((n, s) => n + s.count, 0);
+  const stacks = h.stacks.length;
+  if (inStacks === 0) return h.others.length === 1 ? "1 update, a container outside any stack" : `${h.others.length} updates, containers outside any stack`;
+  const main = `${inStacks} ${inStacks === 1 ? "update" : "updates"} in ${stacks} ${stacks === 1 ? "stack" : "stacks"}`;
+  if (h.others.length === 0) return main;
+  return `${main} and ${h.others.length} other ${h.others.length === 1 ? "container" : "containers"}`;
+}
+
+/** Containers whose image has no answer yet (recreated since the check, say), leaving out those already asked
+ *  about (by updateKey): their image names, and their keys. */
+export function uncheckedImages(o: Overview, answers: Map<string, ImageUpdate>, asked: Set<string> = new Set()): { images: string[]; keys: string[] } {
+  const all = [...o.stacks.flatMap((s) => s.containers), ...o.others];
+  const fresh = all.filter((c) => c.imageId && !updateOf(answers, c) && !asked.has(updateKey(c.image, c.imageId)));
+  return {
+    images: [...new Set(fresh.map((c) => c.image))].sort(),
+    keys: [...new Set(fresh.map((c) => updateKey(c.image, c.imageId ?? "")))],
+  };
+}
+
+/** A service as the update ticks know it. */
+export function serviceKey(stack: string, service: string): string {
+  return `${stack}/${service}`;
+}
+
+/** The update ticks the owner changed (by serviceKey), kept while another screen is shown. Anything not in it
+ *  has its usual tick. */
+export interface UpdatesDraft {
+  choices: Record<string, boolean>;
+}
+
+/** Whether a service is ticked: the owner's choice, else ticked when it runs. A stopped service starts unticked,
+ *  because updating it starts it. */
+export function isTicked(stack: string, x: ServiceUpdate, choices: Record<string, boolean>): boolean {
+  return choices[serviceKey(stack, x.service)] ?? !x.stopped;
+}
+
+/** What an update would do, in one string: which services of which stacks, and the images they move to. When
+ *  it changes while the confirm is armed, the confirm asks again (ConfirmButton's `what`), so the second click
+ *  never runs something other than what was shown at the first. */
+export function planSignature(plan: StackUpdates[]): string {
+  return JSON.stringify(plan.map((s) => [s.stack, s.services.map((x) => [x.service, x.update.latest, x.containers])]));
+}
+
+/** What an update runs, stack by stack: the ticked services. Stacks with none ticked drop out. */
+export function updatePlan(stacks: StackUpdates[], choices: Record<string, boolean>): StackUpdates[] {
+  return stacks
+    .map((s) => {
+      const services = s.services.filter((x) => isTicked(s.stack, x, choices));
+      return { stack: s.stack, services, count: services.reduce((n, x) => n + x.containers.length, 0) };
+    })
+    .filter((s) => s.services.length > 0);
 }

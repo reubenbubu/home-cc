@@ -29,6 +29,19 @@ import {
   stateTone,
   stripAnsi,
   summarise,
+  hostUpdates,
+  isTicked,
+  planSignature,
+  shortDigest,
+  uncheckedImages,
+  uncheckedIn,
+  uncheckedText,
+  updateKey,
+  updateMark,
+  updatePlan,
+  updatesByKey,
+  updatesDraftKey,
+  updatesText,
 } from "./logic.ts";
 
 const container = (more = {}) => ({
@@ -288,4 +301,162 @@ test("a container stopped on purpose doesn't need a look", () => {
   for (const exitCode of [0, 137, 143, null]) assert.equal(containerAttention(container({ state: "exited", exitCode })), null, String(exitCode));
   assert.equal(containerAttention(container({ state: "exited", exitCode: 1 })), "stopped with an error (exit 1)");
   assert.equal(containerAttention(container({ state: "running", health: "starting" })), null);
+});
+
+// --- Image updates ---
+
+const OLD = `sha256:${"1".repeat(64)}`;
+const NEW = `sha256:${"2".repeat(64)}`;
+const answer = (image, imageId, state, more = {}) => ({ image, imageId, state, current: OLD, latest: NEW, downloaded: false, message: null, ...more });
+
+/** A host like the sample one: two stacks with updates (one service stopped), one up to date, a container outside
+ *  any stack with an update, and images that couldn't be checked. */
+function updatesSample() {
+  const c = (name, project, service, image, imageId, more = {}) => container({ id: name.padEnd(12, "0"), name, project, service, image, imageId, ...more });
+  const stack = (name, containers) => ({ name, workingDir: null, configFiles: [], containers });
+  const o = {
+    deviceId: 1,
+    readAt: 0,
+    stacks: [
+      stack("media", [
+        c("media-sonarr-1", "media", "sonarr", "lscr.io/linuxserver/sonarr:latest", "id-s"),
+        c("media-radarr-1", "media", "radarr", "lscr.io/linuxserver/radarr:latest", "id-r"),
+        c("media-prowlarr-1", "media", "prowlarr", "lscr.io/linuxserver/prowlarr:latest", "id-p", { state: "exited", exitCode: 0 }),
+        c("media-jellyfin-1", "media", "jellyfin", "jellyfin/jellyfin:10.10", "id-j"),
+      ]),
+      stack("photos", [
+        c("photos-server-1", "photos", "immich-server", "ghcr.io/immich-app/immich-server:release", "id-i"),
+        c("photos-server-2", "photos", "immich-server", "ghcr.io/immich-app/immich-server:release", "id-i"),
+        c("photos-db-1", "photos", "database", "registry.home.lan/db:16", "id-d"),
+      ]),
+      stack("home", [c("home-mqtt-1", "home", "mqtt", "eclipse-mosquitto:2", "id-m")]),
+      stack("nextcloud", []),
+    ],
+    others: [
+      c("speedtest", null, null, "lscr.io/linuxserver/speedtest-tracker:latest", "id-t"),
+      c("dashboard", null, null, "homepage-custom:latest", "id-h"),
+      c("nas-backup", null, null, "registry.home.lan/sam/nas-backup:1.4", "id-n"),
+      c("new-one", null, null, "alpine:3.20", "id-new"),
+      c("no-id", null, null, "alpine:3.20", null),
+    ],
+  };
+  const check = {
+    deviceId: 1,
+    checkedAt: 100,
+    images: [
+      answer("lscr.io/linuxserver/sonarr:latest", "id-s", "available"),
+      answer("lscr.io/linuxserver/radarr:latest", "id-r", "available", { downloaded: true }),
+      answer("lscr.io/linuxserver/prowlarr:latest", "id-p", "available"),
+      answer("jellyfin/jellyfin:10.10", "id-j", "upToDate"),
+      answer("ghcr.io/immich-app/immich-server:release", "id-i", "available"),
+      answer("registry.home.lan/db:16", "id-d", "unreachable", { message: "dial tcp: no such host" }),
+      answer("eclipse-mosquitto:2", "id-m", "upToDate"),
+      answer("lscr.io/linuxserver/speedtest-tracker:latest", "id-t", "available"),
+      answer("homepage-custom:latest", "id-h", "builtHere", { current: null, latest: null }),
+      answer("registry.home.lan/sam/nas-backup:1.4", "id-n", "needsLogin", { message: "401 Unauthorized" }),
+      // A container recreated since: the old local image's answer doesn't count for the new one.
+      answer("alpine:3.20", "id-old", "upToDate"),
+    ],
+  };
+  return { o, check, answers: updatesByKey(check) };
+}
+
+test("updates are counted per container, per stack and per host, and said in one line", () => {
+  const { o, check, answers } = updatesSample();
+  const h = hostUpdates(o, answers);
+  assert.deepEqual(
+    h.stacks.map((s) => [s.stack, s.count, s.services.map((x) => x.service)]),
+    [
+      ["media", 3, ["prowlarr", "radarr", "sonarr"]],
+      ["photos", 2, ["immich-server"]],
+    ],
+    "two containers of one service are one service, two restarts; stacks without updates drop out",
+  );
+  assert.deepEqual(h.stacks[1].services[0].containers, ["photos-server-1", "photos-server-2"]);
+  assert.equal(h.stacks[0].services[0].stopped, true, "prowlarr isn't running");
+  assert.deepEqual(h.others.map((x) => x.container.name), ["speedtest"]);
+  assert.equal(h.count, 6);
+  assert.deepEqual(h.failed.map((u) => [u.image, u.state]), [
+    ["registry.home.lan/db:16", "unreachable"],
+    ["registry.home.lan/sam/nas-backup:1.4", "needsLogin"],
+  ]);
+  assert.equal(h.complete, false, "new-one has no answer yet");
+  assert.deepEqual(h.unchecked, ["alpine:3.20"], "by image name; no-id can't be asked about and doesn't count");
+  assert.equal(uncheckedText(1), "1 image not checked yet");
+  assert.equal(uncheckedText(3), "3 images not checked yet");
+  assert.deepEqual(uncheckedIn(o.stacks[0].containers, answers), [], "a stack whose images all have answers");
+  const answered = updatesByKey({ deviceId: 1, checkedAt: 100, images: [...check.images, answer("alpine:3.20", "id-new", "upToDate")] });
+  const done = hostUpdates(o, answered);
+  assert.deepEqual([done.complete, done.unchecked], [true, []]);
+  assert.equal(updatesText(h), "5 updates in 2 stacks and 1 other container");
+
+  const only = (stacks, others) => ({ stacks, others, failed: [], count: stacks.reduce((n, s) => n + s.count, 0) + others.length, complete: true });
+  assert.equal(updatesText(only([], [])), "No updates");
+  assert.equal(updatesText(only([{ stack: "a", services: [], count: 1 }], [])), "1 update in 1 stack");
+  assert.equal(updatesText(only([{ stack: "a", services: [], count: 2 }, { stack: "b", services: [], count: 1 }], [])), "3 updates in 2 stacks");
+  assert.equal(updatesText(only([], [{}])), "1 update, a container outside any stack");
+  assert.equal(updatesText(only([], [{}, {}])), "2 updates, containers outside any stack");
+  assert.equal(updatesText(only([{ stack: "a", services: [], count: 1 }], [{}, {}])), "1 update in 1 stack and 2 other containers");
+});
+
+test("containers recreated since the check are asked about once, by image", () => {
+  const { o, answers } = updatesSample();
+  const first = uncheckedImages(o, answers);
+  assert.deepEqual(first.images, ["alpine:3.20"], "a container without an image id can't be asked about");
+  assert.deepEqual(first.keys, [updateKey("alpine:3.20", "id-new")]);
+  assert.deepEqual(uncheckedImages(o, answers, new Set(first.keys)).images, [], "asked once");
+});
+
+test("an update runs the ticked services; a stopped one starts unticked", () => {
+  const { o, answers } = updatesSample();
+  const stacks = hostUpdates(o, answers).stacks;
+  const plan = (choices) => updatePlan(stacks, choices).map((s) => [s.stack, s.services.map((x) => x.service), s.count]);
+  assert.deepEqual(plan({}), [
+    ["media", ["radarr", "sonarr"], 2],
+    ["photos", ["immich-server"], 2],
+  ]);
+  assert.deepEqual(plan({ "media/prowlarr": true, "media/sonarr": false }), [
+    ["media", ["prowlarr", "radarr"], 2],
+    ["photos", ["immich-server"], 2],
+  ]);
+  assert.deepEqual(plan({ "photos/immich-server": false, "media/radarr": false, "media/sonarr": false }), [], "nothing ticked");
+
+  // The confirm asks again when what it would run changes between its two clicks.
+  const sig = (choices, list = stacks) => planSignature(updatePlan(list, choices));
+  assert.equal(sig({}), sig({ "media/sonarr": true }), "the same services, ticked by default or by hand");
+  assert.notEqual(sig({}), sig({ "media/sonarr": false }), "one service fewer");
+  const started = stacks.map((s) => ({ ...s, services: s.services.map((x) => (x.service === "prowlarr" ? { ...x, stopped: false } : x)) }));
+  assert.notEqual(sig({}), sig({}, started), "a stopped service started in the background is ticked now");
+  const newer = stacks.map((s) => ({ ...s, services: s.services.map((x) => ({ ...x, update: { ...x.update, latest: "sha256:" + "9".repeat(64) } })) }));
+  assert.notEqual(sig({}), sig({}, newer), "a newer image than the one shown");
+  assert.equal(isTicked("media", stacks[0].services[0], {}), false);
+  assert.equal(updatesDraftKey(4), "docker-updates:4");
+});
+
+test("each answer has its own mark on the row, and up to date has none", () => {
+  const mark = (state, more) => updateMark(answer("x:1", "id", state, more));
+  assert.equal(updateMark(undefined), null, "not checked yet");
+  assert.equal(mark("upToDate"), null);
+  assert.deepEqual([mark("available").text, mark("available").tone], ["Update", "accent"]);
+  assert.match(mark("available").title, /111111111111 → 222222222222/);
+  assert.equal(mark("available", { downloaded: true }).text, "New image pulled");
+  assert.deepEqual([mark("builtHere").text, mark("builtHere").tone], ["Built here", "muted"]);
+  assert.equal(mark("pinned").text, "Pinned");
+  for (const state of ["needsLogin", "unreachable", "notFound", "rateLimited", "failed"]) {
+    assert.deepEqual([mark(state, { message: "said so" }).text, mark(state).tone], ["Can't check", "warn"], state);
+    assert.match(mark(state, { message: "said so" }).title, /said so/, state);
+  }
+  assert.match(mark("needsLogin").title, /docker login/);
+  assert.equal(shortDigest(NEW), "222222222222");
+  assert.equal(shortDigest(null), "?");
+});
+
+test("an update panel put away lets its ticks go; one stack or the whole host keeps them", () => {
+  const updates = { kind: "updates", hostId: 4, stack: "media" };
+  const key = updatesDraftKey(4);
+  assert.deepEqual(draftsDroppedWith(updates, null), [key]);
+  assert.deepEqual(draftsDroppedWith(updates, { kind: "cleanup", hostId: 4 }), [key]);
+  assert.deepEqual(draftsDroppedWith(updates, { kind: "updates", hostId: 5, stack: null }), [key]);
+  assert.deepEqual(draftsDroppedWith(updates, { kind: "updates", hostId: 4, stack: null }), []);
+  assert.deepEqual(draftsDroppedWith({ kind: "cleanup", hostId: 4 }, updates), [cleanupDraftKey(4)]);
 });

@@ -131,6 +131,120 @@ pub fn stack_action(compose: Compose, stack: &StackPlace, action: StackAction) -
     Some(script(&format!("{}{body}\n", cd(stack))))
 }
 
+/// A compose service name: letters, digits and "._-", as compose itself allows.
+pub fn is_service_name(s: &str) -> bool {
+    s.len() <= 255
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// Update some services of a stack: pull their images, then recreate only those services (`--no-deps`, so
+/// nothing else in the stack restarts). None when the machine has no compose command. The services must
+/// already be checked with [`is_service_name`]; they are quoted as well.
+pub fn stack_update(compose: Compose, stack: &StackPlace, services: &[String]) -> Option<String> {
+    let c = compose_command(compose, stack)?;
+    let names = services.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
+    Some(script(&format!(
+        "{}{c} pull {names} </dev/null 2>&1 && {c} up -d --no-deps {names} </dev/null 2>&1\n",
+        cd(stack)
+    )))
+}
+
+/// Pull one image, for a container that isn't in a compose stack. The container itself is left alone.
+pub fn pull_image(image: &str) -> String {
+    script(&format!("docker pull {} </dev/null 2>&1\n", quote(image)))
+}
+
+/// What a local image is: its id and the digests registries gave it.
+const LOCAL_FORMAT: &str = "{{json .Id}} {{json .RepoDigests}}";
+
+/// The first step of an update check (see updates.rs): the images the containers run, by id, then what each
+/// image name names on the host now. Ids and names must already be checked to be safe; they are quoted too.
+pub fn local_images<'a>(ids: impl IntoIterator<Item = &'a String>, images: impl IntoIterator<Item = &'a String>) -> String {
+    let fmt = quote(LOCAL_FORMAT);
+    let ids: Vec<String> = ids.into_iter().map(|i| quote(i)).collect();
+    let mut body = String::from("echo '@@ids'\n");
+    if !ids.is_empty() {
+        body += &format!("docker image inspect --format {fmt} {} </dev/null 2>/dev/null\n", ids.join(" "));
+    }
+    for image in images {
+        let q = quote(image);
+        body += &format!("echo '@@tag '{q}\ndocker image inspect --format {fmt} {q} </dev/null 2>/dev/null\n");
+    }
+    script(&body)
+}
+
+/// Asks a registry what a tag points at, with HEAD requests only (Docker Hub doesn't count those against its
+/// pull limits): first without a login; when the registry asks for a token, with an anonymous one from where
+/// it says (https only), and again. Prints the digest, or fails. Needs curl.
+const HEAD_FUNCTION: &str = r#"hcc_acc='Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
+hcc_head() {
+  command -v curl >/dev/null 2>&1 || return 1
+  u="https://$1/v2/$2/manifests/$3"
+  h=$(curl -sS -I -L --max-time 20 -H "$hcc_acc" "$u" </dev/null 2>/dev/null | tr -d '\r')
+  a=$(printf '%s\n' "$h" | sed -n 's/^[Ww][Ww][Ww]-[Aa][Uu][Tt][Hh][Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ee]: *[Bb][Ee][Aa][Rr][Ee][Rr]  *//p' | tail -n 1)
+  if [ -n "$a" ]; then
+    realm=$(printf '%s' "$a" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')
+    service=$(printf '%s' "$a" | sed -n 's/.*service="\([^"]*\)".*/\1/p')
+    scope=$(printf '%s' "$a" | sed -n 's/.*scope="\([^"]*\)".*/\1/p')
+    [ -n "$scope" ] || scope="repository:$2:pull"
+    case "$realm" in https://*) ;; *) return 1 ;; esac
+    t=$(curl -sS -G --max-time 20 "$realm" --data-urlencode "service=$service" --data-urlencode "scope=$scope" </dev/null 2>/dev/null | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+    [ -n "$t" ] || return 1
+    h=$(curl -sS -I -L --max-time 20 -H "$hcc_acc" -H "Authorization: Bearer $t" "$u" </dev/null 2>/dev/null | tr -d '\r')
+  fi
+  s=$(printf '%s\n' "$h" | sed -n 's/^HTTP\/[0-9.]* \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+  d=$(printf '%s\n' "$h" | sed -n 's/^[Dd][Oo][Cc][Kk][Ee][Rr]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Dd][Ii][Gg][Ee][Ss][Tt]: *\(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -n 1)
+  [ "$s" = 200 ] && [ -n "$d" ] || return 1
+  echo "$d"
+}
+hcc_missing() { printf '%s' "$1" | grep -qi -e 'is not a docker command' -e 'unknown command'; }
+hcc_t=''
+if timeout 1 true >/dev/null 2>&1; then hcc_t="timeout $hcc_wait"; fi
+hcc_slow() { [ -n "$hcc_t" ] && [ "$1" -eq 124 ]; }
+hcc_late() { hcc_n=$(date +%s 2>/dev/null) && [ "$hcc_n" -ge "$hcc_end" ] 2>/dev/null; }
+hcc_check() {
+  echo "@@remote $1"
+  if hcc_late; then echo "@@via late 1"; return; fi
+  if d=$(hcc_head "$2" "$3" "$4"); then echo "@@via head 0"; echo "| Digest: $d"; return; fi
+  out=$($hcc_t docker buildx imagetools inspect "$1" </dev/null 2>&1); rc=$?
+  if hcc_slow $rc; then echo "@@via slow $rc"; return; fi
+  if [ $rc -eq 0 ] || ! hcc_missing "$out"; then echo "@@via buildx $rc"; printf '%s\n' "$out" | head -n 60 | sed 's/^/| /'; return; fi
+  out=$($hcc_t docker manifest inspect -v "$1" </dev/null 2>&1); rc=$?
+  if hcc_slow $rc; then echo "@@via slow $rc"; return; fi
+  if [ $rc -eq 0 ] || ! hcc_missing "$out"; then echo "@@via manifest $rc"; printf '%s\n' "$out" | head -c 100000 | sed 's/^/| /'; return; fi
+  echo "@@via none 1"
+}
+"#;
+
+/// The second step of an update check: what each image's tag points at in its registry now, once per image.
+/// See [`super::updates::remote_digests`] for what it prints. The names must already be checked to be safe
+/// image names (they are quoted too).
+pub fn remote_digests(images: &[(String, super::updates::ImageRef)]) -> String {
+    remote_digests_within(images, CHECK_BUDGET_SECS, FALLBACK_SECS)
+}
+
+/// How long an update check goes on asking registries, in seconds. An image it hasn't got to by then is
+/// answered "ran out of time" without being asked, so the check ends well within the time its SSH run is
+/// given (one slow registry can't cost the answers already found).
+pub const CHECK_BUDGET_SECS: u64 = 20 * 60;
+/// How long `docker buildx imagetools` or `docker manifest` may take for one image, where the host has
+/// `timeout`. curl has its own limit (CURL_SECS for each of its at most three requests).
+pub const FALLBACK_SECS: u64 = 30;
+/// curl's limit per request: `--max-time 20` in HEAD_FUNCTION.
+pub const CURL_SECS: u64 = 20;
+/// The longest one image can take once started: three curl requests, then both fallbacks.
+pub const IMAGE_MAX_SECS: u64 = 3 * CURL_SECS + 2 * FALLBACK_SECS;
+
+fn remote_digests_within(images: &[(String, super::updates::ImageRef)], budget: u64, wait: u64) -> String {
+    let mut body = format!("hcc_end=$(( $(date +%s) + {budget} ))\nhcc_wait={wait}\n");
+    body += HEAD_FUNCTION;
+    for (image, r) in images {
+        body += &format!("hcc_check {} {} {} {}\n", quote(image), quote(r.api_host()), quote(&r.repo), quote(&r.tag));
+    }
+    script(&body)
+}
+
 /// Go to the stack's folder first, as compose did when it was started; stop if it
 /// is gone, rather than run compose somewhere else.
 fn cd(stack: &StackPlace) -> String {
@@ -395,6 +509,143 @@ mod tests {
                 "@@ok cache all"
             ]
         );
+    }
+
+    #[test]
+    fn an_update_pulls_and_recreates_only_the_services_named() {
+        let stack = StackPlace { project: "media".into(), working_dir: Some("/srv/media".into()), config_files: vec!["/srv/media/compose.yml".into()] };
+        let s = stack_update(Compose::Plugin, &stack, &["sonarr".into(), "it's".into()]).unwrap();
+        assert!(s.contains("cd '/srv/media' 2>/dev/null ||"));
+        let c = "docker compose -p 'media' -f '/srv/media/compose.yml'";
+        assert!(s.contains(&format!("{c} pull 'sonarr' 'it'\\''s' </dev/null 2>&1 && {c} up -d --no-deps 'sonarr' 'it'\\''s' </dev/null 2>&1\n")), "{s}");
+        assert_eq!(stack_update(Compose::None, &stack, &["sonarr".into()]), None);
+        assert!(pull_image("lscr.io/linuxserver/speedtest-tracker:latest").ends_with("docker pull 'lscr.io/linuxserver/speedtest-tracker:latest' </dev/null 2>&1\n"));
+        assert!(is_service_name("immich-machine-learning"));
+        assert!(is_service_name("web.1_a"));
+        for bad in ["", "-d", "a b", "a;b", "$(x)", "ü"] {
+            assert!(!is_service_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn local_images_are_read_by_id_then_by_name() {
+        let id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let s = local_images([&id], [&"alpine:3.20".to_string()]);
+        assert!(s.contains(&format!("docker image inspect --format '{{{{json .Id}}}} {{{{json .RepoDigests}}}}' '{id}' </dev/null")), "{s}");
+        assert!(s.contains("echo '@@tag ''alpine:3.20'\ndocker image inspect"));
+        let none = local_images([], []);
+        assert!(!none.contains("inspect"), "nothing to ask about");
+    }
+
+    /// The registry check, run with this machine's own sh against a stand-in curl (a registry that wants an
+    /// anonymous token, and a private one) and a stand-in docker (one without buildx).
+    #[cfg(unix)]
+    #[test]
+    fn registry_check_asks_with_head_then_falls_back() {
+        use super::super::updates::{self, Remote, UpdateState, image_ref};
+        use std::os::unix::fs::PermissionsExt;
+        let new = format!("sha256:{}", "2".repeat(64));
+        let old = format!("sha256:{}", "1".repeat(64));
+        let dir = temp_dir("registry");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let curl = format!(
+            r#"#!/bin/sh
+echo "$*" >> "{log}"
+auth=""; get=""; url=""
+for a in "$@"; do
+  case "$a" in
+    -G) get=1 ;;
+    "Authorization: Bearer tok123") auth=1 ;;
+    https://*) url="$a" ;;
+  esac
+done
+case "$url" in *nocurl*) exit 6 ;; esac
+if [ -n "$get" ]; then echo '{{"access_token":"wrong","token":"tok123","expires_in":300}}'; exit 0; fi
+case "$url" in *private*) printf 'HTTP/1.1 401 Unauthorized\r\nWww-Authenticate: Bearer realm="https://auth.example/token",service="reg"\r\n\r\n'; exit 0 ;; esac
+if [ -n "$auth" ]; then printf 'HTTP/2 200 \r\ncontent-type: x\r\ndocker-content-digest: {new}\r\n\r\n'
+else printf 'HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull"\r\n\r\n'; fi
+"#,
+            log = dir.join("curl.log").display()
+        );
+        let docker = format!(
+            r#"#!/bin/sh
+case "$1 $2 $3" in
+  "buildx imagetools inspect") case "$4" in *nobuildx*) echo "docker: 'buildx' is not a docker command."; exit 1 ;; *private*) echo "ERROR: unexpected status from HEAD request: 401 Unauthorized"; exit 1 ;; esac ;;
+  "manifest inspect -v") echo '{{"Ref":"x","Descriptor":{{"digest":"{old}"}}}}'; exit 0 ;;
+esac
+exit 1
+"#
+        );
+        for (name, text) in [("curl", curl), ("docker", docker)] {
+            std::fs::write(bin.join(name), text).unwrap();
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let images: Vec<(String, updates::ImageRef)> = ["alpine:3.20", "registry.example/private:1", "nocurl.example/nobuildx:1"]
+            .iter()
+            .map(|i| (i.to_string(), image_ref(i).unwrap()))
+            .collect();
+        let script = format!("PATH={}:$PATH\n{}", bin.display(), remote_digests(&images));
+        let (code, out) = sh(&script, &dir);
+        assert_eq!(code, 0, "{out}");
+        let found = updates::remote_digests(&out);
+        assert_eq!(found["alpine:3.20"], Remote::Digest(new.clone()), "{out}");
+        assert!(matches!(&found["registry.example/private:1"], Remote::Failed(UpdateState::NeedsLogin, m) if m.contains("401")), "{out}");
+        assert_eq!(found["nocurl.example/nobuildx:1"], Remote::Digest(old), "{out}");
+        let log = std::fs::read_to_string(dir.join("curl.log")).unwrap();
+        assert!(log.contains("https://registry-1.docker.io/v2/library/alpine/manifests/3.20"), "{log}");
+        assert!(log.lines().all(|l| l.contains(" -G ") || l.contains("-I")), "only HEAD requests and the token: {log}");
+        assert!(log.contains("scope=repository:library/alpine:pull"), "{log}");
+    }
+
+    /// A registry that never answers costs its own image a short wait, not the whole check, and once the
+    /// check's time is up the images left are answered without being asked.
+    #[cfg(unix)]
+    #[test]
+    fn registry_check_gives_up_on_slow_registries_and_runs_out_of_time() {
+        use super::super::updates::{self, Remote, UpdateState, image_ref};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("registry-slow");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // No curl answers; buildx hangs for "slow" images.
+        let curl = "#!/bin/sh\nexit 7\n".to_string();
+        let docker = format!(
+            "#!/bin/sh\necho \"$*\" >> \"{log}\"\ncase \"$4\" in *slow*) exec sleep 20 ;; esac\necho \"Name: $4\"; echo 'Digest: sha256:{d}'\n",
+            log = dir.join("docker.log").display(),
+            d = "4".repeat(64)
+        );
+        for (name, text) in [("curl", curl), ("docker", docker)] {
+            std::fs::write(bin.join(name), text).unwrap();
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let images: Vec<(String, updates::ImageRef)> =
+            ["slow.example/app:1", "ok.example/app:1"].iter().map(|i| (i.to_string(), image_ref(i).unwrap())).collect();
+        let has_timeout = Command::new("sh").arg("-c").arg("timeout 1 true").status().is_ok_and(|s| s.success());
+
+        if has_timeout {
+            let started = std::time::Instant::now();
+            let (code, out) = sh(&format!("PATH={}:$PATH\n{}", bin.display(), remote_digests_within(&images, 600, 1)), &dir);
+            assert_eq!(code, 0, "{out}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(15), "the hanging buildx was stopped: {out}");
+            let found = updates::remote_digests(&out);
+            assert!(matches!(&found["slow.example/app:1"], Remote::Failed(UpdateState::Unreachable, _)), "{out}");
+            assert_eq!(found["ok.example/app:1"], Remote::Digest(format!("sha256:{}", "4".repeat(64))), "the next image is still asked: {out}");
+            let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
+            assert!(!log.contains("manifest inspect -v slow"), "no second wait for the same registry: {log}");
+        }
+
+        let _ = std::fs::remove_file(dir.join("docker.log"));
+        let (code, out) = sh(&format!("PATH={}:$PATH\n{}", bin.display(), remote_digests_within(&images, 0, 1)), &dir);
+        assert_eq!(code, 0, "{out}");
+        let found = updates::remote_digests(&out);
+        for (image, _) in &images {
+            assert!(matches!(&found[image], Remote::Failed(UpdateState::Failed, m) if m.contains("ran out of time")), "{image}: {out}");
+        }
+        assert!(!dir.join("docker.log").exists(), "nothing asked once the time is up");
+        assert!(remote_digests(&images).contains(&format!("+ {CHECK_BUDGET_SECS} ))\nhcc_wait={FALLBACK_SECS}\n")));
+        assert_eq!(HEAD_FUNCTION.matches("curl -sS ").count(), 3, "IMAGE_MAX_SECS counts three curl requests");
+        assert_eq!(HEAD_FUNCTION.matches(&format!("--max-time {CURL_SECS} ")).count(), 3);
     }
 
     #[test]

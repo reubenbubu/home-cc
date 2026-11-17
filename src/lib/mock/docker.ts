@@ -1,5 +1,7 @@
 // Sample Docker hosts for the browser (see index.ts): the homelab VM with several compose stacks, the
-// monitoring container on the Proxmox PC, and a dev VM whose user isn't in the docker group yet.
+// monitoring container on the Proxmox PC, and a dev VM whose user isn't in the docker group yet. For image
+// updates (REGISTRY below), the homelab has newer images in two stacks and for one container outside any stack,
+// an image built on the host, and a private registry that wants a login; the monitoring host is up to date.
 import { emit } from "@tauri-apps/api/event";
 import type { Device } from "../api";
 import type {
@@ -11,8 +13,11 @@ import type {
   ContainerStats,
   DockerHost,
   HostMode,
+  ImageUpdate,
   Port,
   StackAction,
+  UpdateCheck,
+  UpdateState,
 } from "../docker/api";
 
 const sleep = (msecs: number) => new Promise<void>((r) => setTimeout(r, msecs));
@@ -185,6 +190,27 @@ function homelabStacks(): MockStack[] {
   ];
 }
 
+/** What the sample registries say about each image, compared with what the hosts pulled. Images not listed are
+ *  up to date. */
+type RegistrySays = { newer: true } | { builtHere: true } | { error: UpdateState; message: string };
+const REGISTRY: Record<string, RegistrySays> = {
+  "lscr.io/linuxserver/sonarr:latest": { newer: true },
+  "lscr.io/linuxserver/radarr:latest": { newer: true },
+  // Stopped: updating it would start it, so it starts unticked.
+  "lscr.io/linuxserver/prowlarr:latest": { newer: true },
+  "ghcr.io/immich-app/immich-server:release": { newer: true },
+  "ghcr.io/immich-app/immich-machine-learning:release": { newer: true },
+  "lscr.io/linuxserver/speedtest-tracker:latest": { newer: true },
+  "homepage-custom:latest": { builtHere: true },
+  "registry.home.lan/sam/nas-backup:1.4": {
+    error: "needsLogin",
+    message: "ERROR: unexpected status from HEAD request to https://registry.home.lan/v2/sam/nas-backup/manifests/1.4: 401 Unauthorized",
+  },
+};
+
+/** The repository part of an image name, as RepoDigests write it. */
+const repoOf = (image: string) => image.replace(/:[^:/]+$/, "");
+
 function hexId(seed: number): string {
   let s = seed * 2654435761;
   let out = "";
@@ -229,7 +255,46 @@ export function dockerMock({ devices, idOf }: Ctx) {
   const containers = new Map<number, Container[]>();
   const statsOf = new Map<string, { cpu: number; memMiB: number }>();
 
-  function make(stack: string | null, t: Template, prefix = stack): Container {
+  // Images on the hosts: by local id, the registry digest each came with (none for one built on the host), and
+  // which local image each name points at now, per host. The registries have the digest pulled, or a newer one.
+  let nextImage = 500;
+  const localImages = new Map<string, { image: string; digest: string | null }>();
+  const tagNow = new Map<string, string>();
+  /** A digest that looks like one, always the same for the same text. */
+  const digestOf = (text: string) => {
+    let h = 2166136261;
+    for (const ch of text) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    let out = "";
+    while (out.length < 64) {
+      h ^= h << 13;
+      h ^= h >>> 17;
+      h ^= h << 5;
+      h >>>= 0;
+      out += h.toString(16).padStart(8, "0");
+    }
+    return `sha256:${out}`;
+  };
+  const pulledDigest = (image: string) => digestOf(`${image} as pulled`);
+  const latestDigest = (image: string) => {
+    const says = REGISTRY[image];
+    return says && "newer" in says ? digestOf(`${image} now`) : pulledDigest(image);
+  };
+  /** A new local image for the name on a host, with this digest, which the name now points at. */
+  function addImage(hostId: number, image: string, digest: string | null): string {
+    const id = `sha256:${hexId(nextImage++)}`;
+    localImages.set(id, { image, digest });
+    tagNow.set(`${hostId}\n${image}`, id);
+    return id;
+  }
+  /** The local image a name points at on a host, pulled (or built) when the sample began. */
+  function imageFor(hostId: number, image: string): string {
+    const known = tagNow.get(`${hostId}\n${image}`);
+    if (known) return known;
+    const says = REGISTRY[image];
+    return addImage(hostId, image, says && "builtHere" in says ? null : pulledDigest(image));
+  }
+
+  function make(hostId: number, stack: string | null, t: Template, prefix = stack): Container {
     const id = hexId(nextSeed++);
     const state = t.state ?? "running";
     const age = t.age ?? 3600;
@@ -238,6 +303,7 @@ export function dockerMock({ devices, idOf }: Ctx) {
       id,
       name: prefix ? `${prefix}-${t.service}-1` : t.service,
       image: t.image,
+      imageId: imageFor(hostId, t.image),
       state,
       health: state === "running" ? (t.health ?? null) : null,
       exitCode: state === "running" ? null : (t.exitCode ?? 0),
@@ -251,13 +317,34 @@ export function dockerMock({ devices, idOf }: Ctx) {
 
   for (const [hostId, list] of stacks) {
     const all: Container[] = [];
-    for (const s of list) for (const t of s.templates) all.push(make(s.name, t));
+    for (const s of list) for (const t of s.templates) all.push(make(hostId, s.name, t));
     containers.set(hostId, all);
   }
   containers.get(homelab)?.push(
-    make(null, { service: "speedtest-tracker", image: "lscr.io/linuxserver/speedtest-tracker:latest", ports: [tcp(8765, 80)], cpu: 0.1, memMiB: 88, age: 30 * 86400 }),
-    make(null, { service: "old-backup", image: "alpine:3.20", state: "exited", exitCode: 137, age: 12 * 86400 }),
+    make(homelab, null, { service: "speedtest-tracker", image: "lscr.io/linuxserver/speedtest-tracker:latest", ports: [tcp(8765, 80)], cpu: 0.1, memMiB: 88, age: 30 * 86400 }),
+    make(homelab, null, { service: "old-backup", image: "alpine:3.20", state: "exited", exitCode: 137, age: 12 * 86400 }),
+    make(homelab, null, { service: "nas-backup", image: "registry.home.lan/sam/nas-backup:1.4", cpu: 0.1, memMiB: 22, age: 15 * 86400 }),
+    make(homelab, null, { service: "dashboard", image: "homepage-custom:latest", ports: [tcp(3001, 3000)], cpu: 0.3, memMiB: 64, age: 15 * 86400 }),
   );
+
+  // Update checks: what the sample registries say, compared with what each host runs.
+  const checks = new Map<number, UpdateCheck>();
+  function compareImages(hostId: number): ImageUpdate[] {
+    const pairs = new Map<string, { image: string; imageId: string }>();
+    for (const c of containers.get(hostId) ?? []) if (c.imageId) pairs.set(`${c.image}\n${c.imageId}`, { image: c.image, imageId: c.imageId });
+    return [...pairs.values()].map(({ image, imageId }): ImageUpdate => {
+      const local = localImages.get(imageId);
+      const says = REGISTRY[image];
+      const base = { image, imageId, current: local?.digest ?? null, latest: null, downloaded: false, message: null };
+      if (!local?.digest) return { ...base, state: "builtHere" };
+      if (says && "error" in says) return { ...base, state: says.error, message: says.message };
+      const latest = latestDigest(image);
+      if (local.digest === latest) return { ...base, state: "upToDate", latest };
+      const named = tagNow.get(`${hostId}\n${image}`);
+      const downloaded = named != null && named !== imageId && localImages.get(named)?.digest === latest;
+      return { ...base, state: "available", latest, downloaded };
+    });
+  }
 
   // Every machine that may be a Docker host: Linux and Proxmox machines with an SSH user.
   const candidates = () => devices().filter((d) => d.kind !== "ignore" && d.os !== "windows" && d.sshUser);
@@ -444,10 +531,48 @@ export function dockerMock({ devices, idOf }: Ctx) {
       }
       const templates = s.templates.length ? s.templates : [{ service: "app", image: "nextcloud:30", ports: [tcp(8080, 80)] }];
       if (!s.templates.length) s.templates = templates;
-      const fresh = templates.map((t) => make(stack, { ...t, state: "running", age: 1, exitCode: null }));
+      if (action === "pull") for (const t of templates) addImage(deviceId, t.image, latestDigest(t.image));
+      const fresh = templates.map((t) => make(deviceId, stack, { ...t, state: "running", age: 1, exitCode: null }));
       containers.set(deviceId, [...others, ...fresh]);
       const pulled = action === "pull" ? templates.map((t) => ` ${t.service} Pulled`).join("\n") + "\n" : "";
       return { output: pulled + fresh.map((c) => ` Container ${c.name}  Started`).join("\n") };
+    },
+    docker_check_updates: async ({ deviceId, auto, images }: { deviceId: number; auto: boolean; images: string[] | null }) => {
+      device(deviceId);
+      const s = stateFor(deviceId);
+      const last = checks.get(deviceId) ?? null;
+      if (auto && s.problem && ["newHost", "hostKeyChanged", "auth"].includes(s.problem.kind)) return last;
+      if (auto && !images && last?.checkedAt != null && nowSecs() - last.checkedAt < 6 * 3600) return last;
+      await sleep(images ? 500 : 1500);
+      const check: UpdateCheck = { deviceId, checkedAt: images ? (last?.checkedAt ?? null) : nowSecs(), images: compareImages(deviceId) };
+      checks.set(deviceId, check);
+      return check;
+    },
+    docker_update_stack: async ({ deviceId, stack, services }: { deviceId: number; stack: string; services: string[] }) => {
+      const s = stackOf(deviceId, stack);
+      await sleep(2500);
+      const lines: string[] = [];
+      for (const service of services) {
+        const mine = (containers.get(deviceId) ?? []).filter((c) => c.project === stack && c.service === service);
+        if (!mine.length) throw `no such service: ${service}`;
+        const imageId = addImage(deviceId, mine[0].image, latestDigest(mine[0].image));
+        lines.push(` ${service} Pulled`);
+        const template = s.templates.find((t) => t.service === service);
+        for (const c of mine) {
+          const id = hexId(nextSeed++);
+          statsOf.set(id, statsOf.get(c.id) ?? { cpu: 0.2, memMiB: 40 });
+          Object.assign(c, { id, imageId, state: "running", exitCode: null, startedAt: nowSecs(), finishedAt: null, ports: template?.ports ?? c.ports, health: template?.health ? "starting" : null });
+          lines.push(` Container ${c.name}  Recreated`, ` Container ${c.name}  Started`);
+        }
+      }
+      return { output: lines.join("\n") };
+    },
+    docker_pull_image: async ({ deviceId, image }: { deviceId: number; image: string }) => {
+      device(deviceId);
+      await sleep(1500);
+      const latest = latestDigest(image);
+      addImage(deviceId, image, latest);
+      return { output: `${image.split(":").pop()}: Pulling from ${repoOf(image)}\nDigest: ${latest}\nStatus: Downloaded newer image for ${image}` };
     },
     docker_forget_stack: ({ deviceId, stack }: { deviceId: number; stack: string }) => {
       stacks.set(deviceId, (stacks.get(deviceId) ?? []).filter((s) => s.name !== stack));
