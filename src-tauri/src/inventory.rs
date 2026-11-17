@@ -153,6 +153,7 @@ pub struct DeviceInput {
     #[serde(default)]
     pub notes: String,
     /// Hardware address. Left as it is when not given; empty removes it.
+    /// See [`Inventory::update`] for what a changed `host` does to it.
     #[serde(default)]
     pub mac: Option<String>,
 }
@@ -229,8 +230,12 @@ CREATE TABLE pings (
     rtt_ms    REAL
 );
 CREATE INDEX pings_device_ts ON pings (device_id, ts);
+";
 
--- The SSH identity stored for a device the first time it is reached.
+/// Part of the step 3 additions: the SSH identity stored for a device the
+/// first time it is reached. Kept apart from the rest because test builds of
+/// step 3 made this table with other columns (see `from_conn`).
+const HOST_KEYS_TABLE: &str = "
 CREATE TABLE ssh_host_keys (
     device_id   INTEGER PRIMARY KEY REFERENCES devices (id) ON DELETE CASCADE,
     algorithm   TEXT NOT NULL,
@@ -279,7 +284,17 @@ impl Inventory {
         conn.execute_batch(SCHEMA)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 2 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} {HOST_KEYS_TABLE} PRAGMA user_version = 2; COMMIT;"))?;
+        }
+        // Early test builds of step 3 stored SSH identities by address, in a
+        // table with other columns that every query here would fail on. It is
+        // replaced by an empty one: the identities are learned again under
+        // the first-contact rules.
+        let by_device: Option<i64> = conn
+            .query_row("SELECT 1 FROM pragma_table_info('ssh_host_keys') WHERE name = 'device_id'", [], |r| r.get(0))
+            .optional()?;
+        if by_device.is_none() {
+            conn.execute_batch(&format!("BEGIN; DROP TABLE IF EXISTS ssh_host_keys; {HOST_KEYS_TABLE} COMMIT;"))?;
         }
         Ok(Self { conn: Mutex::new(conn), purged: AtomicI64::new(i64::MIN) })
     }
@@ -332,10 +347,12 @@ impl Inventory {
     ///
     /// The hardware address is kept when none is given, removed by an empty
     /// one and replaced by any other. Pointing the device at another address
-    /// without giving one makes the entry describe whatever is at the new
-    /// address, so what was learned at the old one (hardware address, maker,
-    /// network name) is dropped: otherwise the next scan would follow the old
-    /// hardware address and undo the edit. Another address or SSH port is also
+    /// without giving a new one makes the entry describe whatever is at the
+    /// new address, so what was learned at the old one (hardware address,
+    /// maker, network name) is dropped: otherwise the next scan would follow
+    /// the old hardware address and undo the edit. The stored hardware address
+    /// sent back unchanged counts as not given there, because the Machines
+    /// form sends it with every save. Another address or SSH port is also
     /// another SSH server, so the stored identity goes and the first-contact
     /// rules apply again.
     pub fn update(&self, id: i64, input: DeviceInput) -> Result<Device> {
@@ -354,9 +371,14 @@ impl Inventory {
             let host = input.host.trim();
             let port = input.ssh_port.unwrap_or(22);
             let moved = !host.eq_ignore_ascii_case(&old_host);
-            let mac = match &input.mac {
-                // Empty or blank gives none; anything else passed validate().
-                Some(typed) => normalize_mac(typed),
+            // Trimmed as validate() does, so that what it accepted is what is
+            // stored. Empty or blank gives none.
+            let typed = input.mac.as_deref().map(|typed| normalize_mac(typed.trim()));
+            let mac = match typed {
+                // Only the address was changed: the hardware address that
+                // came back is the one learned at the old address.
+                Some(same) if moved && same == old_mac => None,
+                Some(given) => given,
                 None if moved => None,
                 None => old_mac.clone(),
             };
@@ -806,6 +828,14 @@ mod tests {
         let d = inv.update(id, other.clone()).unwrap();
         assert_eq!((d.mac.as_deref(), d.vendor.as_deref(), d.hostname.as_deref()), (Some(MAC_B), None, Some("nas")));
 
+        // Pasted with white space around it (copied from a router's web
+        // page): stored all the same, not removed.
+        for (pasted, stored) in [("aa:bb:cc:00:00:0c\t", MAC_C), ("\u{a0}AA-BB-CC-00-00-0B \r\n", MAC_B)] {
+            let mut padded = input("Big NAS", "192.168.68.20");
+            padded.mac = Some(pasted.into());
+            assert_eq!(inv.update(id, padded).unwrap().mac.as_deref(), Some(stored), "for {pasted:?}");
+        }
+
         // One that isn't a hardware address is refused and changes nothing.
         let mut bad = input("Big NAS", "192.168.68.20");
         bad.mac = Some("not one".into());
@@ -853,18 +883,62 @@ mod tests {
     }
 
     #[test]
-    fn a_new_address_with_the_hardware_address_given_keeps_what_is_known() {
+    fn a_corrected_address_saved_from_the_machines_form_is_not_undone_by_the_next_scan() {
+        let inv = Inventory::in_memory().unwrap();
+        // The owner mistypes the NAS's address; a phone lives there, and the
+        // first scan puts the phone's hardware address on the entry.
+        let nas = inv.add(input("NAS", "192.168.68.20")).unwrap().id;
+        let phone = found("192.168.68.20", Some(MAC_A), Some("phone"));
+        assert_eq!(scan(&inv, &[phone.clone()], 100), ScanSaved { added: 0, updated: 1 });
+        assert_eq!(inv.get(nas).unwrap().mac.as_deref(), Some(MAC_A));
+
+        // Edit machine: the address is corrected, and the form sends the
+        // hardware address back as it was filled in.
+        let mut fixed = input("NAS", "192.168.68.21");
+        fixed.mac = Some(MAC_A.into());
+        let d = inv.update(nas, fixed).unwrap();
+        assert_eq!((d.host.as_str(), d.mac, d.vendor, d.hostname), ("192.168.68.21", None, None, None));
+
+        // The next scan leaves the address alone, learns the NAS's own
+        // hardware address and gives the phone an entry of its own.
+        let both = [phone, found("192.168.68.21", Some(MAC_B), Some("nas"))];
+        assert_eq!(scan(&inv, &both, 200), ScanSaved { added: 1, updated: 1 });
+        let d = inv.get(nas).unwrap();
+        assert_eq!((d.host.as_str(), d.mac.as_deref(), d.hostname.as_deref()), ("192.168.68.21", Some(MAC_B), Some("nas")));
+        let settled = [row("192.168.68.21", Some(MAC_B)), row("192.168.68.20", Some(MAC_A))];
+        assert_eq!(rows(&inv), settled);
+        // And it stays that way.
+        assert_eq!(scan(&inv, &both, 300), ScanSaved { added: 0, updated: 2 });
+        assert_eq!(rows(&inv), settled);
+    }
+
+    #[test]
+    fn a_new_address_keeps_the_hardware_address_only_if_another_one_is_given() {
         let inv = Inventory::in_memory().unwrap();
         let id = scan_one(&inv, found("192.168.68.20", Some(MAC_A), Some("nas")));
-        // The owner says where this very hardware now is.
+        // The stored one sent back, however it is written, is what was
+        // learned at the old address: it goes with the maker and the name.
         let mut moved = input("NAS", "192.168.68.30");
-        moved.mac = Some(MAC_A.into());
+        moved.mac = Some(" AA-BB-CC-00-00-0A ".into());
         let d = inv.update(id, moved).unwrap();
         assert_eq!(d.host, "192.168.68.30");
+        assert_eq!((d.mac, d.vendor, d.hostname), (None, None, None));
+        // If the same hardware really is there, the next scan says so.
+        let there = found("192.168.68.30", Some(MAC_A), Some("nas"));
+        assert_eq!(scan(&inv, &[there], 200), ScanSaved { added: 0, updated: 1 });
+        let d = inv.get(id).unwrap();
         assert_eq!((d.mac.as_deref(), d.vendor.as_deref(), d.hostname.as_deref()), (Some(MAC_A), Some(MAKER), Some("nas")));
 
+        // A different one typed along with the new address is the owner
+        // saying which hardware this is: stored.
+        let mut other = input("NAS", "192.168.68.31");
+        other.mac = Some(MAC_B.into());
+        let d = inv.update(id, other).unwrap();
+        assert_eq!(d.host, "192.168.68.31");
+        assert_eq!((d.mac.as_deref(), d.vendor.as_deref(), d.hostname.as_deref()), (Some(MAC_B), None, Some("nas")));
+
         // Moved and the hardware address emptied: nothing of the old machine is left.
-        let mut emptied = input("NAS", "192.168.68.31");
+        let mut emptied = input("NAS", "192.168.68.32");
         emptied.mac = Some(String::new());
         let d = inv.update(id, emptied).unwrap();
         assert_eq!((d.mac, d.vendor, d.hostname), (None, None, None));
@@ -1097,6 +1171,39 @@ mod tests {
         // Opening again doesn't re-run the upgrade.
         let conn = inv.conn.into_inner().unwrap();
         Inventory::from_conn(conn).unwrap();
+    }
+
+    #[test]
+    fn replaces_the_identity_table_of_an_early_step_3_build() {
+        use crate::ssh::HostKey;
+        // As an early test build of step 3 left it: identities by address.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA_V2}
+             CREATE TABLE ssh_host_keys (host TEXT NOT NULL, port INTEGER NOT NULL, algorithm TEXT NOT NULL,
+                 fingerprint TEXT NOT NULL, PRIMARY KEY (host, port));
+             INSERT INTO devices (name, host, kind, os) VALUES ('nas', '192.168.68.20', 'server', 'linux');
+             INSERT INTO ssh_host_keys VALUES ('192.168.68.20', 22, 'ssh-ed25519', 'SHA256:old');
+             PRAGMA user_version = 2;"
+        ))
+        .unwrap();
+        let inv = Inventory::from_conn(conn).unwrap();
+        let nas = inv.list().unwrap().remove(0).id;
+
+        // The old identities are gone, and one can be stored for a device.
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+        let key = HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into() };
+        inv.remember_host_key(nas, &key).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key.clone()));
+        // Changing a device's address, which removes its identity, works too.
+        let d = inv.update(nas, input("nas", "192.168.68.21")).unwrap();
+        assert_eq!((d.host.as_str(), inv.host_key(nas).unwrap()), ("192.168.68.21", None));
+
+        // Opening again leaves the table and what is in it alone.
+        inv.remember_host_key(nas, &key).unwrap();
+        let inv = Inventory::from_conn(inv.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key));
     }
 
     #[test]
