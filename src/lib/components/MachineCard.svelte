@@ -10,6 +10,7 @@
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
+  import { openTerminal } from "$lib/terminals.svelte";
   import type { Details, Problem as ProblemInfo } from "$lib/report";
   import ConfirmButton from "./ConfirmButton.svelte";
   import Problem from "./Problem.svelte";
@@ -106,6 +107,15 @@
           onclick={() => stats.refresh(device.id)}
         >
           <Icon path={icons.refresh} size={16} />
+        </button>
+        <!-- Terminals -->
+        <button
+          class="icon-btn"
+          aria-label="Open a terminal on {device.name}"
+          title="Open a terminal"
+          onclick={() => openTerminal({ deviceId: device.id, title: device.name })}
+        >
+          <Icon path={icons.terminal} size={16} />
         </button>
       {/if}
       <button class="icon-btn" aria-label="Edit {device.name}" title="Edit" onclick={() => onedit(device)}>
