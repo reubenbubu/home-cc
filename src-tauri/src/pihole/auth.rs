@@ -186,7 +186,7 @@ pub async fn login<T: Transport>(t: &T, password: &Password) -> Result<Session, 
                 ));
             }
             let totp = session.map(|s| s.totp).unwrap_or(false);
-            let mut message = "Pi-hole didn't accept the password. Check it, or better, use an app password: ".to_string();
+            let mut message = "Pi-hole didn't accept the password. Check it, or better, use an app password. ".to_string();
             message.push_str(APP_PASSWORD_HOWTO);
             if totp {
                 message.push_str(" Two-factor login is on for this Pi-hole, so only an app password works here.");
