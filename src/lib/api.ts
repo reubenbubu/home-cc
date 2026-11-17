@@ -2,8 +2,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** "appliance": something with its own address that isn't a PC, such as a printer, TV or camera. */
-export type DeviceKind = "pc" | "server" | "vm" | "container" | "mesh" | "appliance" | "other" | "ignore";
+/** "appliance": something with its own address that isn't a PC, such as a printer, TV or camera.
+ *  "handheld": a phone, tablet or handheld games console; not a machine, only checked that it is there. */
+export type DeviceKind = "pc" | "server" | "vm" | "container" | "mesh" | "appliance" | "handheld" | "other" | "ignore";
 export type Os = "windows" | "linux" | "proxmox" | "other";
 /** Where a System came from, strongest first: the owner's choice, this PC itself, an SSH login, a working
  *  Proxmox API, a guess from the ports that answer on the network. */
@@ -345,6 +346,7 @@ export const KIND_LABELS: Record<DeviceKind, string> = {
   container: "Container",
   mesh: "Mesh node",
   appliance: "Appliance",
+  handheld: "Handheld",
   other: "Other",
   ignore: "Ignore",
 };

@@ -73,10 +73,13 @@ export function toInput(d: Device, patch: Partial<DeviceInput> = {}): DeviceInpu
   };
 }
 
+/** Not handhelds: a phone or tablet is only checked that it is there, like the other devices, and is shown
+ *  with them on the Overview and the Network screen. */
 const MACHINE_KINDS: DeviceKind[] = ["pc", "server", "vm", "container", "appliance"];
 
-/** PCs, servers, VMs, containers and appliances: the devices on the Machines screen. All of them can
- *  have stats, though most appliances have no SSH and only show whether they are up. */
+/** PCs, servers, VMs, containers and appliances: the devices on the Machines screen and in the Overview's
+ *  "Machines up". All of them can have stats, though most appliances have no SSH and only show whether they
+ *  are up. */
 export function isMachine(d: Device): boolean {
   return MACHINE_KINDS.includes(d.kind);
 }

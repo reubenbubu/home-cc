@@ -12,6 +12,7 @@
   import { drafts as kept } from "$lib/drafts.svelte";
   import { ms, relTime } from "$lib/format";
   import { icons } from "$lib/icons";
+  import { ADD_AS, isPrivateMac, suggestedKind } from "$lib/kinds";
   import { names } from "$lib/names.svelte";
   import { status } from "$lib/status.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
@@ -43,7 +44,6 @@
   } = $props();
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
-  const ACCEPT_AS: DeviceKind[] = ["pc", "server", "vm", "mesh", "appliance", "other"];
 
   let error = $state<ProblemInfo | null>(null);
   const saving = new SvelteSet<number>();
@@ -79,11 +79,6 @@
 
   function accept(d: Device, kind: DeviceKind) {
     return save(d, { name: drafts.get(d.id)?.trim() || d.name, kind });
-  }
-
-  /** What the scan guessed, shown as the default choice. */
-  function suggested(d: Device): DeviceKind {
-    return ACCEPT_AS.includes(d.kind) ? d.kind : "other";
   }
 
   /** A rename kept from before the owner looked at another screen, not put back in its field yet. */
@@ -150,11 +145,6 @@
     if (resumed) node.setSelectionRange(node.value.length, node.value.length);
     else node.select();
     resumed = false;
-  }
-
-  /** Phones and tablets often make up a new hardware address for each network, which hides the maker. */
-  function isPrivateMac(mac: string | null): boolean {
-    return mac != null && /^[0-9a-f][26ae]/i.test(mac);
   }
 
   function seen(d: Device): string {
@@ -315,7 +305,7 @@
                 aria-label="Name for {d.name}"
                 value={drafts.get(d.id) ?? d.name}
                 oninput={(e) => drafts.set(d.id, e.currentTarget.value)}
-                onkeydown={(e) => e.key === "Enter" && accept(d, suggested(d))}
+                onkeydown={(e) => e.key === "Enter" && accept(d, suggestedKind(d))}
               />
             {:else if renaming === d.id}
               <input
@@ -352,12 +342,16 @@
           {#if variant === "fresh"}
             <td class="c-accept">
               <div class="buttons">
-                {#each ACCEPT_AS as kind}
+                {#each ADD_AS as kind}
+                  <!-- What the scan set, or Handheld when the hostname says so (kinds.ts): only marked, and taken by
+                       Enter in the name field. Nothing is saved until the owner picks. -->
+                  {@const offered = kind === suggestedKind(d)}
                   <button
                     class="btn small"
-                    class:suggested={kind === suggested(d)}
+                    class:suggested={offered}
                     disabled={saving.has(d.id)}
                     aria-label="Add {d.name} as {KIND_LABELS[kind]}"
+                    title={offered && kind === "handheld" ? "Suggested: its hostname looks like a phone's, a tablet's or a handheld console's" : undefined}
                     onclick={() => accept(d, kind)}
                   >
                     {KIND_LABELS[kind]}
@@ -410,7 +404,7 @@
   .c-spark { width: 11rem; }
   .c-type { width: 9.5rem; }
   .c-mac { width: 11rem; }
-  .c-accept { width: 34rem; }
+  .c-accept { width: 39.5rem; }
   .c-remove { width: 15rem; }
   td.c-name, td.c-type, td.c-accept, td.c-remove { overflow: visible; }
   .down { color: var(--bad); font-weight: 600; }

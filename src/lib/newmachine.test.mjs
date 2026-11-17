@@ -9,14 +9,18 @@ test("a new machine starts with the default SSH user, or none", () => {
   assert.equal(startingUser("server", ""), "");
   // No name written into the app: nothing set means an empty field.
   assert.equal(startingUser("vm", "   "), "");
-  // Most appliances have no SSH.
+  // Most appliances have no SSH, and phones and tablets none.
   assert.equal(startingUser("appliance", "sam"), "");
+  assert.equal(startingUser("handheld", "sam"), "");
 });
 
 test("the default SSH user follows the type until the owner types another", () => {
   // Untouched: goes for an appliance, comes back after.
   assert.equal(userAfterKind("sam", "vm", "appliance", "sam"), "");
   assert.equal(userAfterKind("", "appliance", "pc", "sam"), "sam");
+  assert.equal(userAfterKind("sam", "pc", "handheld", "sam"), "");
+  assert.equal(userAfterKind("", "handheld", "vm", "sam"), "sam");
+  assert.equal(userAfterKind("", "appliance", "handheld", "sam"), "");
   assert.equal(userAfterKind("sam", "vm", "server", "sam"), "sam");
   // Typed by the owner: stays, whatever the type.
   assert.equal(userAfterKind("admin", "vm", "appliance", "sam"), "admin");

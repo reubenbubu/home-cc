@@ -346,8 +346,8 @@ export function dockerMock({ devices, idOf }: Ctx) {
     });
   }
 
-  // Every machine that may be a Docker host: Linux and Proxmox machines with an SSH user.
-  const candidates = () => devices().filter((d) => d.kind !== "ignore" && d.os !== "windows" && d.sshUser);
+  // Every machine that may be a Docker host: Linux and Proxmox machines with an SSH user (not handhelds).
+  const candidates = () => devices().filter((d) => d.kind !== "ignore" && d.kind !== "handheld" && d.os !== "windows" && d.sshUser);
   const stateFor = (id: number) => {
     let s = hostState.get(id);
     if (!s) {

@@ -156,17 +156,24 @@ impl Drop for ScanGuard<'_> {
     }
 }
 
+/// Types that never have stats: ignored devices, and handhelds (phones and
+/// tablets are only checked that they are there). A handheld can still hold an
+/// SSH user from a type it had before; it is not logged in to.
+fn no_stats(kind: DeviceKind) -> bool {
+    matches!(kind, DeviceKind::Ignore | DeviceKind::Handheld)
+}
+
 /// Machines the app reads stats from: any tracked device with an SSH user,
-/// whatever its type. Most appliances have none, so they only get the status
-/// checks, which every tracked device gets.
+/// whatever its type but a handheld. Most appliances have none, so they only
+/// get the status checks, which every tracked device gets.
 fn wants_stats(d: &Device) -> bool {
-    d.kind != DeviceKind::Ignore && d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty())
+    !no_stats(d.kind) && d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty())
 }
 
 /// Machines the app reads stats from: those with an SSH user, and this PC
 /// (`this_pc`, from `localstats::this_pc_ids`), which needs none.
 fn reads_stats(d: &Device, this_pc: &BTreeSet<i64>) -> bool {
-    wants_stats(d) || this_pc.contains(&d.id)
+    !no_stats(d.kind) && (wants_stats(d) || this_pc.contains(&d.id))
 }
 
 /// Machines whose system is guessed from the ports that answer: those on the
@@ -513,7 +520,7 @@ impl Monitor {
         // Look the machine up only now: it may have been edited or removed
         // while this reading waited its turn.
         let device = match app.state::<Inventory>().get(device_id) {
-            Ok(d) if d.kind != DeviceKind::Ignore => d,
+            Ok(d) if !no_stats(d.kind) => d,
             _ => {
                 self.forget(device_id);
                 return MachineStatsEntry::empty(device_id);
@@ -816,6 +823,8 @@ mod tests {
         assert!(!wants_stats(&device(DeviceKind::Appliance, None)), "an appliance without SSH is only checked");
         assert!(!wants_stats(&device(DeviceKind::Appliance, Some("  "))));
         assert!(wants_stats(&device(DeviceKind::Appliance, Some("admin"))), "a NAS box with SSH");
+        assert!(!wants_stats(&device(DeviceKind::Handheld, None)), "a phone is only checked");
+        assert!(!wants_stats(&device(DeviceKind::Handheld, Some("sam"))), "a PC made a handheld keeps its user, but isn't logged in to");
         assert!(wants_stats(&device(DeviceKind::Pc, Some("sam"))));
         assert!(!wants_stats(&device(DeviceKind::Pc, None)));
         assert!(!wants_stats(&device(DeviceKind::Ignore, Some("sam"))));
@@ -864,6 +873,7 @@ mod tests {
         assert!(!reads_stats(&device(DeviceKind::Pc, None), &BTreeSet::new()), "not this PC, no SSH user");
         assert!(!reads_stats(&device(DeviceKind::Pc, None), &BTreeSet::from([2])), "this PC is another device");
         assert!(reads_stats(&device(DeviceKind::Pc, Some("sam")), &BTreeSet::new()));
+        assert!(!reads_stats(&device(DeviceKind::Handheld, Some("sam")), &this_pc), "a handheld has no stats");
     }
 
     /// A stored password and a stored identity, approved or not, for the test server.

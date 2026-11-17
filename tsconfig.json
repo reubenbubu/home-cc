@@ -9,7 +9,9 @@
     "skipLibCheck": true,
     "sourceMap": true,
     "strict": true,
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    // So that a pure .ts module can use another by its file name, as Node does when "npm test" loads it.
+    "allowImportingTsExtensions": true
   }
   // Path aliases are handled by https://svelte.dev/docs/kit/configuration#alias
   // except $lib which is handled by https://svelte.dev/docs/kit/configuration#files

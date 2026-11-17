@@ -1548,7 +1548,7 @@ async function checkFlows(browser, url) {
       },
     },
     {
-      what: "on the Overview the machines are under a heading per type, and appliances are small tiles like the other devices",
+      what: "on the Overview the machines are under a heading per type, and appliances and handhelds are small tiles like the other devices",
       path: "/",
       viewport: { width: 1920, height: 1080 },
       async run(page) {
@@ -1567,18 +1567,24 @@ async function checkFlows(browser, url) {
         const ranks = order.map((h) => Math.floor(want.indexOf(h) / 2));
         if (ranks.some((r) => r < 0) || ranks.some((r, i) => i > 0 && r <= ranks[i - 1])) throw new Error(`the headings read ${JSON.stringify(got.headings)}`);
         if (!got.cards.VMs?.includes("Homelab VM")) throw new Error(`Homelab VM isn't under VMs: ${JSON.stringify(got.cards)}`);
-        for (const name of ["Living room TV", "Printer"]) {
+        for (const name of ["Living room TV", "Printer", "Sam's phone", "Tablet"]) {
           if (Object.values(got.cards).flat().includes(name)) throw new Error(`${name} is still a machine card`);
         }
         const appliances = page.locator("section", { has: page.getByRole("heading", { name: "Appliances", exact: true }) });
         await appliances.locator(".chip", { hasText: "Printer" }).waitFor();
         await appliances.locator(".chip", { hasText: "Living room TV" }).waitFor();
-        // As tall as the other devices' tiles.
+        const handhelds = page.locator("section", { has: page.getByRole("heading", { name: "Handhelds", exact: true }) });
+        await handhelds.locator(".chip", { hasText: "Sam's phone" }).waitFor();
+        await handhelds.locator(".chip", { hasText: "Tablet" }).waitFor();
+        // The tile headings in their order: Appliances, then Handhelds (the sample has no other devices).
+        const tileHeadings = (await page.locator(".tile-group > h2").allTextContents()).map((t) => t.trim());
+        if (tileHeadings.join() !== "Appliances,Handhelds") throw new Error(`the tile headings read ${tileHeadings.join(", ")}`);
+        // As tall as each other.
         const tv = await appliances.locator(".chip", { hasText: "Living room TV" }).boundingBox();
-        const phone = await page.locator(".chip", { hasText: "Sam's phone" }).boundingBox();
-        if (Math.abs(tv.height - phone.height) > 1) throw new Error(`an appliance tile is ${tv.height}px tall, another device's ${phone.height}px`);
+        const phone = await handhelds.locator(".chip", { hasText: "Sam's phone" }).boundingBox();
+        if (Math.abs(tv.height - phone.height) > 1) throw new Error(`an appliance tile is ${tv.height}px tall, a handheld's ${phone.height}px`);
         // Types share a line when their cards fit (in a 1920px window PCs and Servers do), and the tiles come
-        // on a line of their own after every card, Appliances and Other devices side by side.
+        // on a line of their own after every card, Appliances and Handhelds side by side.
         const at = (sel) => page.locator(sel).first().boundingBox();
         const pcs = await at("#kind-pc");
         const servers = await at("#kind-server");
@@ -1587,7 +1593,59 @@ async function checkFlows(browser, url) {
         const appl = await page.locator(".tile-group").filter({ hasText: "Printer" }).boundingBox();
         const other = await page.locator(".tile-group").filter({ hasText: "Tablet" }).boundingBox();
         if (appl.y < lastCard) throw new Error("the appliances start beside the cards, not below them");
-        if (Math.abs(appl.y - other.y) > 1 || other.x <= appl.x) throw new Error("Other devices didn't come next to Appliances");
+        if (Math.abs(appl.y - other.y) > 1 || other.x <= appl.x) throw new Error("Handhelds didn't come next to Appliances");
+        // Handhelds aren't machines: "Machines up" counts the cards and the appliances only.
+        const machinesUp = page.locator(".stat", { has: page.getByText("Machines up", { exact: true }) }).locator(".of");
+        const cards = await page.locator("article.card").count();
+        const counted = `of ${cards + (await appliances.locator(".chip").count())}`;
+        if ((await machinesUp.innerText()).trim() !== counted) throw new Error(`Machines up reads "${await machinesUp.innerText()}", not "${counted}"`);
+      },
+    },
+    {
+      what: "Handheld: a found phone is offered as Handheld by its hostname but stays new until the owner picks, and can be made one on the Network screen",
+      path: "/network",
+      async run(page) {
+        const fresh = page.locator(".panel", { has: page.getByRole("heading", { name: /^New\b/ }) });
+        const devices = panelOf(page, "Devices");
+        const saved = (name) =>
+          page.evaluate(async (n) => {
+            const d = (await window.__TAURI_INTERNALS__.invoke("list_devices")).find((x) => x.name === n);
+            return d ? `${d.kind}${d.reviewed ? "" : ", new"}` : "(gone)";
+          }, name);
+        const asHandheld = fresh.getByRole("button", { name: "Add Galaxy-S24 as Handheld" });
+        await asHandheld.waitFor();
+        // Offered: the Handheld button is the marked one, and says why.
+        const marked = await fresh.locator("tr", { hasText: "192.168.68.118" }).locator(".btn.suggested").allInnerTexts();
+        if (marked.join() !== "Handheld") throw new Error(`Galaxy-S24's marked choice is ${marked.join(", ") || "none"}`);
+        if (!/hostname/.test((await asHandheld.getAttribute("title")) ?? "")) throw new Error("the Handheld suggestion doesn't say it comes from the hostname");
+        // A device with no hostname to go on is offered Other, as before.
+        const plain = await fresh.locator("tr", { hasText: "192.168.68.117" }).locator(".btn.suggested").allInnerTexts();
+        if (plain.join() !== "Other") throw new Error(`a device with no hostname is offered ${plain.join(", ") || "nothing"}`);
+        // Not applied: the device is still new and Other in the back end, also after another screen.
+        await awayAndBack(page, "Overview", "Network");
+        await asHandheld.waitFor();
+        if ((await saved("Galaxy-S24")) !== "other, new") throw new Error(`before the owner picks, Galaxy-S24 is saved as ${await saved("Galaxy-S24")}`);
+        // The owner may pick something else: Other, despite the suggestion.
+        await fresh.getByRole("button", { name: "Add Galaxy-S24 as Other" }).click();
+        const type = devices.getByLabel("Type of Galaxy-S24");
+        await expectValue(type, "other", "Galaxy-S24's type after Add as Other");
+        if ((await saved("Galaxy-S24")) !== "other") throw new Error(`after Add as Other, Galaxy-S24 is saved as ${await saved("Galaxy-S24")}`);
+        // And make it a handheld later, with its type in the Devices table.
+        await type.selectOption({ label: "Handheld" });
+        await expectValue(type, "handheld", "Galaxy-S24's type after choosing Handheld");
+        const until = Date.now() + 5000;
+        while ((await saved("Galaxy-S24")) !== "handheld") {
+          if (Date.now() > until) throw new Error(`after choosing Handheld, Galaxy-S24 is saved as ${await saved("Galaxy-S24")}`);
+          await page.waitForTimeout(100);
+        }
+        await expectValue(devices.getByLabel("Type of Sam's phone"), "handheld", "Sam's phone's type");
+        // On the Overview it is a handheld's tile, and on the Machines screen not a machine.
+        await page.getByRole("link", { name: "Overview", exact: true }).click();
+        const handhelds = page.locator("section", { has: page.getByRole("heading", { name: "Handhelds", exact: true }) });
+        await handhelds.locator(".chip", { hasText: "Galaxy-S24" }).waitFor();
+        await page.getByRole("link", { name: "Machines", exact: true }).click();
+        await page.locator("article").first().waitFor();
+        if (await page.locator("article", { hasText: "Galaxy-S24" }).count()) throw new Error("the handheld has a card on the Machines screen");
       },
     },
     {
@@ -2797,7 +2855,7 @@ async function checkFlows(browser, url) {
       },
     },
     {
-      what: "No one's name in the app: a new machine's SSH user is empty until a Default SSH user is saved in Settings, then starts as it (but not for an appliance)",
+      what: "No one's name in the app: a new machine's SSH user is empty until a Default SSH user is saved in Settings, then starts as it (but not for an appliance or a handheld)",
       path: "/machines",
       async run(page) {
         const form = page.locator("form");
@@ -2825,6 +2883,15 @@ async function checkFlows(browser, url) {
         await expectValue(user, "", "the SSH user of a new appliance");
         await type.selectOption("pc");
         await expectValue(user, "sam", "the SSH user after going back from Appliance to PC");
+        // A phone or tablet has no SSH either, and isn't one of the machines: the form says so.
+        await type.selectOption("handheld");
+        await expectValue(user, "", "the SSH user of a new handheld");
+        await form.getByText("A phone, tablet or handheld console isn't one of the machines").waitFor();
+        // Its stats are never read, so the form doesn't say how they are.
+        if (await form.getByText("To read stats, home-cc logs in").count()) throw new Error("the form for a handheld says how its stats are read");
+        await type.selectOption("pc");
+        await form.getByText("To read stats, home-cc logs in").waitFor();
+        await expectValue(user, "sam", "the SSH user after going back from Handheld to PC");
         await user.fill("root");
         await type.selectOption("appliance");
         await expectValue(user, "root", "an SSH user typed by the owner, after choosing Appliance");

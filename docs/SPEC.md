@@ -98,10 +98,19 @@ Each feature lists what "done" looks like.
 - Show mesh nodes as their own group.
 - Remember devices between runs. Let the owner rename them and mark which ones
   are PCs, VMs, servers, appliances (printers, TVs, cameras and other things
-  with an address that aren't PCs) or "ignore". A new name is saved with
+  with an address that aren't PCs), handhelds (phones, tablets and handheld
+  consoles) or "ignore". A new name is saved with
   Enter or by pressing elsewhere on the screen, and given up with Escape; one
   half typed when the owner goes to another screen is not saved, and is there
   to finish when they come back.
+- A scan sets no type but Mesh node (by the maker). A new device whose
+  hostname is a phone's, tablet's or handheld console's (iPhone, Galaxy, Pixel,
+  SM-S921B, android-…, Steam Deck, Nintendo and so on) is offered as Handheld
+  first, and stays new until the owner picks a type. A word that can mean
+  something else (phone, tablet, switch) counts only with a maker of phones
+  behind it, or a made-up hardware address as most phones have; the maker
+  alone never does, since Samsung, Apple and the rest make TVs and computers
+  too.
 
 Done when: a scan finds all the owner's known machines and mesh nodes, and
 names survive a restart.
@@ -145,11 +154,18 @@ can take one more timer period to show as down.
   when they were last seen. Most have no SSH, so they have no stats and the app
   doesn't ask for an SSH user; one that does have SSH (a NAS box, say) gets
   stats like any other machine.
+- Handhelds are not machines: they are not on the Machines screen (only in the
+  table with "Show other devices too") and not in the Overview's "Machines up",
+  and like appliances they have no SSH user and no stats, only up or down. One
+  that kept an SSH user from a type it had before (a PC made a Handheld on the
+  Network screen) is still not logged in to, for stats or for Docker. On the
+  Overview they are small tiles under their own "Handhelds" heading, between
+  Appliances and Other devices on the tiles' line.
 - A machine added by hand starts with the "Default SSH user" chosen in
   Settings as its SSH user, which the owner can change in the form. With none
-  chosen the field starts empty, with no name suggested. An appliance starts
-  without one (the default comes back if its type is changed again, unless the
-  owner typed a user). Machines already added keep their own, and nothing is
+  chosen the field starts empty, with no name suggested. An appliance or a
+  handheld starts without one (the default comes back if its type is changed
+  again, unless the owner typed a user). Machines already added keep their own, and nothing is
   filled in when connecting.
 - The PC home-cc runs on needs no SSH: its stats are read directly, with the
   same script and the same numbers an SSH reading would give, and without

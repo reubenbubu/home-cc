@@ -6,6 +6,7 @@
   import { ms, relTime, share, uptime, usedOfTotal } from "$lib/format";
   import { identityCommand, identityText } from "$lib/hostkey";
   import { icons } from "$lib/icons";
+  import { usuallyNoSsh } from "$lib/kinds";
   import { keySetupAsk } from "$lib/keysetup.svelte";
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
@@ -44,8 +45,9 @@
   const ramWarn = $derived(ram != null && ram > settings.value.ramWarnPct);
   /** This PC: read here without SSH, so no SSH user, login or identity is involved. */
   const local = $derived(stats.local(device));
-  /** An appliance with no SSH: up or down is all there is to show, and nothing is missing. */
-  const statusOnly = $derived(device.kind === "appliance" && !device.sshUser && !local);
+  /** An appliance with no SSH: up or down is all there is to show, and nothing is missing. (A handheld is the
+   *  same, though it has no card: it isn't one of the machines.) */
+  const statusOnly = $derived(usuallyNoSsh(device.kind) && !device.sshUser && !local);
 
   /** What a problem on this card hands to an agent, besides the message. */
   function machineProblem(area: ProblemInfo["area"], what: string, error: string): ProblemInfo {
@@ -145,7 +147,7 @@
   <div class="sub muted small">
     <Address host={device.host} known={device.hostname} />
     <!-- The System's name, or the one the machine gave; where home-cc's System came from on hover. -->
-    <span class="ellipsis" title="{st?.osName ? `${st.osName}. ` : ''}{systemTitle(device, OS_LABELS)}">{st?.osName || (statusOnly && device.os === "other" ? KIND_LABELS.appliance : systemLabel(device, OS_LABELS))}</span>
+    <span class="ellipsis" title="{st?.osName ? `${st.osName}. ` : ''}{systemTitle(device, OS_LABELS)}">{st?.osName || (statusOnly && device.os === "other" ? KIND_LABELS[device.kind] : systemLabel(device, OS_LABELS))}</span>
     {#if st?.uptimeSecs != null}<span class="nowrap">up {uptime(st.uptimeSecs)}</span>{/if}
   </div>
 
