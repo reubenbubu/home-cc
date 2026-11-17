@@ -9,7 +9,7 @@ const host = process.env.TAURI_DEV_HOST;
 /** The commit being built, for problem reports, with "+ local changes" when the checkout differs from it.
  *  Empty without git (the local CI builds from a copy without it). */
 function commit() {
-  const git = (args) => execSync(`git ${args}`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  const git = (/** @type {string} */ args) => execSync(`git ${args}`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
   try {
     const hash = git("rev-parse --short HEAD");
     return git("status --porcelain --untracked-files=no") ? `${hash} + local changes` : hash;

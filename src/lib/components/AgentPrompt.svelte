@@ -10,7 +10,7 @@
   let { problem, extra }: { problem: Problem; extra?: () => Promise<Details> } = $props();
 
   let text = $state<string | null>(null);
-  let state = $state<"idle" | "working" | "copied" | "failed">("idle");
+  let phase = $state<"idle" | "working" | "copied" | "failed">("idle");
   let open = $state(false);
 
   // A prompt made for an earlier message must not be shown, or copied, as if it were about this one.
@@ -18,18 +18,18 @@
     void problem.what;
     void problem.error;
     text = null;
-    state = "idle";
+    phase = "idle";
     open = false;
   });
 
   async function copy() {
-    state = "working";
+    phase = "working";
     const made = await buildPrompt(problem, extra);
     text = made;
     const copied = await copyText(made);
     // Only if the message wasn't replaced meanwhile.
     if (text !== made) return;
-    state = copied ? "copied" : "failed";
+    phase = copied ? "copied" : "failed";
     if (!copied) open = true;
   }
 </script>
@@ -39,18 +39,18 @@
     <button
       class="ask"
       onclick={copy}
-      disabled={state === "working"}
+      disabled={phase === "working"}
       title="Copies a prompt for a coding agent such as Claude Code, with this message and what home-cc knows around it"
     >
       <Icon path={icons.copy} size={14} />
-      {state === "working" ? "Preparing…" : "Copy a prompt for an agent"}
+      {phase === "working" ? "Preparing…" : "Copy a prompt for an agent"}
     </button>
     {#if text}
       <button class="ask" aria-expanded={open} onclick={() => (open = !open)}>{open ? "Hide it" : "Show it"}</button>
     {/if}
     <span class="said" role="status">
-      {#if state === "copied"}Copied. Paste it into Claude Code, ideally opened in your home-cc folder.
-      {:else if state === "failed"}Couldn't copy it. Select the text below and copy it yourself.{/if}
+      {#if phase === "copied"}Copied. Paste it into Claude Code, ideally opened in your home-cc folder.
+      {:else if phase === "failed"}Couldn't copy it. Select the text below and copy it yourself.{/if}
     </span>
   </div>
   {#if text && open}
