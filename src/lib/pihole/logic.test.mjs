@@ -7,11 +7,15 @@ import {
   compareLists,
   differenceText,
   duration,
+  listAddressKey,
+  nextPollSecs,
   number,
+  POLL_SECS,
   pauseWords,
   percent,
   piholeIssues,
   portFor,
+  spellings,
   suggestedByName,
   timeLeft,
 } from "./logic.ts";
@@ -84,6 +88,40 @@ test("the same list type matters, and nothing to compare gives null", () => {
   assert.equal(compareLists([a]), null);
   const same = compareLists([a, { id: 2, name: "B", lists: [list("https://x.example/l")] }]);
   assert.deepEqual([same.same, same.differences.length], [1, 0]);
+});
+
+test("one list written two ways on two Pi-holes is still one list", () => {
+  assert.equal(listAddressKey("https://Raw.GitHubusercontent.com/StevenBlack/hosts/master/hosts/"), "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts");
+  assert.equal(listAddressKey("HTTPS://x.example:443/l#top"), "https://x.example/l", "scheme case, default port and fragment don't matter");
+  assert.notEqual(listAddressKey("https://x.example/List"), listAddressKey("https://x.example/list"), "the path's case is kept");
+  assert.notEqual(listAddressKey("https://x.example/l?a=1"), listAddressKey("https://x.example/l?a=2"), "so is the query");
+  assert.equal(listAddressKey(" file:///etc/pihole/My.list "), "file:///etc/pihole/My.list", "not a web address: as written");
+  assert.equal(listAddressKey("not a url"), "not a url");
+
+  const a = { id: 1, name: "Pi-hole 1", lists: [list("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"), list("https://Y.example/l", { enabled: false })] };
+  const b = { id: 2, name: "Pi-hole 2", lists: [list("https://Raw.GitHubusercontent.com/StevenBlack/hosts/master/hosts/"), list("https://y.example/l")] };
+  const c = compareLists([a, b]);
+  assert.equal(c.same, 1, "the StevenBlack list is on both");
+  assert.equal(c.differences.length, 1);
+  const [row] = c.differences;
+  assert.equal(differenceText(row, c.compared), "On Pi-hole 2; switched off on Pi-hole 1");
+  assert.deepEqual(spellings(row, c.compared), [
+    { address: "https://Y.example/l", names: ["Pi-hole 1"] },
+    { address: "https://y.example/l", names: ["Pi-hole 2"] },
+  ]);
+  const plain = compareLists([a, { id: 2, name: "Pi-hole 2", lists: [list("https://Y.example/l")] }]);
+  assert.deepEqual(spellings(plain.differences.find((r) => r.address === "https://Y.example/l"), plain.compared), [], "written the same: one address shown");
+});
+
+test("the next reading comes just after a pause ends, never in a tight loop", () => {
+  assert.equal(nextPollSecs([], 1000), POLL_SECS);
+  assert.equal(nextPollSecs([{ timerSecs: null, fetchedAt: 1000 }], 1000), POLL_SECS);
+  assert.equal(nextPollSecs([{ timerSecs: 10, fetchedAt: 1000 }], 1000), 12, "2 seconds after it ends");
+  assert.equal(nextPollSecs([{ timerSecs: 300, fetchedAt: 1000 }, { timerSecs: 5.5, fetchedAt: 1000 }], 1001), 7);
+  assert.equal(nextPollSecs([{ timerSecs: 300, fetchedAt: 1000 }], 1000), POLL_SECS, "a long pause: the usual interval");
+  assert.equal(nextPollSecs([{ timerSecs: 30, fetchedAt: 1000 }], 1100), POLL_SECS, "a pause already over is not waited for");
+  assert.equal(nextPollSecs([{ timerSecs: 0, fetchedAt: 1000 }], 1000), POLL_SECS, "a timer at 0 doesn't make it read every 2 seconds");
+  assert.equal(nextPollSecs([{ timerSecs: 0.2, fetchedAt: 1000 }], 1000), 3);
 });
 
 test("three Pi-holes: what each one lacks", () => {

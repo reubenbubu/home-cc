@@ -1930,7 +1930,12 @@ async function checkFlows(browser, url) {
         const hagezi = lists.locator("li", { hasText: "hagezi" });
         await hagezi.getByText("Only on Pi-hole 1").waitFor();
         await hagezi.getByText("Pi-hole 2: not there").waitFor();
-        await lists.locator("li", { hasText: "Easyprivacy" }).getByText("On Pi-hole 1; switched off on Pi-hole 2").waitFor();
+        const easy = lists.locator("li", { hasText: "Easyprivacy" });
+        await easy.getByText("On Pi-hole 1; switched off on Pi-hole 2").waitFor();
+        // Written differently on each Pi-hole (host capitals): one list, with both spellings shown.
+        await easy.getByText(/Pi-hole 2: https:\/\/V\.Firebog\.net\/hosts\/Easyprivacy\.txt/).waitFor();
+        await easy.getByText(/Pi-hole 1: https:\/\/v\.firebog\.net\/hosts\/Easyprivacy\.txt/).waitFor();
+        if (await lists.locator("li", { hasText: "StevenBlack" }).count()) throw new Error("a trailing / made the StevenBlack list look like two lists");
         if (await lists.getByRole("button").count()) throw new Error("the comparison has buttons; it should only show the difference");
       },
     },

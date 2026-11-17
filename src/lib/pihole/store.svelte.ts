@@ -5,7 +5,7 @@ import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { errorText } from "$lib/api";
 import { OneAtATime } from "$lib/running";
 import { piholeApi, type PiholeReading, type PiholeSettings, type PiholeStatus, type Probe } from "./api";
-import { POLL_SECS, timeLeft } from "./logic";
+import { nextPollSecs } from "./logic";
 
 /** The last reading that worked, kept on screen (marked as old) while later ones fail. */
 export interface GoodReading {
@@ -93,16 +93,16 @@ class PiholeStore {
     return Promise.all(this.hosts.map((h) => this.refresh(h.deviceId))).then(() => {});
   }
 
-  /** Seconds until the soonest pause ends, so it is read again just after Pi-hole switched blocking back on. */
-  #soonestTimer(): number | null {
-    const now = Date.now() / 1000;
-    let soonest: number | null = null;
-    for (const [id, good] of this.lastGood) {
-      if (!this.ids.has(id)) continue;
-      const left = timeLeft(good.reading.blocking.timerSecs, good.fetchedAt, now);
-      if (left != null && (soonest == null || left < soonest)) soonest = left;
+  /** Seconds until the next round: sooner when a pause is about to end, so it is read again just after Pi-hole
+   *  switched blocking back on. Only Pi-holes whose latest reading worked count (see nextPollSecs). */
+  #nextWait(): number {
+    const current: { timerSecs: number | null; fetchedAt: number | null }[] = [];
+    for (const id of this.ids) {
+      const s = this.statuses.get(id);
+      if (!s?.reading || this.readErrors.has(id)) continue;
+      current.push({ timerSecs: s.reading.blocking.timerSecs, fetchedAt: s.fetchedAt });
     }
-    return soonest;
+    return nextPollSecs(current, Date.now() / 1000);
   }
 
   /** Every Pi-hole, read now and then every POLL_SECS (sooner when a pause is about to end) while the window
@@ -116,9 +116,7 @@ class PiholeStore {
         if (!stopped) await this.refreshAll();
       }
       if (stopped) return;
-      const soon = this.#soonestTimer();
-      const wait = soon != null ? Math.min(POLL_SECS, soon + 2) : POLL_SECS;
-      timer = setTimeout(round, Math.max(2, wait) * 1000);
+      timer = setTimeout(round, this.#nextWait() * 1000);
     };
     void round();
     return () => {

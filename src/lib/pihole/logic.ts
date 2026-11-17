@@ -40,6 +40,20 @@ export function timeLeft(timerSecs: number | null, fetchedAt: number | null, now
   return Math.max(0, Math.round(timerSecs - since));
 }
 
+/** Seconds until the next reading: POLL_SECS, or just after the soonest pause ends so the screen shows blocking
+ *  back on promptly. Give only readings that are current (the latest try worked): a pause seen in an older
+ *  reading says nothing about now. A timer already run out is ignored, so a Pi-hole that keeps saying 0, or a
+ *  reading that couldn't be renewed, never makes the screen read every 2 seconds. */
+export function nextPollSecs(current: { timerSecs: number | null; fetchedAt: number | null }[], now: number): number {
+  let wait = POLL_SECS;
+  for (const r of current) {
+    if (r.timerSecs == null) continue;
+    const left = r.timerSecs - (r.fetchedAt == null ? 0 : Math.max(0, now - r.fetchedAt));
+    if (left > 0) wait = Math.min(wait, Math.ceil(left) + 2);
+  }
+  return Math.max(2, wait);
+}
+
 /** A countdown: "0:45", "4:12", "1:02:03". */
 export function clockText(secs: number): string {
   const s = Math.max(0, Math.round(secs));
@@ -98,10 +112,14 @@ export function listTrouble(status: number | null): string | null {
 export type Presence = "on" | "off" | "missing";
 
 export interface ListRow {
+  /** As the first Pi-hole that has it writes it. */
   address: string;
   kind: ListKind;
   /** By device id. */
   on: Record<number, Presence>;
+  /** How each Pi-hole that has it writes the address, by device id; they can differ in the host's letter case or
+   *  a trailing "/" (see listAddressKey). */
+  spelled: Record<number, string>;
 }
 
 export interface Comparison {
@@ -113,7 +131,39 @@ export interface Comparison {
   differences: ListRow[];
 }
 
-const listKey = (kind: ListKind, address: string) => `${kind} ${address.trim()}`;
+/** What makes two list addresses the same list. A web address's scheme and host don't depend on letter case
+ *  (and the URL parser drops a default port), and a single "/" at the end of the path is taken as the same
+ *  list, which is how one list typed by hand on two Pi-holes most often differs. The path's own letter case
+ *  and the query are kept: a server may tell those apart. Anything else is compared as written, spaces aside. */
+export function listAddressKey(address: string): string {
+  const a = address.trim();
+  let u: URL;
+  try {
+    u = new URL(a);
+  } catch {
+    return a;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return a;
+  u.hash = "";
+  if (u.pathname.length > 1 && u.pathname.endsWith("/")) u.pathname = u.pathname.slice(0, -1);
+  return u.href;
+}
+
+const listKey = (kind: ListKind, address: string) => `${kind} ${listAddressKey(address)}`;
+
+/** The different ways the Pi-holes write one list's address, with who writes it each way. Empty when they all
+ *  write it the same. */
+export function spellings(row: ListRow, compared: { id: number; name: string }[]): { address: string; names: string[] }[] {
+  const out: { address: string; names: string[] }[] = [];
+  for (const h of compared) {
+    const a = row.spelled[h.id];
+    if (a == null) continue;
+    const same = out.find((s) => s.address === a);
+    if (same) same.names.push(h.name);
+    else out.push({ address: a, names: [h.name] });
+  }
+  return out.length > 1 ? out : [];
+}
 
 /** Compares the lists of the Pi-holes given. Null when fewer than two have lists to compare. */
 export function compareLists(hosts: { id: number; name: string; lists: AdList[] | null | undefined }[]): Comparison | null {
@@ -124,9 +174,12 @@ export function compareLists(hosts: { id: number; name: string; lists: AdList[] 
     for (const l of h.lists ?? []) {
       const key = listKey(l.kind, l.address);
       let row = rows.get(key);
-      if (!row) rows.set(key, (row = { address: l.address.trim(), kind: l.kind, on: {} }));
+      if (!row) rows.set(key, (row = { address: l.address.trim(), kind: l.kind, on: {}, spelled: {} }));
       // The same list twice on one Pi-hole: on if either is.
-      if (row.on[h.id] !== "on") row.on[h.id] = l.enabled ? "on" : "off";
+      if (row.on[h.id] !== "on") {
+        row.on[h.id] = l.enabled ? "on" : "off";
+        row.spelled[h.id] = l.address.trim();
+      }
     }
   }
   let same = 0;

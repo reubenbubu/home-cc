@@ -110,8 +110,12 @@ export function piholeMock(ctx: Context, ids: [number, number]) {
       queries: 21040,
       blocked: 4115,
       clients: [9, 14],
-      // Easyprivacy is there but switched off.
-      lists: [...SHARED, list("https://v.firebog.net/hosts/Easyprivacy.txt", 41322, { enabled: false })],
+      // Easyprivacy is there but switched off, and typed with capitals in the host (still the same list). The
+      // StevenBlack list ends in "/" here, which also counts as the same list.
+      lists: [
+        ...SHARED.map((l) => (l.address.includes("StevenBlack") ? { ...l, address: `${l.address}/` } : l)),
+        list("https://V.Firebog.net/hosts/Easyprivacy.txt", 41322, { enabled: false }),
+      ],
       version: "v6.1.4",
     });
     for (const h of hosts.values()) {

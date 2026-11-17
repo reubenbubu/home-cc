@@ -3,7 +3,7 @@
   // here: the owner adds or switches on a list in Pi-hole's own web interface (copying lists over may come later).
   import { icons } from "$lib/icons";
   import type { AdList } from "$lib/pihole/api";
-  import { compareLists, differenceText, type Comparison, type Presence } from "$lib/pihole/logic";
+  import { compareLists, differenceText, spellings, type Comparison, type Presence } from "$lib/pihole/logic";
   import Icon from "../Icon.svelte";
 
   let { hosts }: { hosts: { id: number; name: string; lists: AdList[] | null }[] } = $props();
@@ -38,8 +38,15 @@
       </p>
       <ul class="rows">
         {#each result.differences as row (row.kind + row.address)}
+          {@const spelled = spellings(row, result.compared)}
           <li>
-            <div class="addr mono">{row.address}</div>
+            {#if spelled.length}
+              {#each spelled as s (s.address)}
+                <div class="addr mono"><span class="who">{s.names.join(", ")}:</span> {s.address}</div>
+              {/each}
+            {:else}
+              <div class="addr mono">{row.address}</div>
+            {/if}
             <div class="what small">
               <span class="kind">{row.kind === "block" ? "Blocklist" : "Allowlist"}</span>
               <span>{differenceText(row, result.compared)}</span>
@@ -73,6 +80,7 @@
   .addr { overflow-wrap: anywhere; font-size: 0.9rem; user-select: text; }
   .what { display: flex; gap: 0.3rem 0.6rem; flex-wrap: wrap; color: var(--text-soft); }
   .kind { color: var(--muted); }
+  .who { font-family: var(--font); color: var(--muted); }
   .marks { display: flex; gap: 0.35rem; flex-wrap: wrap; }
   .mark { padding: 0.05rem 0.5rem; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-soft); }
   .mark.on { border-color: color-mix(in srgb, var(--ok) 50%, transparent); }

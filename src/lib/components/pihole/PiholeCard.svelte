@@ -32,9 +32,13 @@
   /** Numbers are on screen, but the latest try failed. */
   const stale = $derived(!!good && (!!readError || (!!status && !status.reading)));
 
-  // A countdown that moves every second while a pause runs (the shared clock ticks every few seconds).
+  // A countdown that moves every second while a pause runs (the shared clock ticks every few seconds). It stops
+  // when the timer has run out or the latest reading failed: nothing is counting down that home-cc knows of.
   let now = $state(Date.now() / 1000);
-  const counting = $derived(good?.reading.blocking.timerSecs != null);
+  const counting = $derived.by(() => {
+    const timer = good?.reading.blocking.timerSecs;
+    return !stale && good != null && timer != null && good.fetchedAt + timer > Math.max(now, clock.now);
+  });
   $effect(() => {
     if (!counting) return;
     const t = setInterval(() => (now = Date.now() / 1000), 1000);

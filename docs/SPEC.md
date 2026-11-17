@@ -222,7 +222,8 @@ shows them side by side.
   on) and sends the session ID in the X-FTL-SID header. Pi-hole allows only a
   few sessions at once (16 unless changed), so home-cc keeps one per Pi-hole,
   uses it until Pi-hole drops it (a 401 means one new login and one retry, no
-  more), and logs out (DELETE /api/auth) when the settings change, the device
+  more; a request that times out or loses its connection keeps the session),
+  and logs out (DELETE /api/auth) when the settings change, the device
   is removed or its address changes, and when the app closes. Readings use
   GET /api/stats/summary, /api/dns/blocking, /api/lists and /api/info/version;
   pausing uses POST /api/dns/blocking with {blocking, timer}. Pi-hole v5 (whose
@@ -244,10 +245,13 @@ shows them side by side.
   minutes or "until I turn it back on", then asks for confirmation. "Pause
   both…" does the same for every Pi-hole at once; "Resume" turns blocking back
   on without asking. Pi-hole switches blocking back on by itself when a timer
-  ends; the screen reads it again just after.
+  ends; the screen reads it again just after (only when its latest reading
+  worked: a pause seen before a Pi-hole became unreadable doesn't make the
+  screen read sooner than every 30 seconds).
 - **Blocklists compared:** the lists (block and allow) of the Pi-holes are
-  compared by address; lists only on some of them, or switched off on some,
-  are named. Nothing is changed by home-cc; copying lists from one Pi-hole to
+  compared by address (a web address's scheme and host in any letter case, and
+  a "/" at its end, count as the same list; both spellings are shown); lists
+  only on some of them, or switched off on some, are named. Nothing is changed by home-cc; copying lists from one Pi-hole to
   another may come later. Allow and deny domain counts are not compared yet.
 - **Overview:** a Pi-hole panel with one line per Pi-hole (blocking state and
   blocked today), and a "Needs attention" entry when a Pi-hole can't be read
