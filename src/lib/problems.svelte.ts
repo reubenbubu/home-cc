@@ -3,6 +3,7 @@
 // which records them here.
 import { page } from "$app/state";
 import { api, errorText, KIND_LABELS, OS_LABELS, type Device } from "./api";
+import { systemSource } from "./system";
 import { names } from "./names.svelte";
 import { agentPrompt, type Context, type Details, type Problem, type PromptKind } from "./report";
 export { copyText } from "./clipboard";
@@ -53,6 +54,7 @@ export function deviceDetails(d: Device): Details {
     Address: d.host,
     Type: KIND_LABELS[d.kind],
     "OS set in home-cc": OS_LABELS[d.os],
+    "Where that came from": systemSource(d),
     "SSH user": d.sshUser,
     "SSH port": d.sshUser ? d.sshPort : null,
     "Resolved hostname": names.describe(d.host, d.hostname),

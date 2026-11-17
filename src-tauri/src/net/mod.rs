@@ -2,6 +2,7 @@
 //! scanning it, working out what each device is, and checking devices are up.
 //! None of it needs administrator rights.
 
+pub mod hints;
 mod ifaces;
 mod lan;
 pub mod names;

@@ -9,7 +9,7 @@
 //! Windows script before the one without WMI is tried.
 
 use crate::error::Result;
-use crate::inventory::{Device, DeviceKind, Inventory};
+use crate::inventory::{Device, DeviceKind, Inventory, Os, OsSource};
 use crate::net;
 use crate::stats::{self, CpuTicks, MachineStats, Reading, StatsError};
 use std::collections::{BTreeSet, HashSet};
@@ -110,29 +110,28 @@ fn is_this_pc(host: &str, own: &HashSet<Ipv4Addr>, hostname: Option<&str>, by_ch
     }
 }
 
-/// The system home-cc runs on, as the device list stores it.
-fn own_os_word() -> Option<&'static str> {
+/// The system home-cc runs on.
+fn own_os() -> Option<Os> {
     if cfg!(windows) {
-        Some("windows")
+        Some(Os::Windows)
     } else if cfg!(target_os = "linux") {
-        Some("linux")
+        Some(Os::Linux)
     } else {
         None
     }
 }
 
-/// A device that is this PC and whose system is still "Other" gets the system home-cc
-/// runs on (Windows or Linux). One the owner picked is never changed. True if any
+/// A device that is this PC gets the system home-cc runs on (Windows or Linux), in
+/// place of one that wasn't known or was found some weaker way (see
+/// `inventory::may_replace`). One the owner picked is never changed. True if any
 /// device changed.
 pub fn fill_in_os(inv: &Inventory, this_pc: &BTreeSet<i64>) -> Result<bool> {
-    let Some(word) = own_os_word() else { return Ok(false) };
-    let conn = inv.conn();
-    let mut changed = 0;
+    let Some(os) = own_os() else { return Ok(false) };
+    let mut changed = false;
     for id in this_pc {
-        changed +=
-            conn.execute("UPDATE devices SET os = ?1 WHERE id = ?2 AND os = 'other'", rusqlite::params![word, id])?;
+        changed |= inv.learn_os(*id, os, OsSource::ThisPc)?;
     }
-    Ok(changed > 0)
+    Ok(changed)
 }
 
 // --- Reading the stats ---
@@ -551,6 +550,7 @@ mod tests {
             first_seen: 0,
             last_seen: None,
             group: None,
+            os_source: None,
         }
     }
 
@@ -622,16 +622,26 @@ mod tests {
                 notes: String::new(),
                 mac: None,
                 group: None,
+                os_was: None,
+                os_auto: false,
             })
             .unwrap()
             .id
         };
         let (unknown, chosen, other_pc) = (add("this", Os::Other), add("set", Os::Proxmox), add("else", Os::Other));
-        let this_pc = BTreeSet::from([unknown, chosen]);
+        // Guessed wrongly from the network before home-cc knew it was this PC.
+        let guessed = add("guessed", Os::Other);
+        let wrong = if cfg!(windows) { Os::Linux } else { Os::Windows };
+        assert!(inv.learn_os(guessed, wrong, OsSource::Network).unwrap());
+        let this_pc = BTreeSet::from([unknown, chosen, guessed]);
         assert!(fill_in_os(&inv, &this_pc).unwrap());
         let expected = if cfg!(windows) { Os::Windows } else { Os::Linux };
-        assert_eq!(inv.get(unknown).unwrap().os, expected);
-        assert_eq!(inv.get(chosen).unwrap().os, Os::Proxmox, "the owner's choice stays");
+        let d = inv.get(unknown).unwrap();
+        assert_eq!((d.os, d.os_source), (expected, Some(OsSource::ThisPc)));
+        let d = inv.get(guessed).unwrap();
+        assert_eq!((d.os, d.os_source), (expected, Some(OsSource::ThisPc)), "this PC knows better than a guess");
+        let d = inv.get(chosen).unwrap();
+        assert_eq!((d.os, d.os_source), (Os::Proxmox, Some(OsSource::Manual)), "the owner's choice stays");
         assert_eq!(inv.get(other_pc).unwrap().os, Os::Other, "not this PC");
         assert!(!fill_in_os(&inv, &this_pc).unwrap(), "nothing left to fill in");
         assert!(!fill_in_os(&inv, &BTreeSet::new()).unwrap());

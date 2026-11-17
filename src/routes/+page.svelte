@@ -10,6 +10,7 @@
   import { silences } from "$lib/silence.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import { systemLabel, systemTitle } from "$lib/system";
   import Address from "$lib/components/Address.svelte";
   import CheckProblem from "$lib/components/CheckProblem.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -192,7 +193,7 @@
     <div class="muted small where">
       <Address host={m.host} known={m.hostname} />
       <!-- The type is the heading above. -->
-      <span class="ellipsis">· {OS_LABELS[m.os]}</span>
+      <span class="ellipsis" title={systemTitle(m, OS_LABELS)}>· {systemLabel(m, OS_LABELS)}</span>
     </div>
     <Sparkline history={status.get(m)?.history ?? []} />
     {#if !m.sshUser && !local}

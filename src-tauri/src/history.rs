@@ -131,6 +131,8 @@ mod tests {
             notes: String::new(),
             mac: None,
             group: None,
+            os_was: None,
+            os_auto: false,
         };
         inv.add(input).unwrap().id
     }

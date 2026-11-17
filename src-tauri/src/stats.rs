@@ -67,6 +67,9 @@ pub struct Collected {
     pub host_key: HostKey,
     /// Pass back in as `prev` next time.
     pub cpu_ticks: Option<CpuTicks>,
+    /// The system the reading shows the machine runs, when it shows one (see
+    /// [`system_of`]).
+    pub system: Option<Os>,
 }
 
 // The scripts are sent with the same line endings whatever the checkout used. The repo's
@@ -139,8 +142,22 @@ pub async fn read(
     let host_key = session.host_key().clone();
     session.close().await;
     let (reading, reduced) = reading?;
+    let system = system_of(&reading, windows);
     let (stats, cpu_ticks) = summarise(reading, reduced, prev);
-    Ok(Collected { stats, host_key, cpu_ticks })
+    Ok(Collected { stats, host_key, cpu_ticks, system })
+}
+
+/// The system a reading shows: Windows when the Windows script answered (`windows`),
+/// Proxmox when `pveversion` did, Linux when the kernel says so. None for anything
+/// else (a BSD box that runs the Linux script, say), which leaves the System as it was.
+pub(crate) fn system_of(reading: &Reading, windows: bool) -> Option<Os> {
+    if windows {
+        return Some(Os::Windows);
+    }
+    if reading.pve.as_deref().is_some_and(|line| line.starts_with("pve-manager/")) {
+        return Some(Os::Proxmox);
+    }
+    reading.sys.as_deref().filter(|sys| sys.eq_ignore_ascii_case("linux")).map(|_| Os::Linux)
 }
 
 /// Time left before the deadline, less a moment to log out. Never under a second, so a
@@ -240,6 +257,8 @@ pub(crate) fn encoded_powershell(script: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Reading {
     os: Option<String>,
+    /// The kernel's name (`uname -s`, "Linux") from the Linux script.
+    sys: Option<String>,
     /// First line of `pveversion` when the machine is a Proxmox host.
     pve: Option<String>,
     uptime_s: Option<u64>,
@@ -314,6 +333,7 @@ pub(crate) fn parse_stats(stdout: &[u8]) -> Result<Reading, StatsError> {
         match key {
             "os" => reading.os = Some(clean(value)).filter(|v| !v.is_empty()),
             "pve" => reading.pve = Some(clean(value)).filter(|v| !v.is_empty()),
+            "sys" => reading.sys = Some(clean(value)).filter(|v| !v.is_empty()),
             "uptime_s" => reading.uptime_s = value.trim().parse().ok(),
             "ncpu" => reading.ncpu = value.trim().parse().ok().filter(|n| *n > 0),
             "cpu_pct" => reading.cpu_pct = number(value.trim()).map(|p| p.min(100.0)),
@@ -734,6 +754,22 @@ disk=\n\
             "free space larger than the disk: fall back to used"
         );
         assert_eq!(stats.os_name, "Unknown");
+    }
+
+    #[test]
+    fn the_system_comes_from_what_answered() {
+        let linux = parse_stats(b"@@hcc-stats 1\nos=Ubuntu 24.04.1 LTS\nsys=Linux\n@@end\n").unwrap();
+        assert_eq!(system_of(&linux, false), Some(Os::Linux));
+        // pveversion answering means Proxmox, whatever the kernel.
+        assert_eq!(system_of(&parse_stats(LINUX.as_bytes()).unwrap(), false), Some(Os::Proxmox));
+        let half = parse_stats(b"@@hcc-stats 1\nsys=Linux\npve=sh: pveversion: not found\n@@end\n").unwrap();
+        assert_eq!(system_of(&half, false), Some(Os::Linux), "a pve line that isn't pveversion's");
+        // The Windows script ran.
+        assert_eq!(system_of(&parse_stats(WINDOWS.as_bytes()).unwrap(), true), Some(Os::Windows));
+        // Some other system that ran the Linux script, or one that didn't say.
+        let bsd = parse_stats(b"@@hcc-stats 1\nos=FreeBSD\nsys=FreeBSD\n@@end\n").unwrap();
+        assert_eq!(system_of(&bsd, false), None);
+        assert_eq!(system_of(&parse_stats(b"@@hcc-stats 1\nos=Linux\n@@end\n").unwrap(), false), None);
     }
 
     #[test]

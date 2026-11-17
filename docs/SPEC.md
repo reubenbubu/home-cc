@@ -153,10 +153,37 @@ can take one more timer period to show as down.
   filled in when connecting.
 - The PC home-cc runs on needs no SSH: its stats are read directly, with the
   same script and the same numbers an SSH reading would give, and without
-  showing a window. If its system is still "Other", the app fills in Windows
-  or Linux. A machine with an SSH login on another port than 22, or on this
-  PC's loopback address (a VM, WSL or a container reached through this PC),
-  is not this PC and is still read over SSH.
+  showing a window. A machine with an SSH login on another port than 22, or
+  on this PC's loopback address (a VM, WSL or a container reached through
+  this PC), is not this PC and is still read over SSH.
+- A machine's System (Windows, Linux, Proxmox VE) is filled in by itself
+  while the owner hasn't chosen one, from the strongest of these:
+  1. this PC itself, which knows its own system;
+  2. an SSH login: the stats reading tells Windows from Linux, and
+     `pveversion` answering means Proxmox;
+  3. a Proxmox host whose API answers (it stays Proxmox even if a login sees
+     only Linux);
+  4. the network, the weakest, a guess: a short connection to a few ports of
+     a machine that is up. Windows' own services (135, 445 or 3389) answering
+     means Windows; an OpenSSH greeting that isn't Windows' own means Linux
+     (with Samba's 445 too), and Proxmox with its web port 8006; both kinds
+     at once is no guess. No admin rights, under a second or so per port, in
+     the background so neither the status checks nor the scan wait, at most
+     once per machine while the app runs, and only for machines on the
+     Machines screen whose System isn't known yet or was only guessed. The
+     ping TTL is not used: the ping library doesn't give it.
+
+  A stronger answer replaces a weaker one; nothing replaces the owner's
+  choice. Changing System in the machine form makes it the owner's (choosing
+  "Other" too), so a wrong guess never comes back; a form left untouched
+  keeps what home-cc found, even if it found it after the form was opened.
+  A new machine's form starts at "Other", to be worked out. The form says
+  where the System came from ("Found from its SSH login", "Guessed from the
+  network", "Set by you"), the System in the lists and on the Overview says
+  so on hover, and a guess shows as "Linux (guessed)". "Let home-cc work it
+  out" in the form gives a System the owner set back to home-cc. Pointing a
+  machine at another address forgets a System found at the old one. A System
+  set before this existed counts as the owner's.
 - The machine cards can be put in any order: drag a card by the grip in its
   header, or use the arrow keys on that grip. The order is remembered on this
   PC; new machines go at the end, and "Reset order" goes back to name order.

@@ -10,6 +10,7 @@
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import { systemLabel, systemTitle } from "$lib/system";
   import { deviceDetails } from "$lib/problems.svelte";
   import { openTerminal } from "$lib/terminals.svelte";
   import type { Details, Problem as ProblemInfo } from "$lib/report";
@@ -143,7 +144,8 @@
 
   <div class="sub muted small">
     <Address host={device.host} known={device.hostname} />
-    <span class="ellipsis" title={st?.osName}>{st?.osName || (statusOnly && device.os === "other" ? KIND_LABELS.appliance : OS_LABELS[device.os])}</span>
+    <!-- The System's name, or the one the machine gave; where home-cc's System came from on hover. -->
+    <span class="ellipsis" title="{st?.osName ? `${st.osName}. ` : ''}{systemTitle(device, OS_LABELS)}">{st?.osName || (statusOnly && device.os === "other" ? KIND_LABELS.appliance : systemLabel(device, OS_LABELS))}</span>
     {#if st?.uptimeSecs != null}<span class="nowrap">up {uptime(st.uptimeSecs)}</span>{/if}
   </div>
 

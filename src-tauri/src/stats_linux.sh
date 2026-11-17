@@ -10,7 +10,7 @@ if [ -r /etc/os-release ]; then
 else
   printf 'os=%s\n' "$(uname -s)"
 fi
-printf 'kernel=%s\narch=%s\nhost=%s\n' "$(uname -r)" "$(uname -m)" "$(uname -n)"
+printf 'sys=%s\nkernel=%s\narch=%s\nhost=%s\n' "$(uname -s)" "$(uname -r)" "$(uname -m)" "$(uname -n)"
 if command -v pveversion >/dev/null 2>&1; then
   printf 'pve=%s\n' "$(pveversion 2>/dev/null </dev/null | head -n 1)"
 fi

@@ -5,6 +5,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 /** "appliance": something with its own address that isn't a PC, such as a printer, TV or camera. */
 export type DeviceKind = "pc" | "server" | "vm" | "container" | "mesh" | "appliance" | "other" | "ignore";
 export type Os = "windows" | "linux" | "proxmox" | "other";
+/** Where a System came from, strongest first: the owner's choice, this PC itself, an SSH login, a working
+ *  Proxmox API, a guess from the ports that answer on the network. */
+export type OsSource = "manual" | "this-pc" | "ssh" | "proxmox" | "network";
 
 export interface Device {
   id: number;
@@ -12,6 +15,8 @@ export interface Device {
   host: string;
   kind: DeviceKind;
   os: Os;
+  /** Where `os` came from; null while it isn't known yet (`os` is then "other"). */
+  osSource: OsSource | null;
   sshUser: string | null;
   sshPort: number;
   notes: string;
@@ -45,6 +50,11 @@ export interface DeviceInput {
   mac?: string | null;
   /** Group name. Not given (or null): left as it is. An empty string takes the machine out of its group. */
   group?: string | null;
+  /** The System the form showed when it opened. The same as `os`: the owner didn't change it, and the stored
+   *  System stays (home-cc may have found it since). Not given: `os` is compared with the stored one. */
+  osWas?: Os | null;
+  /** "Let home-cc work it out": the System is forgotten, with the owner's choice of it, and found again. */
+  osAuto?: boolean;
 }
 
 export interface Settings {

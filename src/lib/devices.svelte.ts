@@ -57,13 +57,15 @@ class DeviceStore {
 export const devices = new DeviceStore();
 
 /** A device as the input for saving it, with some fields changed. The hardware address is not sent, which
- *  leaves it as it is (unless the patch changes the address: the back end then forgets it). */
+ *  leaves it as it is (unless the patch changes the address: the back end then forgets it). The System goes
+ *  with the one it was shown as, so a System home-cc found meanwhile isn't undone. */
 export function toInput(d: Device, patch: Partial<DeviceInput> = {}): DeviceInput {
   return {
     name: d.name,
     host: d.host,
     kind: d.kind,
     os: d.os,
+    osWas: d.os,
     sshUser: d.sshUser,
     sshPort: d.sshPort,
     notes: d.notes,

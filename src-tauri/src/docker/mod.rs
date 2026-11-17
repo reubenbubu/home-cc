@@ -1136,6 +1136,7 @@ mod tests {
             first_seen: 0,
             last_seen: None,
             group: None,
+            os_source: None,
         }
     }
 

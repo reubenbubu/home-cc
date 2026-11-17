@@ -87,6 +87,17 @@ const SCREENS = [
       await page.getByText("Identity home-cc remembers").waitFor();
     },
   },
+  // The System field: one set by hand, being left to home-cc to work out.
+  {
+    name: "machines-system",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Edit Dev VM" }).click();
+      await page.getByRole("button", { name: "Let home-cc work it out" }).click();
+      await page.getByText("Saving lets home-cc work it out again").waitFor();
+    },
+  },
   // Machine groups: a heading per group. The sample has "NAS PC" and "Proxmox lab", and some machines in none.
   {
     name: "machines-group-collapsed",
@@ -938,6 +949,95 @@ async function checkFlows(browser, url) {
         await page.getByText("this hardware address is forgotten when you save").waitFor();
         await save.click();
         await page.locator("form").getByRole("alert").filter({ hasText: "needs four" }).waitFor();
+      },
+    },
+    {
+      what: "System: one set by hand is left to home-cc, found again from the SSH login while its form is open, and kept once chosen",
+      path: "/machines",
+      async run(page) {
+        const form = page.locator("form");
+        const system = form.getByRole("combobox", { name: /^System/ });
+        const save = form.getByRole("button", { name: "Save", exact: true });
+        const auto = form.getByRole("button", { name: "Let home-cc work it out" });
+        const all = panelOf(page, "All machines");
+        /** Waits for the All machines table to show this System for Dev VM. */
+        const listed = async (want, when) => {
+          const cell = all.locator("tbody tr", { hasText: "Dev VM" }).locator("td.c-os");
+          const until = Date.now() + 5000;
+          let got;
+          while ((got = (await cell.textContent())?.trim()) !== want) {
+            if (Date.now() > until) throw new Error(`${when}, the table says Dev VM runs "${got}", not "${want}"`);
+            await page.waitForTimeout(100);
+          }
+        };
+        /** Reads Dev VM's stats now, and waits for the reading to be over. */
+        const readNow = async () => {
+          const button = card(page, "Dev VM").getByRole("button", { name: "Read stats for Dev VM now" });
+          await button.click();
+          await page.waitForFunction(() => document.querySelector('[aria-label="Read stats for Dev VM now"]')?.disabled === true);
+          await page.waitForFunction(() => document.querySelector('[aria-label="Read stats for Dev VM now"]')?.disabled === false);
+        };
+
+        // Set by hand: offered to home-cc, and left to it on save.
+        await page.getByRole("button", { name: "Edit Dev VM" }).click();
+        await form.getByText("Set by you. home-cc won't change it.").waitFor();
+        await auto.click();
+        await form.getByText("Saving lets home-cc work it out again").waitFor();
+        await expectValue(system, "other", "the System once left to home-cc");
+        if (await auto.count()) throw new Error("Let home-cc work it out is still offered once pressed");
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await listed("Other", "left to home-cc");
+
+        // Its form open, untouched, while a reading over SSH finds it: the field follows, and saving keeps it found.
+        await page.getByRole("button", { name: "Edit Dev VM" }).click();
+        await form.getByText(/^Not known yet: home-cc works it out/).waitFor();
+        await form.getByLabel("Notes").fill("System left alone");
+        await readNow();
+        await expectValue(system, "linux", "the System field once the login found it");
+        await form.getByText("Found from its SSH login.").waitFor();
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await listed("Linux", "found from the login");
+        await page.getByRole("button", { name: "Edit Dev VM" }).click();
+        await form.getByText("Found from its SSH login.").waitFor();
+        if (await auto.count()) throw new Error("Let home-cc work it out is offered for a System home-cc found");
+
+        // Chosen in the form: the owner's, and the next reading doesn't undo it.
+        await system.selectOption("windows");
+        await form.getByText("Set by you once you save. home-cc won't change it.").waitFor();
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await readNow();
+        await page.waitForTimeout(300);
+        await listed("Windows", "chosen by hand and read again");
+        await page.getByRole("button", { name: "Edit Dev VM" }).click();
+        await form.getByText("Set by you. home-cc won't change it.").waitFor();
+        await auto.waitFor();
+      },
+    },
+    {
+      what: "System: one guessed from the network says so, and a reading over SSH makes it found",
+      path: "/machines",
+      async run(page) {
+        const row = panelOf(page, "All machines").locator("tbody tr", { hasText: "Media PC" }).locator("td.c-os");
+        const said = async () => ({ text: (await row.textContent())?.trim(), title: await row.getAttribute("title") });
+        let shown = await said();
+        if (shown.text !== "Windows (guessed)" || shown.title !== "System: Windows · Guessed from the network") {
+          throw new Error(`Media PC's System reads "${shown.text}" ("${shown.title}")`);
+        }
+        await page.getByRole("button", { name: "Edit Media PC" }).click();
+        await page.locator("form").getByText(/^Guessed from the network\./).waitFor();
+        const media = card(page, "Media PC");
+        await media.getByRole("button", { name: "Approve and use the password" }).click();
+        await media.getByRole("button", { name: "Yes, it matches" }).click();
+        await media.getByText("RAM", { exact: true }).waitFor();
+        await page.locator("form").getByText("Found from its SSH login.").waitFor();
+        await page.waitForFunction(() =>
+          [...document.querySelectorAll("tbody tr")].some((tr) => tr.textContent.includes("Media PC") && tr.querySelector("td.c-os")?.textContent.trim() === "Windows"),
+        );
+        shown = await said();
+        if (shown.title !== "System: Windows · Found from its SSH login") throw new Error(`Media PC's System says "${shown.title}"`);
       },
     },
     {
@@ -2516,6 +2616,27 @@ async function checkFlows(browser, url) {
         await page.getByRole("button", { name: "Edit NAS" }).click();
         await expectValue(notes, saved, "the notes after Cancel");
         await expectValue(form.getByLabel("SSH password (optional)"), "", "the password after Cancel");
+      },
+    },
+    {
+      what: "Drafts: a System left to home-cc in the Machines form stays so after looking at another screen, and Cancel lets it go",
+      path: "/machines",
+      async run(page) {
+        const form = page.locator("form");
+        const system = form.getByRole("combobox", { name: /^System/ });
+        await page.getByRole("button", { name: "Edit Old laptop" }).click();
+        await form.getByRole("button", { name: "Let home-cc work it out" }).click();
+        await awayAndBack(page, "Network", "Machines");
+        await form.getByRole("heading", { name: "Edit machine" }).waitFor();
+        await form.getByText("Saving lets home-cc work it out again").waitFor();
+        await expectValue(system, "other", "the System left to home-cc");
+        await form.getByText("Unsaved changes").waitFor();
+        await form.getByRole("button", { name: "Cancel", exact: true }).click();
+        await awayAndBack(page, "Network", "Machines");
+        if (await page.locator("form").count()) throw new Error("the form opened again after Cancel");
+        await page.getByRole("button", { name: "Edit Old laptop" }).click();
+        await expectValue(system, "linux", "the System after Cancel");
+        await form.getByText("Set by you. home-cc won't change it.").waitFor();
       },
     },
     {
