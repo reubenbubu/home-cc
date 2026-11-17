@@ -97,7 +97,8 @@ const MAX_TEXT: usize = 200;
 
 /// Log in to one machine, read its stats and log out. `os` picks the Linux
 /// (also Proxmox) or Windows command; other systems are tried as Linux,
-/// unless the server introduces itself as Windows' own SSH server.
+/// unless the server introduces itself as Windows' own SSH server (see
+/// [`runs_windows`]).
 /// `prev` is the `cpu_ticks` from the previous reading of the same machine.
 /// `first_use` is handed the machine's identity on a first connection (no
 /// `login.known_key`), once and before anything is offered to the machine, so
@@ -113,27 +114,23 @@ pub async fn collect(
 ) -> Result<Collected, SshError> {
     let deadline = Instant::now() + TOTAL_LIMIT;
     let session = ssh::connect(login, first_use).await?;
-    read(session, login.host.trim(), os, prev, deadline).await
+    read(session, login.host.trim(), os, false, prev, deadline).await
 }
 
 /// Read the stats over a connection that is already logged in, then log out. For a
 /// caller that logs in by its own rules (see `monitor::Prepared::connect`); `deadline`
 /// is when the whole reading, the login included, should be over: normally
-/// [`TOTAL_LIMIT`] from before the login.
+/// [`TOTAL_LIMIT`] from before the login. `guessed`: `os` was only guessed from
+/// the network, so the server's own greeting may overrule it.
 pub async fn read(
     session: Session,
     host: &str,
     os: Os,
+    guessed: bool,
     prev: Option<CpuTicks>,
     deadline: Instant,
 ) -> Result<Collected, SshError> {
-    // A machine of unknown type that greets as Windows' own SSH server gets the Windows
-    // command straight away: the Linux one could only fail there.
-    let windows = match os {
-        Os::Windows => true,
-        Os::Linux | Os::Proxmox => false,
-        Os::Other => session.server_version().contains("OpenSSH_for_Windows"),
-    };
+    let windows = runs_windows(os, guessed, session.server_version());
     let reading = if windows {
         read_windows(&session, host, deadline).await
     } else {
@@ -145,6 +142,24 @@ pub async fn read(
     let system = system_of(&reading, windows);
     let (stats, cpu_ticks) = summarise(reading, reduced, prev);
     Ok(Collected { stats, host_key, cpu_ticks, system })
+}
+
+/// Whether the Windows command is the one to run on a machine whose System is
+/// `os` and whose SSH server greets with `server_version`. One of unknown type
+/// that greets as Windows' own SSH server gets the Windows command straight
+/// away: the Linux one could only fail there. A System only guessed from the
+/// network (`guessed`) gives way to a greeting that names OpenSSH, so a wrong
+/// guess can't stop the very reading that would put it right.
+pub(crate) fn runs_windows(os: Os, guessed: bool, server_version: &str) -> bool {
+    let windows_ssh = server_version.contains("OpenSSH_for_Windows");
+    if guessed && server_version.contains("OpenSSH") {
+        return windows_ssh;
+    }
+    match os {
+        Os::Windows => true,
+        Os::Linux | Os::Proxmox => false,
+        Os::Other => windows_ssh,
+    }
 }
 
 /// The system a reading shows: Windows when the Windows script answered (`windows`),
@@ -754,6 +769,27 @@ disk=\n\
             "free space larger than the disk: fall back to used"
         );
         assert_eq!(stats.os_name, "Unknown");
+    }
+
+    #[test]
+    fn the_command_is_picked_by_the_system_and_a_guess_gives_way_to_the_greeting() {
+        const DEBIAN: &str = "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3";
+        const WINDOWS: &str = "SSH-2.0-OpenSSH_for_Windows_9.5";
+        const BITVISE: &str = "SSH-2.0-9.99 FlowSsh: Bitvise SSH Server (WinSSHD)";
+        // Known: the System decides, whatever the greeting.
+        assert!(runs_windows(Os::Windows, false, DEBIAN));
+        assert!(!runs_windows(Os::Linux, false, WINDOWS));
+        assert!(!runs_windows(Os::Proxmox, false, DEBIAN));
+        // Not known: only Windows' own SSH server gets the Windows command.
+        assert!(runs_windows(Os::Other, false, WINDOWS));
+        assert!(!runs_windows(Os::Other, false, DEBIAN));
+        assert!(!runs_windows(Os::Other, false, BITVISE));
+        // Guessed: an OpenSSH greeting overrules the guess; another greeting doesn't.
+        assert!(!runs_windows(Os::Windows, true, DEBIAN), "Samba's port on Linux taken for Windows");
+        assert!(runs_windows(Os::Linux, true, WINDOWS));
+        assert!(!runs_windows(Os::Proxmox, true, DEBIAN));
+        assert!(runs_windows(Os::Windows, true, BITVISE), "Windows with another SSH server");
+        assert!(!runs_windows(Os::Linux, true, "SSH-2.0-dropbear_2022.83"));
     }
 
     #[test]

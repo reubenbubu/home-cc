@@ -26,6 +26,9 @@ const GREETING_LIMIT: Duration = Duration::from_millis(1200);
 const NAME_LIMIT: Duration = Duration::from_secs(2);
 /// An SSH greeting is at most 255 characters (RFC 4253).
 const GREETING_MAX: usize = 255;
+/// The most read from an SSH port: the greeting, and a few lines a server may
+/// send before it.
+const SENT_MAX: usize = 1024;
 
 /// What answered on a machine.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -119,7 +122,7 @@ async fn greeting(addr: SocketAddr) -> Option<String> {
     let deadline = Instant::now() + GREETING_LIMIT;
     let mut got = Vec::new();
     let mut buf = [0u8; GREETING_MAX + 2];
-    while !got.contains(&b'\n') && got.len() < GREETING_MAX {
+    while !has_greeting(&got) && got.len() < SENT_MAX {
         timeout(deadline.saturating_duration_since(Instant::now()), stream.readable()).await.ok()?.ok()?;
         match stream.try_read(&mut buf) {
             Ok(0) => break,
@@ -129,6 +132,14 @@ async fn greeting(addr: SocketAddr) -> Option<String> {
         }
     }
     first_line(&got)
+}
+
+/// Whether what a server sent so far holds a whole line starting "SSH-" (the
+/// greeting, which may come after other lines).
+fn has_greeting(sent: &[u8]) -> bool {
+    let lines: Vec<&[u8]> = sent.split(|b| *b == b'\n').collect();
+    // The last piece has no line ending yet.
+    lines[..lines.len() - 1].iter().any(|l| l.starts_with(b"SSH-"))
 }
 
 /// The SSH greeting in what a server sent: its first line starting "SSH-"
@@ -223,5 +234,28 @@ mod tests {
         let quiet = answered(IpAddr::V4(Ipv4Addr::LOCALHOST), open_port, &[]).await;
         assert_eq!(quiet, Answered::default());
         drop(other);
+
+        // One that sends another line first, and the greeting a moment later.
+        let chatty = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let chatty_port = chatty.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = chatty.accept().await {
+                s.write_all(b"Authorised users only\r\n").await.ok();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                s.write_all(b"SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3\r\n").await.ok();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let a = answered(IpAddr::V4(Ipv4Addr::LOCALHOST), chatty_port, &[]).await;
+        assert_eq!(a.ssh_greeting.as_deref(), Some(DEBIAN));
+    }
+
+    #[test]
+    fn the_greeting_is_waited_for_until_its_line_is_whole() {
+        assert!(!has_greeting(b""));
+        assert!(!has_greeting(b"Welcome\r\n"));
+        assert!(!has_greeting(b"Welcome\r\nSSH-2.0-Open"), "not finished yet");
+        assert!(has_greeting(b"Welcome\r\nSSH-2.0-OpenSSH_9.5\r\n"));
+        assert!(has_greeting(b"SSH-2.0-OpenSSH_9.5\n"));
     }
 }

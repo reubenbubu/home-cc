@@ -181,6 +181,16 @@ fn wants_hint(d: &Device, this_pc: &BTreeSet<i64>) -> bool {
     machine && matches!(d.os_source, None | Some(OsSource::Network)) && !this_pc.contains(&d.id)
 }
 
+/// Whether a reading begun with the device as it was then (`before`) still
+/// belongs to it as it is `now`: the same address, login and, if the owner
+/// chose one, System. A System home-cc found by itself meanwhile (guessed
+/// from the network while the login ran, say) doesn't make it another place.
+fn same_place(before: &Device, now: &Device) -> bool {
+    let chosen = |d: &Device| (d.os_source == Some(OsSource::Manual)).then_some(d.os);
+    (now.host.as_str(), now.ssh_port, &now.ssh_user, chosen(now))
+        == (before.host.as_str(), before.ssh_port, &before.ssh_user, chosen(before))
+}
+
 fn error_kind(e: &SshError) -> StatsErrorKind {
     match e {
         SshError::NewHost(_) => StatsErrorKind::NewHost,
@@ -294,11 +304,20 @@ impl Monitor {
                 let gate = gate.clone();
                 running.spawn(async move {
                     let _slot = gate.acquire_owned().await;
-                    (device_id, net::hints::probe(&host, ssh_port).await)
+                    let os = net::hints::probe(&host, ssh_port).await;
+                    (device_id, host, os)
                 });
             }
             while let Some(done) = running.join_next().await {
-                let Ok((device_id, Some(os))) = done else { continue };
+                let Ok((device_id, host, os)) = done else { continue };
+                // Pointed somewhere else meanwhile (the round's list may be from
+                // before the edit): the answer is about the old place, and the
+                // new one is tried in a later round.
+                if !app.state::<Inventory>().get(device_id).is_ok_and(|d| d.host == host) {
+                    app.state::<Monitor>().hinted.lock().unwrap().remove(&device_id);
+                    continue;
+                }
+                let Some(os) = os else { continue };
                 match app.state::<Inventory>().learn_os(device_id, os, OsSource::Network) {
                     Ok(true) => {
                         app.emit(EVENT_STATUS, ()).ok();
@@ -529,7 +548,10 @@ impl Monitor {
                 let first_use = move |key: &HostKey| remember(&first_app, device_id, &host, port, key);
                 let deadline = tokio::time::Instant::now() + stats::TOTAL_LIMIT;
                 match prepared.connect(&first_use).await {
-                    Ok(session) => stats::read(session, prepared.login.host.trim(), device.os, prev_ticks, deadline).await,
+                    Ok(session) => {
+                        let guessed = device.os_source == Some(OsSource::Network);
+                        stats::read(session, prepared.login.host.trim(), device.os, guessed, prev_ticks, deadline).await
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -539,11 +561,7 @@ impl Monitor {
         // The owner may have pointed the device somewhere else, or changed
         // its login, while this reading ran. Its outcome is about the old
         // place, so it is dropped; the edit already started a fresh reading.
-        let same_place = |d: &Device| {
-            (d.host.as_str(), d.ssh_port, &d.ssh_user, d.os)
-                == (device.host.as_str(), device.ssh_port, &device.ssh_user, device.os)
-        };
-        if !app.state::<Inventory>().get(device_id).is_ok_and(|d| same_place(&d)) {
+        if !app.state::<Inventory>().get(device_id).is_ok_and(|d| same_place(&device, &d)) {
             return self.stats.lock().unwrap().get(&device_id).map(|s| s.entry.clone())
                 .unwrap_or_else(|| MachineStatsEntry::empty(device_id));
         }
@@ -818,6 +836,24 @@ mod tests {
             assert!(!wants_hint(&machine(kind, None), &none), "{kind:?}");
         }
         assert!(!wants_hint(&machine(DeviceKind::Pc, None), &BTreeSet::from([1])), "this PC");
+    }
+
+    #[test]
+    fn a_reading_is_dropped_only_when_the_owner_changed_where_it_goes() {
+        let before = Device { ssh_user: Some("sam".into()), ..device(DeviceKind::Vm, None) };
+        let with = |os, os_source| Device { os, os_source, ..before.clone() };
+        assert!(same_place(&before, &before));
+        // home-cc found the System by itself while the login ran.
+        assert!(same_place(&before, &with(Os::Linux, Some(OsSource::Network))));
+        assert!(same_place(&with(Os::Windows, Some(OsSource::Network)), &with(Os::Linux, Some(OsSource::Ssh))));
+        // The owner chose one, or gave theirs back to home-cc.
+        assert!(!same_place(&before, &with(Os::Windows, Some(OsSource::Manual))));
+        assert!(!same_place(&with(Os::Linux, Some(OsSource::Manual)), &before));
+        assert!(!same_place(&with(Os::Linux, Some(OsSource::Manual)), &with(Os::Windows, Some(OsSource::Manual))));
+        // Another address, port or user.
+        assert!(!same_place(&before, &Device { host: "192.168.68.41".into(), ..before.clone() }));
+        assert!(!same_place(&before, &Device { ssh_port: 2222, ..before.clone() }));
+        assert!(!same_place(&before, &Device { ssh_user: Some("root".into()), ..before.clone() }));
     }
 
     #[test]

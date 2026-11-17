@@ -171,7 +171,10 @@ can take one more timer period to show as down.
      the background so neither the status checks nor the scan wait, at most
      once per machine while the app runs, and only for machines on the
      Machines screen whose System isn't known yet or was only guessed. The
-     ping TTL is not used: the ping library doesn't give it.
+     ping TTL is not used: the ping library doesn't give it. A guess never
+     stops an SSH login from putting it right: when the machine's SSH server
+     greets as OpenSSH, that greeting, not the guess, picks the Windows or
+     the Linux stats script.
 
   A stronger answer replaces a weaker one; nothing replaces the owner's
   choice. Changing System in the machine form makes it the owner's (choosing
