@@ -79,6 +79,35 @@ Windows machine.
   another screen is shown (in memory only, as it can hold a password). A form
   fills itself from its draft first, shows "Unsaved changes" with Discard, and
   clears the draft when it is saved, cancelled or closed. New forms do the same.
+  Every table can be sorted, grouped and filtered the same way. The rules are
+  in `src/lib/table.ts` (tested by `table.test.mjs`): text in a person's order
+  ("PC 2" before "PC 10"), numbers by value, IP addresses number by number,
+  times by time, states down → warning → up, and empty cells last both ways.
+  To give a new table the same:
+  1. List its columns as `Column`s: `value` (what it sorts on) and `kind`,
+     `text` (the words shown, for group headings and choices), `search` (what
+     the filter looks at, such as an address and its hostname), `group: true`
+     for values many rows share (type, state, group; not names or addresses),
+     `choose: true` for a quick choice above the table, `sortable: false` for
+     buttons.
+  2. Make a `TableView` (`src/lib/table.svelte.ts`) with a unique `id`, the
+     columns, the rows, a key per row, and its own order in words (`usual`).
+     It keeps the filter, sort, grouping and collapsed groups while another
+     screen is shown (the drafts store), and the sort and grouping in the
+     window's storage for next time; the filter text is never stored.
+  3. Put `<TableTools>` above the table, `use:view.watch` on the `<table>`,
+     `<SortButton>` in each sortable `<th>` (with `aria-sort={view.ariaSort(id)}`),
+     and draw `view.sections` as one `<tbody>` each, starting with
+     `<GroupRow>` when `section.label` isn't null and showing the rows only
+     when `section.open`. All three parts are in `src/lib/components/table/`.
+     A list built of other elements (the containers of a Docker stack) takes
+     `role="table"`, one `role="rowgroup"` per section, and `<GroupRow grid>`.
+  The bar names the sort and grouping in use, so a column hidden at a narrow
+  width (or the headers, when rows become blocks) never sorts without saying.
+  Rows don't move under the pointer or while something in a row has focus:
+  not to another place, another group, or out of the filter (`arrange` in
+  `table.ts`). Focus is checked where it is now, so a focused button that is
+  taken away (Start swapped for "Starting…") lets the table go again.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
     `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH

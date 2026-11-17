@@ -47,6 +47,13 @@ class NameStore {
     return answer.error !== undefined ? { kind: "failed", error: answer.error } : { kind: "none" };
   }
 
+  /** The name a Hostname column shows for a host, as text to sort and filter on: null while there is none
+   *  (still being looked up, or nothing found). */
+  text(host: string, known?: string | null): string | null {
+    const n = this.get(host, known);
+    return n.kind === "name" ? n.name : n.kind === "notAddress" ? host.trim() : null;
+  }
+
   /** The same, in words for a problem report. */
   describe(host: string, known?: string | null): string {
     const n = this.get(host, known);

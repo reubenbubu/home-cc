@@ -85,6 +85,35 @@ export function stateText(c: Container, now: number): string {
   }
 }
 
+/** A container's state in a word or two, the same for every container in it whatever the time: what the
+ *  list groups by and offers as a choice. "Failed" is a stop with an exit code that isn't a normal one. */
+export function stateWord(c: Container): string {
+  switch (c.state) {
+    case "running":
+      return c.health === "unhealthy" ? "Unhealthy" : c.health === "starting" ? "Starting" : "Running";
+    case "restarting":
+      return "Restarting";
+    case "paused":
+      return "Paused";
+    case "created":
+      return "Never started";
+    case "exited":
+      return stateTone(c) === "bad" ? "Failed" : "Stopped";
+    case "dead":
+      return "Dead";
+    default:
+      return c.state.charAt(0).toUpperCase() + c.state.slice(1);
+  }
+}
+
+/** Where a state goes when the list is sorted by it: trouble first, then what is under way, running, and
+ *  stopped last (as STATE_ORDER has it). */
+export const STATE_ORDER = ["down", "warning", "up", "stopped"] as const;
+export function stateRank(c: Container): (typeof STATE_ORDER)[number] {
+  const tone = stateTone(c);
+  return tone === "bad" ? "down" : tone === "warn" ? "warning" : tone === "ok" ? "up" : "stopped";
+}
+
 export interface StackSummary {
   running: number;
   total: number;

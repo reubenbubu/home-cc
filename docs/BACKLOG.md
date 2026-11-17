@@ -88,5 +88,5 @@ work is understood so far and are open to change. Remove an item once it has lan
 ## Smaller follow-ups
 
 - Screenshot flows for drafts not covered yet: the Docker log search, key login and the Network rename.
-- Tables added after the sort, group and filter work (for example on the Pi-hole screen) use the same
-  shared behaviour.
+- A new table uses the shared sort, group and filter parts (README, Layout), as every table does now. The
+  Pi-hole screen has none yet; its list comparison is cards, not a table.

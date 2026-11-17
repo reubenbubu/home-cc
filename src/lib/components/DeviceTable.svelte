@@ -12,17 +12,35 @@
   import { drafts as kept } from "$lib/drafts.svelte";
   import { ms, relTime } from "$lib/format";
   import { icons } from "$lib/icons";
+  import { names } from "$lib/names.svelte";
   import { status } from "$lib/status.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
+  import { STATUS_ORDER, type Column } from "$lib/table";
+  import { TableView } from "$lib/table.svelte";
   import Address from "./Address.svelte";
   import ConfirmButton from "./ConfirmButton.svelte";
   import Problem from "./Problem.svelte";
   import Icon from "./Icon.svelte";
   import Sparkline from "./Sparkline.svelte";
   import StatusDot from "./StatusDot.svelte";
+  import GroupRow from "./table/GroupRow.svelte";
+  import SortButton from "./table/SortButton.svelte";
+  import TableTools from "./table/TableTools.svelte";
 
-  let { list, variant }: { list: Device[]; variant: "fresh" | "known" | "ignored" } = $props();
+  let {
+    list,
+    variant,
+    id,
+    label,
+  }: {
+    list: Device[];
+    variant: "fresh" | "known" | "ignored";
+    /** Names this table's sort, grouping and filter where they are kept: one for each table. */
+    id: string;
+    /** What the table lists, for the names of its controls: "mesh nodes". */
+    label: string;
+  } = $props();
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const ACCEPT_AS: DeviceKind[] = ["pc", "server", "vm", "mesh", "appliance", "other"];
@@ -112,6 +130,84 @@
   function seen(d: Device): string {
     return relTime(status.get(d)?.lastSeen ?? d.lastSeen, clock.now);
   }
+
+  /** The Response column in words, as shown. */
+  function responseText(d: Device): string {
+    const s = status.get(d);
+    if (!s) return "";
+    if (!s.up) return "down";
+    if (s.rttMs == null) return status.isSelf(d) ? "this PC" : "no reply";
+    return ms(s.rttMs);
+  }
+
+  const HEALTH_WORDS = { up: "Up", down: "Down", unknown: "Not checked yet" } as const;
+
+  // Sorting, grouping and filtering (table.ts). The filter looks at every column, the hostname shown beside
+  // each address included. Grouping is offered for what many devices share (status, type, maker), not for
+  // names or addresses.
+  const columns = $derived.by(() => {
+    const cols: Column<Device>[] = [];
+    if (variant !== "ignored") {
+      cols.push({
+        id: "status",
+        label: "Status",
+        kind: "rank",
+        order: STATUS_ORDER,
+        value: (d) => (status.health(d) === "unknown" ? null : status.health(d)),
+        text: (d) => HEALTH_WORDS[status.health(d)],
+        none: HEALTH_WORDS.unknown,
+        group: true,
+        choose: true,
+      });
+    }
+    cols.push(
+      { id: "name", label: "Name", value: (d) => d.name },
+      { id: "address", label: "Address", kind: "ip", value: (d) => d.host },
+      { id: "hostname", label: "Hostname", value: (d) => names.text(d.host, d.hostname) },
+    );
+    if (variant !== "ignored") {
+      cols.push({
+        id: "response",
+        label: "Response",
+        kind: "number",
+        value: (d) => (status.get(d)?.up ? status.get(d)?.rttMs : null),
+        search: responseText,
+      });
+    }
+    if (variant !== "fresh") {
+      cols.push(
+        {
+          id: "seen",
+          label: "Last seen",
+          kind: "time",
+          value: (d) => status.get(d)?.lastSeen ?? d.lastSeen,
+          search: seen,
+          words: ["longest ago first", "most recent first"],
+        },
+        { id: "type", label: "Type", value: (d) => KIND_LABELS[d.kind], group: true, choose: variant === "known" },
+      );
+    }
+    cols.push(
+      {
+        id: "maker",
+        label: "Maker",
+        value: (d) => d.vendor,
+        search: (d) => d.vendor || (isPrivateMac(d.mac) ? "private address" : null),
+        group: true,
+        none: "Maker not known",
+      },
+      { id: "mac", label: "Hardware address", value: (d) => d.mac },
+    );
+    return cols;
+  });
+
+  const view = new TableView<Device>({
+    id: untrack(() => id),
+    columns: () => columns,
+    rows: () => list,
+    key: (d) => d.id,
+    usual: "by address",
+  });
 </script>
 
 {#snippet response(d: Device)}
@@ -155,25 +251,30 @@
 
 <div class="box">
   {#if error}<Problem problem={error} />{/if}
-  <table class={variant}>
+  <TableTools {view} {label} noun={label} />
+  {#if view.shown > 0}
+  <table class={variant} use:view.watch>
     <thead>
       <tr>
-        {#if variant !== "ignored"}<th class="c-dot"><span class="sr-only">Status</span></th>{/if}
-        <th class="c-name">Name</th>
-        <th class="c-ip">Address</th>
-        <th class="c-host">Hostname</th>
-        {#if variant !== "ignored"}<th class="c-rtt">Response</th>{/if}
-        {#if variant !== "fresh"}<th class="c-seen">Last seen</th>{/if}
+        {#if variant !== "ignored"}<th class="c-dot" aria-sort={view.ariaSort("status")}><SortButton {view} col="status" compact /></th>{/if}
+        <th class="c-name" aria-sort={view.ariaSort("name")}><SortButton {view} col="name" /></th>
+        <th class="c-ip" aria-sort={view.ariaSort("address")}><SortButton {view} col="address" /></th>
+        <th class="c-host" aria-sort={view.ariaSort("hostname")}><SortButton {view} col="hostname" /></th>
+        {#if variant !== "ignored"}<th class="c-rtt" aria-sort={view.ariaSort("response")}><SortButton {view} col="response" /></th>{/if}
+        {#if variant !== "fresh"}<th class="c-seen" aria-sort={view.ariaSort("seen")}><SortButton {view} col="seen" /></th>{/if}
         {#if variant === "known"}<th class="c-spark">History</th>{/if}
-        {#if variant !== "fresh"}<th class="c-type">Type</th>{/if}
-        <th class="c-maker">Maker</th>
-        <th class="c-mac">Hardware address</th>
+        {#if variant !== "fresh"}<th class="c-type" aria-sort={view.ariaSort("type")}><SortButton {view} col="type" /></th>{/if}
+        <th class="c-maker" aria-sort={view.ariaSort("maker")}><SortButton {view} col="maker" /></th>
+        <th class="c-mac" aria-sort={view.ariaSort("mac")}><SortButton {view} col="mac" /></th>
         {#if variant === "fresh"}<th class="c-accept">Add as</th>{/if}
         {#if variant === "ignored"}<th class="c-remove"><span class="sr-only">Remove</span></th>{/if}
       </tr>
     </thead>
+    {#each view.sections as section (section.key)}
     <tbody>
-      {#each list as d (d.id)}
+      {#if section.label !== null}<GroupRow {view} {section} />{/if}
+      {#if section.open}
+      {#each section.rows as d (d.id)}
         <tr class:busy={saving.has(d.id)}>
           {#if variant !== "ignored"}<td class="c-dot"><StatusDot health={status.health(d)} /></td>{/if}
 
@@ -253,8 +354,11 @@
           {/if}
         </tr>
       {/each}
+      {/if}
     </tbody>
+    {/each}
   </table>
+  {/if}
 </div>
 
 <style>
@@ -270,7 +374,8 @@
   .c-dot { width: 2.1rem; text-overflow: clip; }
   .c-ip { width: 9.5rem; }
   .c-host { width: 12rem; }
-  .c-rtt { width: 6.2rem; }
+  /* Room for "Response" and the arrow when the table is sorted by it. */
+  .c-rtt { width: 7.6rem; }
   .c-seen { width: 7.5rem; }
   .c-spark { width: 11rem; }
   .c-type { width: 9.5rem; }

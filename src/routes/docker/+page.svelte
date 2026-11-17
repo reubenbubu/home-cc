@@ -296,7 +296,8 @@
 
         {#if overview}
           <div class="stacks" class:stale={!!host.problem}>
-            {#each stackOrder(overview.stacks) as s (s.name)}
+            <!-- Keyed by host too: each card's list keeps its own sort and filter (TableView). -->
+            {#each stackOrder(overview.stacks) as s (`${host.deviceId}:${s.name}`)}
               <StackCard
                 {host}
                 {device}
@@ -313,6 +314,7 @@
               />
             {/each}
             {#if overview.others.length}
+              {#key host.deviceId}
               <StackCard
                 {host}
                 {device}
@@ -327,6 +329,7 @@
                 onfiles={toggleFiles}
                 onupdates={() => toggleUpdates(null)}
               />
+              {/key}
             {/if}
             {#if overview.stacks.length === 0 && overview.others.length === 0}
               <p class="panel muted">No containers on {device?.name} yet.</p>
