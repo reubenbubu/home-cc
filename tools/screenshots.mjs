@@ -355,6 +355,21 @@ const SCREENS = [
     },
     after: forgetTableChoices,
   },
+  {
+    name: "docker-table-grouped",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByText("612 MB").waitFor();
+      const media = page.getByRole("article", { name: "Stack media" });
+      await media.getByLabel("Group containers of media").selectOption("state");
+      await media.getByLabel("Sort containers of media").selectOption("memory:desc");
+      const others = page.getByRole("article", { name: "Other containers" });
+      await others.getByLabel("Filter other containers").fill("old-backup");
+      await others.getByText(/^1 of \d+ shown$/).waitFor();
+    },
+    after: forgetTableChoices,
+  },
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
     name: "overview-check-problem",
@@ -2385,6 +2400,183 @@ async function checkFlows(browser, url) {
         await expectValue(guests.getByLabel("Filter VMs and containers"), "dns", "the filter after another screen");
         await expectValue(guests.getByLabel("Group VMs and containers"), "type", "the grouping after another screen");
         await expectCells(guests, "c-name", ["pihole1", "pihole2"], "after another screen", ".name");
+      },
+    },
+    {
+      what: "Tables: a device being renamed stays where it is, with what was typed, when it goes down while only devices that are up are shown or they are grouped by status",
+      path: "/network",
+      async run(page) {
+        // From here on the back end says the devices set with window.__setStatus are down or up, and
+        // status-changed makes the screen ask, as the timer would.
+        await page.evaluate(async () => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          const list = await invoke("list_devices");
+          const forced = new Map();
+          tauri.invoke = async (cmd, args, ...rest) => {
+            const got = await invoke(cmd, args, ...rest);
+            if (cmd !== "device_statuses") return got;
+            return got.map((s) => (forced.has(s.deviceId) ? { ...s, up: forced.get(s.deviceId), rttMs: forced.get(s.deviceId) ? 4 : null } : s));
+          };
+          window.__setStatus = async (name, up) => {
+            forced.set(list.find((d) => d.name === name).id, up);
+            await invoke("plugin:event|emit", { event: "status-changed", payload: null });
+          };
+        });
+        const devices = panelOf(page, "Devices");
+        const choice = devices.getByLabel("Show only devices with this Status");
+        const downCount = (n) => choice.locator("option", { hasText: `Status: Down (${n})` }).waitFor({ state: "attached" });
+        /** Starts renaming a device, types after its name, and takes the pointer off the table. */
+        const rename = async (name) => {
+          await devices.getByRole("button", { name, exact: true }).click();
+          const field = page.getByLabel(`New name for ${name}`);
+          await field.press("End");
+          await field.pressSequentially(" box");
+          await page.mouse.move(1, 1);
+          return field;
+        };
+        const stillTyping = async (field, want, what) => {
+          const got = await field.evaluate((el) => ({
+            focused: document.activeElement === el,
+            value: el.value,
+            allSelected: el.value.length > 0 && el.selectionStart === 0 && el.selectionEnd === el.value.length,
+          }));
+          if (!got.focused || got.value !== want || got.allSelected) {
+            throw new Error(`${what}: the rename field is ${got.focused ? "" : "not "}focused, reads "${got.value}"${got.allSelected ? ", all selected" : ""}`);
+          }
+        };
+
+        // Only the devices that are up: Pi-hole 2 goes down while it is being renamed, and stays on screen.
+        await choice.selectOption("Up");
+        const pihole = await rename("Pi-hole 2");
+        await page.evaluate(() => window.__setStatus("Pi-hole 2", false));
+        await downCount(3);
+        await stillTyping(pihole, "Pi-hole 2 box", "showing only devices that are up");
+        // Let go of, it goes, as it is down.
+        await pihole.press("Escape");
+        await devices.getByRole("button", { name: "Pi-hole 2", exact: true }).waitFor({ state: "detached" });
+        await choice.selectOption("\u0000all");
+
+        // Grouped by status: Monitoring goes down while it is being renamed and stays under Up.
+        await devices.getByLabel("Group devices").selectOption("status");
+        // (The inner locator of "has" is looked for inside each tbody, so it starts from the page.)
+        const groupOf = (has) => devices.locator("tbody", { has }).locator(".group-row .label").innerText();
+        const monitoring = await rename("Monitoring");
+        if ((await groupOf(monitoring)) !== "Up") throw new Error("Monitoring isn't under Up to begin with");
+        await page.evaluate(() => window.__setStatus("Monitoring", false));
+        await downCount(4);
+        await stillTyping(monitoring, "Monitoring box", "grouped by status");
+        if ((await groupOf(monitoring)) !== "Up") throw new Error("Monitoring moved to another group while it was being renamed");
+        await monitoring.pressSequentially("2");
+        await stillTyping(monitoring, "Monitoring box2", "typing on, grouped by status");
+        // The rename given up, the field goes: the table is let go and Monitoring moves under Down.
+        await monitoring.press("Escape");
+        const button = page.getByRole("button", { name: "Monitoring", exact: true });
+        const until = Date.now() + 5000;
+        while ((await groupOf(button)) !== "Down") {
+          if (Date.now() > until) throw new Error(`once let go, Monitoring is under ${await groupOf(button)}, not Down`);
+          await page.waitForTimeout(100);
+        }
+      },
+    },
+    {
+      what: "Tables: a status chosen above the table that no device has any more still shows in its menu, with none",
+      path: "/network",
+      async run(page) {
+        await page.evaluate(async () => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          const list = await invoke("list_devices");
+          const ids = new Set(list.filter((d) => d.name === "Living room TV" || d.name === "Old laptop").map((d) => d.id));
+          let allUp = false;
+          tauri.invoke = async (cmd, args, ...rest) => {
+            const got = await invoke(cmd, args, ...rest);
+            if (cmd !== "device_statuses" || !allUp) return got;
+            return got.map((s) => (ids.has(s.deviceId) ? { ...s, up: true, rttMs: 4 } : s));
+          };
+          window.__bringUp = async () => {
+            allUp = true;
+            await invoke("plugin:event|emit", { event: "status-changed", payload: null });
+          };
+        });
+        const devices = panelOf(page, "Devices");
+        const choice = devices.getByLabel("Show only devices with this Status");
+        await choice.selectOption("Down");
+        await expectCells(devices, "c-name", ["Living room TV", "Old laptop"], "only the devices that are down");
+        await page.mouse.move(1, 1);
+        await page.evaluate(() => window.__bringUp());
+        await devices.getByText("No devices match Status: Down.").waitFor();
+        const shown = await choice.evaluate((s) => ({ value: s.value, text: s.selectedOptions[0]?.text }));
+        if (shown.value !== "Down" || shown.text !== "Status: Down (0)") throw new Error(`the status menu shows "${shown.text}" (${shown.value})`);
+        await devices.getByRole("button", { name: "Clear the filter" }).click();
+        if ((await choice.locator("option", { hasText: "Down" }).count()) !== 0) throw new Error("Down is still offered once it is no longer chosen");
+      },
+    },
+    {
+      what: "Tables: a Proxmox guest started from its row moves to its new place once the pointer has gone, though its Start button had focus",
+      path: "/proxmox",
+      async run(page) {
+        const guests = page.getByRole("region", { name: "VMs and containers" });
+        await guests.locator("table").waitFor();
+        await guests.getByLabel("Sort VMs and containers").selectOption("state:asc");
+        const before = await cellTexts(guests, "c-name", ".name");
+        if (before[0] !== "win11-test") throw new Error(`stopped first, the first row is ${before[0]}`);
+        const row = guests.locator("tbody tr", { hasText: "win11-test" });
+        const start = row.getByRole("button", { name: "Start", exact: true });
+        // As in the app's window on Linux (WebKit): a focused button taken away gives no focusout. Chromium
+        // gives one, so it is held back here.
+        await start.evaluate((button) =>
+          window.addEventListener("focusout", (e) => e.target === button && e.stopImmediatePropagation(), true),
+        );
+        await start.click();
+        await row.getByText("Starting…").waitFor();
+        await page.mouse.move(1, 1);
+        await expectCells(guests, "c-name", [...before.slice(1), "win11-test"], "once started", ".name");
+      },
+    },
+    {
+      what: "Tables: a stack's containers sort by memory, group by state and filter by port or address, all kept after another screen",
+      path: "/docker",
+      async run(page) {
+        await page.getByText("612 MB").waitFor();
+        const media = page.getByRole("article", { name: "Stack media" });
+        const names = () => media.locator('[role="rowgroup"] [role="row"]:not(.group-row) .names .name').allInnerTexts();
+        const expectNames = async (want, what) => {
+          const until = Date.now() + 5000;
+          let got;
+          while ((got = await names()).join() !== want.join()) {
+            if (Date.now() > until) throw new Error(`${what}: ${got.join(", ")}`);
+            await page.waitForTimeout(100);
+          }
+        };
+        const memory = media.getByRole("button", { name: "Memory", exact: true });
+        await memory.click();
+        await media.locator('[role="columnheader"][aria-sort="ascending"]').waitFor();
+        // The stopped one uses none: last, whichever way round.
+        await expectNames(["radarr", "sonarr", "jellyfin", "prowlarr"], "memory lowest first");
+        await memory.click();
+        await expectNames(["jellyfin", "sonarr", "radarr", "prowlarr"], "memory highest first");
+        await media.getByLabel("Group containers of media").selectOption("state");
+        const headings = await media.locator(".group-row .label").allInnerTexts();
+        if (headings.join() !== "Running,Stopped") throw new Error(`grouped by state: ${headings.join(", ")}`);
+        await expectNames(["jellyfin", "sonarr", "radarr", "prowlarr"], "grouped by state, by memory inside");
+        const filter = media.getByLabel("Filter containers of media");
+        await filter.fill("8096");
+        await expectNames(["jellyfin"], "filtered by a port");
+        await media.getByText("1 of 4 shown").waitFor();
+        // The hostname shown with the address a port is published on.
+        await filter.fill("homelab");
+        await expectNames(["jellyfin"], "filtered by the hostname of the address a port is published on");
+        await awayAndBack(page, "Machines", "Docker");
+        await expectValue(filter, "homelab", "the filter after another screen");
+        await expectValue(media.getByLabel("Group containers of media"), "state", "the grouping after another screen");
+        await expectNames(["jellyfin"], "after another screen");
+        await filter.fill("");
+        await media.getByLabel("Show only containers of media with this State").selectOption("Stopped");
+        await expectNames(["prowlarr"], "only the stopped ones");
+        // Each stack's list is its own.
+        const others = page.getByRole("article", { name: "Other containers" });
+        if ((await others.getByLabel("Group other containers").inputValue()) !== "") throw new Error("another stack's list is grouped too");
       },
     },
     {

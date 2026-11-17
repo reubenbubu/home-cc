@@ -25,7 +25,9 @@ import {
   stackKey,
   stackOrder,
   stackSummary,
+  stateRank,
   stateText,
+  stateWord,
   stateTone,
   stripAnsi,
   summarise,
@@ -459,4 +461,24 @@ test("an update panel put away lets its ticks go; one stack or the whole host ke
   assert.deepEqual(draftsDroppedWith(updates, { kind: "updates", hostId: 5, stack: null }), [key]);
   assert.deepEqual(draftsDroppedWith(updates, { kind: "updates", hostId: 4, stack: null }), []);
   assert.deepEqual(draftsDroppedWith({ kind: "cleanup", hostId: 4 }, updates), [cleanupDraftKey(4)]);
+});
+
+test("a container's state in a word, for grouping, and its place when sorted", () => {
+  const c = (state, more = {}) => ({ id: "x", name: "x", image: "i", imageId: null, state, health: null, exitCode: null, startedAt: 1, finishedAt: 2, ports: [], project: null, service: null, ...more });
+  const all = [
+    c("running"),
+    c("running", { health: "unhealthy" }),
+    c("running", { health: "starting" }),
+    c("exited", { exitCode: 0 }),
+    c("exited", { exitCode: 137 }),
+    c("exited", { exitCode: 1 }),
+    c("paused"),
+    c("restarting"),
+    c("created"),
+    c("dead"),
+  ];
+  assert.deepEqual(all.map(stateWord), ["Running", "Unhealthy", "Starting", "Stopped", "Stopped", "Failed", "Paused", "Restarting", "Never started", "Dead"]);
+  assert.deepEqual(all.map(stateRank), ["up", "down", "warning", "stopped", "stopped", "down", "warning", "warning", "stopped", "down"]);
+  // The word doesn't change as time goes by, unlike stateText.
+  assert.equal(stateWord(c("running", { startedAt: 5 })), stateWord(c("running", { startedAt: 500 })));
 });

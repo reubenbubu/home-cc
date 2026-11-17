@@ -5,12 +5,31 @@
   import type { Container, ContainerStats, DockerHost, ImageUpdate, Stack } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { containerKey, stackKey, stackSummary, updateOf } from "$lib/docker/logic";
+  import {
+    containerKey,
+    isRunning,
+    portText,
+    publishedPorts,
+    stackKey,
+    stackSummary,
+    STATE_ORDER,
+    stateRank,
+    stateWord,
+    updateMark,
+    updateOf,
+  } from "$lib/docker/logic";
+  import { names } from "$lib/names.svelte";
+  import type { Column } from "$lib/table";
+  import { TableView } from "$lib/table.svelte";
+  import { untrack } from "svelte";
   import { count } from "$lib/format";
   import { dockerProblem } from "$lib/docker/problem";
   import ConfirmButton from "../ConfirmButton.svelte";
   import Icon from "../Icon.svelte";
   import Problem from "../Problem.svelte";
+  import GroupRow from "../table/GroupRow.svelte";
+  import SortButton from "../table/SortButton.svelte";
+  import TableTools from "../table/TableTools.svelte";
   import ContainerRow from "./ContainerRow.svelte";
 
   let {
@@ -64,6 +83,51 @@
       .map((c) => ({ c, a: docker.action(containerKey(host.deviceId, c.id)) }))
       .filter((x): x is { c: Container; a: NonNullable<typeof x.a> } => !!x.a?.error),
   );
+
+  // Sorting, grouping and filtering (table.ts), each stack's list on its own. Grouped by state only: the
+  // names, ports and readings are each a container's own. The filter finds a container by its service,
+  // name or image, its state, or a port (with the address and hostname it is published on); not by its
+  // CPU or memory, which would find most containers for a typed "1".
+  const columns: Column<Container>[] = [
+    {
+      id: "name",
+      label: "Container",
+      value: (c) => c.service ?? c.name,
+      search: (c) => [c.service, c.name, c.image, updateMark(updateOf(answers, c))?.text],
+    },
+    {
+      id: "state",
+      label: "State",
+      kind: "rank",
+      order: STATE_ORDER,
+      value: stateRank,
+      text: stateWord,
+      search: (c) => [stateWord(c), c.health],
+      words: ["trouble first", "stopped first"],
+      group: true,
+      choose: true,
+    },
+    {
+      id: "ports",
+      label: "Ports",
+      kind: "number",
+      value: (c) => publishedPorts(c)[0]?.hostPort ?? null,
+      search: (c) =>
+        c.ports.flatMap((p) => (p.hostIp?.trim() ? [portText(p), p.hostIp, names.text(p.hostIp.trim())] : [portText(p)])),
+    },
+    { id: "cpu", label: "CPU", kind: "number", value: (c) => (isRunning(c) ? stats?.get(c.id)?.cpuPct : null), search: () => null },
+    { id: "memory", label: "Memory", kind: "number", value: (c) => (isRunning(c) ? stats?.get(c.id)?.memUsedBytes : null), search: () => null },
+  ];
+
+  const view = new TableView<Container>({
+    id: untrack(() => `docker-containers:${host.deviceId}:${stack ? `stack:${stack.name}` : "others"}`),
+    columns: () => columns,
+    rows: () => containers,
+    key: (c) => c.id,
+    usual: "by service",
+  });
+  /** The bar above the list, for a stack of more than one container (or while it hides some). */
+  const tools = $derived(containers.length > 1 || view.filtering);
 </script>
 
 <article class="panel stack" aria-label={stack ? `Stack ${stack.name}` : "Other containers"}>
@@ -151,19 +215,29 @@
       No containers. This stack was seen here before; Start brings it up again from its compose files{noCompose ? " (Docker Compose is needed for that)" : ""}.
     </p>
   {:else}
-    <div class="list" role="table" aria-label="Containers">
+    {#if tools}<div class="tools"><TableTools {view} label={stack ? `containers of ${stack.name}` : "other containers"} noun="containers" /></div>{/if}
+    {#if view.shown > 0}
+    <div class="list" role="table" aria-label="Containers" use:view.watch>
       <div class="head muted small" role="row">
-        <span role="columnheader">Container</span>
-        <span role="columnheader">State</span>
-        <span role="columnheader">Ports</span>
-        <span role="columnheader" class="num">CPU</span>
-        <span role="columnheader" class="num">Memory</span>
+        <span role="columnheader" aria-sort={view.ariaSort("name")}><SortButton {view} col="name" /></span>
+        <span role="columnheader" aria-sort={view.ariaSort("state")}><SortButton {view} col="state" /></span>
+        <span role="columnheader" aria-sort={view.ariaSort("ports")}><SortButton {view} col="ports" /></span>
+        <span role="columnheader" class="num" aria-sort={view.ariaSort("cpu")}><SortButton {view} col="cpu" /></span>
+        <span role="columnheader" class="num" aria-sort={view.ariaSort("memory")}><SortButton {view} col="memory" /></span>
         <span role="columnheader"><span class="sr-only">Actions</span></span>
       </div>
-      {#each containers as c (c.id)}
-        <ContainerRow hostId={host.deviceId} container={c} stats={stats?.get(c.id)} {now} logsOpen={logsFor === c.id} update={updateOf(answers, c)} {onlogs} />
+      {#each view.sections as section (section.key)}
+        <div role="rowgroup" class="rows">
+          {#if section.label !== null}<GroupRow {view} {section} grid />{/if}
+          {#if section.open}
+            {#each section.rows as c (c.id)}
+              <ContainerRow hostId={host.deviceId} container={c} stats={stats?.get(c.id)} {now} logsOpen={logsFor === c.id} update={updateOf(answers, c)} {onlogs} />
+            {/each}
+          {/if}
+        </div>
       {/each}
     </div>
+    {/if}
   {/if}
 
   {#each failed as { c, a } (c.id)}
@@ -182,7 +256,7 @@
     gap: 0.6rem;
     padding: 0.85rem 1rem 0.8rem;
     min-width: 0;
-    --cols: minmax(8rem, 1.6fr) minmax(7.5rem, 1.1fr) minmax(5rem, 1fr) 3.6rem 4.8rem 15.1rem;
+    --cols: minmax(8rem, 1.6fr) minmax(7.5rem, 1.1fr) minmax(5rem, 1fr) 4rem 5.8rem 15.1rem;
   }
   header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; min-width: 0; }
   .title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.1rem 0.6rem; min-width: 0; }
@@ -210,6 +284,9 @@
     margin-bottom: 0.25rem;
   }
   .head .num { text-align: right; }
+  .rows { display: flex; flex-direction: column; min-width: 0; }
+  /* The bar lines up with the card's own text. */
+  .tools { margin: 0 -0.55rem -0.35rem; }
   /* Past the state dot, as in the rows. */
   .head > :first-child { padding-left: calc(8px + 0.6rem); }
 
@@ -239,9 +316,9 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
-  /* Below what the columns need: the minimums in --cols (44rem) and five gaps of 0.9rem. Change it with them,
+  /* Below what the columns need: the minimums in --cols (45.4rem) and five gaps of 0.9rem. Change it with them,
      here and in ContainerRow.svelte. */
-  @container stack (max-width: 49rem) {
+  @container stack (max-width: 50rem) {
     .head { display: none; }
   }
 </style>

@@ -4,11 +4,13 @@
   //
   // It spans every column the table shows, and when the table's own styles turn its rows into blocks (a
   // narrow window), it becomes a block too: both are worked out here, so a table needs nothing extra.
+  // `grid` is for a table made of other elements than <table> (role="table", rows in role="rowgroup"):
+  // there it is a block of its own, as wide as the list.
   import type { Section, TableView } from "$lib/table.svelte";
   import { icons } from "$lib/icons";
   import Icon from "../Icon.svelte";
 
-  let { view, section }: { view: TableView<T>; section: Section<T> } = $props();
+  let { view, section, grid = false }: { view: TableView<T>; section: Section<T>; grid?: boolean } = $props();
 
   function fit(th: HTMLTableCellElement) {
     const table = th.closest("table");
@@ -26,18 +28,26 @@
   }
 </script>
 
-<tr class="group-row">
-  <th scope="rowgroup" use:fit>
-    <button type="button" class="toggle" aria-expanded={section.open} onclick={() => view.toggle(section.key)}>
-      <span class="chevron" class:open={section.open}><Icon path={icons.chevron} size={14} /></span>
-      <span class="label">{section.label}</span>
-      <span class="count"><span class="sr-only">, </span>{section.count}<span class="sr-only"> {section.count === 1 ? "row" : "rows"}</span></span>
-    </button>
-  </th>
-</tr>
+{#snippet toggle()}
+  <button type="button" class="toggle" aria-expanded={section.open} onclick={() => view.toggle(section.key)}>
+    <span class="chevron" class:open={section.open}><Icon path={icons.chevron} size={14} /></span>
+    <span class="label">{section.label}</span>
+    <span class="count"><span class="sr-only">, </span>{section.count}<span class="sr-only"> {section.count === 1 ? "row" : "rows"}</span></span>
+  </button>
+{/snippet}
+
+{#if grid}
+  <div class="group-row grid" role="row">
+    <div class="cell" role="rowheader">{@render toggle()}</div>
+  </div>
+{:else}
+  <tr class="group-row">
+    <th class="cell" scope="rowgroup" use:fit>{@render toggle()}</th>
+  </tr>
+{/if}
 
 <style>
-  th {
+  .cell {
     padding: 0.55rem 0.55rem 0.25rem;
     border-bottom: 1px solid var(--border);
     text-align: left;
@@ -46,6 +56,7 @@
   }
   /* Set by fit() above, without waiting for a redraw. */
   .group-row:global(.flat), .group-row:global(.flat) th { display: block; }
+  .grid .cell { padding: 0.45rem 0 0.2rem; }
   .toggle {
     display: inline-flex;
     align-items: center;

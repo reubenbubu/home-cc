@@ -100,9 +100,14 @@ Windows machine.
      and draw `view.sections` as one `<tbody>` each, starting with
      `<GroupRow>` when `section.label` isn't null and showing the rows only
      when `section.open`. All three parts are in `src/lib/components/table/`.
+     A list built of other elements (the containers of a Docker stack) takes
+     `role="table"`, one `role="rowgroup"` per section, and `<GroupRow grid>`.
   The bar names the sort and grouping in use, so a column hidden at a narrow
   width (or the headers, when rows become blocks) never sorts without saying.
-  Rows don't move under the pointer or while something in a row has focus.
+  Rows don't move under the pointer or while something in a row has focus:
+  not to another place, another group, or out of the filter (`arrange` in
+  `table.ts`). Focus is checked where it is now, so a focused button that is
+  taken away (Start swapped for "Starting…") lets the table go again.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
     `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH
