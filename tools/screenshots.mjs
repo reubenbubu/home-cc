@@ -593,6 +593,65 @@ async function checkFlows(browser, url) {
         await expectZoom(100, "after starting again at 100%");
       },
     },
+    {
+      what: "the hostname under the form's address is never the one of an address no longer in the field",
+      path: "/machines",
+      async run(page) {
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        const line = page.locator("form p.resolved");
+        await line.getByText("NAS", { exact: true }).waitFor();
+        await page.getByLabel("Address (IP or hostname)").fill("192.168.68.30");
+        const right = await line.textContent();
+        if (/\bNAS\b/.test(right ?? "")) throw new Error(`the line under 192.168.68.30 reads "${right?.trim()}"`);
+        await line.getByText("pve", { exact: true }).waitFor();
+      },
+    },
+    {
+      what: "a double-click on an address or a hostname copies all of it and says so",
+      path: "/machines",
+      async run(page) {
+        // What was put on the clipboard, whichever way the page got it there.
+        await page.evaluate(() => {
+          window.__copied = [];
+          const write = (t) => (window.__copied.push(t), Promise.resolve());
+          Object.defineProperty(navigator, "clipboard", { value: { writeText: write }, configurable: true });
+        });
+        const nas = card(page, "NAS");
+        for (const [what, locator, want] of [
+          ["address", nas.locator(".address .ip"), "192.168.68.10"],
+          ["hostname", nas.locator(".address .hostname"), null],
+        ]) {
+          await locator.waitFor();
+          const text = want ?? (await locator.textContent())?.trim();
+          if (!text || text === "looking…") throw new Error(`NAS's ${what} has no text to copy`);
+          await locator.dblclick();
+          await page.locator(".note", { hasText: "Copied" }).waitFor({ timeout: 2000 });
+          const got = await page.evaluate(() => ({ copied: window.__copied.at(-1), selected: getSelection()?.toString().trim() }));
+          if (got.copied !== text) throw new Error(`a double-click on NAS's ${what} copied "${got.copied}", not "${text}"`);
+          if (got.selected !== text) throw new Error(`a double-click on NAS's ${what} selected "${got.selected}", not all of it`);
+        }
+      },
+    },
+    {
+      what: "on the Overview each Deco mesh node's hostname is shown in full",
+      path: "/",
+      viewport: { width: 1536, height: 864 },
+      scale: 1.25,
+      async run(page) {
+        await page.locator(".mesh-node .hostname").first().waitFor();
+        const got = await page.evaluate(() =>
+          [...document.querySelectorAll(".mesh-node")].map((n) => {
+            const h = n.querySelector(".hostname");
+            return { node: n.querySelector(".card-name")?.textContent?.trim(), text: h?.textContent?.trim() ?? "", whole: !!h && h.scrollWidth <= h.clientWidth };
+          }),
+        );
+        if (got.length === 0) throw new Error("no mesh nodes on the Overview");
+        for (const n of got) {
+          if (!n.text) throw new Error(`${n.node} has no hostname`);
+          if (!n.whole) throw new Error(`${n.node}'s hostname "${n.text}" is cut short`);
+        }
+      },
+    },
   ];
   const problems = [];
   for (const flow of flows) {

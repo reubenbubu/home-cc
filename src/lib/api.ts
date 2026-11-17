@@ -207,6 +207,18 @@ export interface AppInfo {
   release: boolean;
 }
 
+/** The name an address resolves to (see resolveNames). */
+export interface ResolvedName {
+  /** As it was asked for. */
+  address: string;
+  /** Tidied for showing ("nas.lan" gives "nas"). Null when none was found, and for anything that isn't an
+   *  IPv4 address. */
+  name: string | null;
+  /** No answer yet for this IPv4 address: its lookup didn't get its turn, most likely because a scan was
+   *  busy. Not "no name": ask again soon. */
+  retrySoon?: boolean;
+}
+
 /** Something the back end ran into by itself, in a timed round. */
 export interface LogLine {
   /** Unix seconds. */
@@ -271,6 +283,12 @@ export const api = {
    *  doesn't allow programs to send pings), with what to do about it. Null when checks work.
    *  Reload it on every "status-changed" event and show it prominently. */
   checkProblem: () => invoke<string | null>("check_problem"),
+
+  /** The name each address resolves to (reverse DNS, mDNS and NetBIOS), one answer per address in the same
+   *  order. At most 256 addresses at a time. Only IPv4 addresses are looked up. Takes up to about 2.5 seconds;
+   *  answers are remembered (a name for 10 minutes, "no name" for 2), so asking again is cheap. Screens use
+   *  the store in names.svelte.ts, through components/Address.svelte, rather than calling this directly. */
+  resolveNames: (addresses: string[]) => invoke<ResolvedName[]>("resolve_names", { addresses }),
 
   /** One entry per machine that has an SSH user. */
   machineStats: () => invoke<MachineStatsEntry[]>("machine_stats"),

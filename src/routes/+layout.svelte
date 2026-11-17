@@ -11,6 +11,7 @@
   import { status } from "$lib/status.svelte";
   import { zoom } from "$lib/zoom.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import CopiedNote from "$lib/components/CopiedNote.svelte";
   import Problem from "$lib/components/Problem.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
 
@@ -116,6 +117,7 @@
     {/key}
   </main>
 </div>
+<CopiedNote />
 
 <style>
   /* --page-zoom is only set in a browser with the sample data, where zoom.svelte.ts scales the page, which

@@ -17,8 +17,10 @@
   } from "$lib/api";
   import { arrange, keyMove, moveItem, slotAt, type Box } from "$lib/arrange";
   import { icons } from "$lib/icons";
+  import { isIpv4, isIpv6 } from "$lib/lookups";
   import { macToSend, repointed } from "$lib/net";
   import { machineOrder } from "$lib/order.svelte";
+  import Address from "$lib/components/Address.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
@@ -73,6 +75,7 @@
 
   async function open(id: number | "new", input: DeviceInput) {
     form = input;
+    typedHost = input.host.trim();
     stored = { host: input.host, sshPort: input.sshPort ?? 22, mac: input.mac || null };
     formError = null;
     password = "";
@@ -215,6 +218,14 @@
       form.host.trim() !== stored.host.trim() &&
       macToSend(stored.mac, form.mac ?? "") === null,
   );
+
+  /** The address typed in the form once typing has paused, to show the name it resolves to. */
+  let typedHost = $state("");
+  $effect(() => {
+    const host = form.host.trim();
+    const timer = setTimeout(() => (typedHost = host), 400);
+    return () => clearTimeout(timer);
+  });
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const oses = Object.entries(OS_LABELS) as [Os, string][];
@@ -552,6 +563,7 @@
               <tr>
                 <th class="c-name">Name</th>
                 <th class="c-ip">Address</th>
+                <th class="c-host">Hostname</th>
                 <th class="c-type">Type</th>
                 <th class="c-os">System</th>
                 <th class="c-ssh">SSH</th>
@@ -563,7 +575,12 @@
               {#each rows as d (d.id)}
                 <tr class:selected={editing === d.id}>
                   <td class="c-name name" title={d.name}>{d.name}</td>
-                  <td class="c-ip mono muted" title={d.host}>{d.host}</td>
+                  <td class="c-ip mono muted" title={d.host}>
+                    <Address host={d.host} part="ip" />
+                    <!-- Stands in for the Hostname column when the table is too narrow for it. -->
+                    <span class="host-line"><Address host={d.host} known={d.hostname} part="name" /></span>
+                  </td>
+                  <td class="c-host"><Address host={d.host} known={d.hostname} part="name" /></td>
                   <td class="c-type">{KIND_LABELS[d.kind]}</td>
                   <td class="c-os">{OS_LABELS[d.os]}</td>
                   <td class="c-ssh mono muted">{d.sshUser ? `${d.sshUser} · port ${d.sshPort}` : "–"}</td>
@@ -586,6 +603,12 @@
       <h2 class="section-title">{editing === "new" ? "Add machine" : "Edit machine"}</h2>
       <label>Name <input bind:value={form.name} placeholder="Homelab VM" required /></label>
       <label>Address (IP or hostname) <input class="mono" bind:value={form.host} placeholder="192.168.68.21" required /></label>
+      {#if isIpv4(form.host.trim()) || isIpv6(form.host.trim())}
+        <!-- Only ever the name of the address in the field: while it is being typed, not the last one's. -->
+        <p class="hint under resolved">Hostname
+          {#if typedHost === form.host.trim()}<Address host={typedHost} part="name" />{:else}<span class="pending">looking…</span>{/if}
+        </p>
+      {/if}
       <div class="row">
         <label>Type
           <select bind:value={form.kind}>
@@ -748,12 +771,19 @@
   td.mono { font-size: 0.92rem; }
   .name { font-weight: 600; }
   .c-ip { width: 10rem; }
+  .c-host { width: 11rem; }
   .c-type { width: 7.5rem; }
   .c-os { width: 8rem; }
   .c-ssh { width: 12rem; }
   .c-actions { width: 19.5rem; }
   td.c-actions { overflow: visible; }
   .row-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .host-line { display: none; font-size: 0.85rem; line-height: 1.3; }
+  @container (max-width: 80rem) {
+    .c-host { display: none; }
+    .host-line { display: block; overflow: hidden; }
+    td.c-ip { line-height: 1.3; }
+  }
   @container (max-width: 72rem) {
     .c-notes { display: none; }
   }
@@ -797,6 +827,9 @@
   .hint { margin: 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
   /* A note about the field right above it. */
   .hint.under { margin-top: -0.55rem; }
+  .resolved { display: flex; gap: 0.5rem; min-width: 0; }
+  .resolved :global(.address) { color: var(--text-soft); }
+  .resolved .pending { font-style: italic; }
   .pinned { display: flex; flex-direction: column; gap: 0.15rem; }
   /* Small enough for the whole fingerprint to stay on one line in the side-by-side form. */
   .print { color: var(--text-soft); font-size: 0.8rem; overflow-wrap: anywhere; user-select: text; }

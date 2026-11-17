@@ -11,6 +11,7 @@
   import { status } from "$lib/status.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Details, Problem as ProblemInfo } from "$lib/report";
+  import Address from "./Address.svelte";
   import ConfirmButton from "./ConfirmButton.svelte";
   import Problem from "./Problem.svelte";
   import Icon from "./Icon.svelte";
@@ -123,7 +124,7 @@
   </header>
 
   <div class="sub muted small">
-    <span class="mono">{device.host}</span>
+    <Address host={device.host} known={device.hostname} />
     <span class="ellipsis" title={st?.osName}>{st?.osName || (statusOnly && device.os === "other" ? KIND_LABELS.appliance : OS_LABELS[device.os])}</span>
     {#if st?.uptimeSecs != null}<span class="nowrap">up {uptime(st.uptimeSecs)}</span>{/if}
   </div>
@@ -263,7 +264,9 @@
   .down { color: var(--bad); font-weight: 600; }
   .self { flex: none; white-space: nowrap; }
   .sub { display: flex; gap: 0.25rem 0.9rem; min-width: 0; margin-top: -0.35rem; }
-  .sub .mono, .nowrap { white-space: nowrap; flex: none; }
+  .nowrap { white-space: nowrap; flex: none; }
+  /* The system's name gives way before the hostname does. */
+  .sub .ellipsis { flex: 1 1 0; }
 
   .state { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; min-height: 2.25rem; }
   p { margin: 0; line-height: 1.5; }

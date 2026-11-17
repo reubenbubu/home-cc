@@ -8,6 +8,7 @@
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import Address from "$lib/components/Address.svelte";
   import CheckProblem from "$lib/components/CheckProblem.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MiniMeter from "$lib/components/MiniMeter.svelte";
@@ -166,7 +167,10 @@
                 </div>
                 {@render response(m)}
               </div>
-              <div class="muted small ellipsis"><span class="mono">{m.host}</span> · {[...system, KIND_LABELS[m.kind]].join(" · ")}</div>
+              <div class="muted small where">
+                <Address host={m.host} known={m.hostname} />
+                <span class="ellipsis">· {[...system, KIND_LABELS[m.kind]].join(" · ")}</span>
+              </div>
               <Sparkline history={status.get(m)?.history ?? []} />
               {#if !m.sshUser && !local && m.kind === "appliance"}
                 <!-- Most appliances have no SSH, so there are no stats to ask for: just when it was last there. -->
@@ -243,8 +247,9 @@
           {#each meshNodes as n (n.id)}
             <div class="mesh-node">
               <div class="card-name"><StatusDot health={status.health(n)} /><span class="ellipsis" title={n.name}>{n.name}</span></div>
-              <div class="card-top">
-                <span class="mono muted small">{n.host}</span>
+              <div class="card-top mesh-top">
+                <!-- Under the address, so a narrow tile still has room for the whole hostname. -->
+                <Address host={n.host} known={n.hostname} stack class="muted small" />
                 {@render response(n)}
               </div>
               <Sparkline history={status.get(n)?.history ?? []} />
@@ -283,6 +288,9 @@
   .card-name { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; min-width: 0; }
   .down { color: var(--bad); font-weight: 600; flex: none; }
   .card-top .mono, .self { flex: none; white-space: nowrap; }
+  .where { display: flex; align-items: baseline; gap: 0.3rem; min-width: 0; white-space: nowrap; }
+  /* The system and type give way before the hostname does. */
+  .where .ellipsis { flex: 1 1 0; }
   .minis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.9rem; }
   .note { display: flex; align-items: center; gap: 0.35rem; color: var(--text-soft); text-decoration: none; }
   .note :global(svg) { color: var(--warn); flex: none; }
@@ -312,6 +320,7 @@
   .fine :global(svg) { color: var(--ok); }
 
   .mesh { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); gap: 0.6rem; }
+  .mesh-top { align-items: baseline; }
   .mesh-node { padding: 0.75rem; border: 1px solid var(--track); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
 
   .empty { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; }

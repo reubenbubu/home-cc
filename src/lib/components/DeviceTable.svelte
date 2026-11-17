@@ -13,6 +13,7 @@
   import { status } from "$lib/status.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
+  import Address from "./Address.svelte";
   import ConfirmButton from "./ConfirmButton.svelte";
   import Problem from "./Problem.svelte";
   import Icon from "./Icon.svelte";
@@ -151,13 +152,13 @@
         {#if variant !== "ignored"}<th class="c-dot"><span class="sr-only">Status</span></th>{/if}
         <th class="c-name">Name</th>
         <th class="c-ip">Address</th>
+        <th class="c-host">Hostname</th>
         {#if variant !== "ignored"}<th class="c-rtt">Response</th>{/if}
         {#if variant !== "fresh"}<th class="c-seen">Last seen</th>{/if}
         {#if variant === "known"}<th class="c-spark">History</th>{/if}
         {#if variant !== "fresh"}<th class="c-type">Type</th>{/if}
         <th class="c-maker">Maker</th>
         <th class="c-mac">Hardware address</th>
-        <th class="c-host">Calls itself</th>
         {#if variant === "fresh"}<th class="c-accept">Add as</th>{/if}
         {#if variant === "ignored"}<th class="c-remove"><span class="sr-only">Remove</span></th>{/if}
       </tr>
@@ -194,10 +195,11 @@
           </td>
 
           <td class="c-ip mono" title={d.mac ? `${d.host} · hardware address ${d.mac}` : d.host}>
-            <span class="ip">{d.host}</span>
+            <span class="ip"><Address host={d.host} part="ip" /></span>
             <!-- Stands in for the Hardware address column when the table is too narrow for it. -->
             {#if d.mac}<span class="mac-line muted"><span class="sr-only">hardware address </span>{d.mac}</span>{/if}
           </td>
+          <td class="c-host"><Address host={d.host} known={d.hostname} part="name" /></td>
           {#if variant !== "ignored"}<td class="c-rtt mono">{@render response(d)}</td>{/if}
           {#if variant !== "fresh"}<td class="c-seen muted">{seen(d)}</td>{/if}
           {#if variant === "known"}
@@ -206,9 +208,6 @@
           {#if variant !== "fresh"}<td class="c-type">{@render typeSelect(d)}</td>{/if}
           <td class="c-maker">{@render maker(d)}</td>
           <td class="c-mac mono">{#if d.mac}{d.mac}{:else}<span class="muted">–</span>{/if}</td>
-          <td class="c-host mono" title={d.hostname ?? undefined}>
-            {#if d.hostname}{d.hostname}{:else}<span class="muted">–</span>{/if}
-          </td>
 
           {#if variant === "fresh"}
             <td class="c-accept">
@@ -261,6 +260,7 @@
 
   .c-dot { width: 2.1rem; text-overflow: clip; }
   .c-ip { width: 9.5rem; }
+  .c-host { width: 12rem; }
   .c-rtt { width: 6.2rem; }
   .c-seen { width: 7.5rem; }
   .c-spark { width: 11rem; }
@@ -302,20 +302,22 @@
   .mac-line { display: none; font-size: 0.8rem; line-height: 1.25; user-select: text; }
 
   /* Narrower tables drop the least important columns first. The hardware address is never lost: without
-     its own column it moves under the address, where it can still be read and copied. */
+     its own column it moves under the address, where it can still be read and copied. The hostname is
+     never dropped: an address is always shown with its name. */
   @container (max-width: 100rem) {
     .c-mac { display: none; }
     .mac-line { display: block; }
     td.c-ip { line-height: 1.3; }
   }
   @container (max-width: 82rem) {
-    .known .c-host, .fresh .c-host { display: none; }
-  }
-  @container (max-width: 68rem) {
     .c-maker { display: none; }
   }
+  @container (max-width: 68rem) {
+    .known .c-seen, .fresh .c-rtt { display: none; }
+    .c-host { width: 10rem; }
+  }
   @container (max-width: 56rem) {
-    .known .c-seen, .fresh .c-rtt, .ignored .c-host { display: none; }
+    .ignored .c-seen { display: none; }
   }
 
   /* Too narrow for columns (a small window zoomed in): each device is a short block of lines instead.

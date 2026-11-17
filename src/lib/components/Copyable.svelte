@@ -1,10 +1,12 @@
 <script lang="ts">
   // A piece of text that copies itself to the clipboard on double-click, such as an IP address or a
-  // hostname. Used for every address and name on every screen (the Address component wraps both), so it
-  // behaves the same everywhere. The whole text is selected too, so it is clear what was copied: a plain
-  // double-click on "192.168.68.54" would select only part of it.
+  // hostname. Every address and name on every screen goes through this (Address uses it for both halves),
+  // so it behaves the same everywhere. The whole text is selected too, so it is clear what was copied: a
+  // plain double-click on "192.168.68.54" would select only part of it. The "Copied" note is drawn by
+  // CopiedNote, outside any cell that could cut it off.
   import type { Snippet } from "svelte";
   import { copyText } from "$lib/clipboard";
+  import { copiedNote } from "$lib/copied.svelte";
 
   let {
     value,
@@ -14,6 +16,7 @@
   }: {
     /** What is copied. */
     value: string;
+    /** Classes for the text itself, such as one that cuts it short with "…". */
     class?: string;
     /** Hover text; "Double-click to copy" is added to it. */
     title?: string;
@@ -21,22 +24,16 @@
     children?: Snippet;
   } = $props();
 
-  let said = $state<"copied" | "failed" | null>(null);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
   async function copy(e: MouseEvent) {
     const node = e.currentTarget as HTMLElement;
     const range = document.createRange();
-    range.selectNodeContents(node.querySelector(".text") ?? node);
+    range.selectNodeContents(node);
     const selection = getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    said = (await copyText(value)) ? "copied" : "failed";
-    clearTimeout(timer);
-    timer = setTimeout(() => (said = null), 1400);
+    const { clientX: x, clientY: y } = e;
+    copiedNote.show(x, y, await copyText(value));
   }
-
-  $effect(() => () => clearTimeout(timer));
 </script>
 
 <!-- Not a button and not in the tab order: it is a convenience on top of ordinary selectable text, which
@@ -46,30 +43,8 @@
   class="copyable {cls}"
   title={title ? `${title}\nDouble-click to copy` : "Double-click to copy"}
   ondblclick={copy}
->
-  <span class="text">{#if children}{@render children()}{:else}{value}{/if}</span>
-  {#if said}
-    <span class="said" class:failed={said === "failed"} role="status">{said === "copied" ? "Copied" : "Couldn't copy"}</span>
-  {/if}
-</span>
+>{#if children}{@render children()}{:else}{value}{/if}</span>
 
 <style>
-  .copyable { position: relative; cursor: copy; user-select: text; min-width: 0; }
-  .said {
-    position: absolute;
-    left: 50%;
-    bottom: calc(100% + 0.25rem);
-    transform: translateX(-50%);
-    padding: 0.1rem 0.45rem;
-    border-radius: var(--radius-sm);
-    background: var(--panel-raised);
-    border: 1px solid var(--accent);
-    color: var(--text);
-    font-family: var(--font);
-    font-size: 0.8rem;
-    white-space: nowrap;
-    pointer-events: none;
-    z-index: 5;
-  }
-  .said.failed { border-color: var(--bad); }
+  .copyable { cursor: copy; user-select: text; }
 </style>
