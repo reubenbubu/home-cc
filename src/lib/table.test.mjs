@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  arrange,
   choicesOf,
   compareIp,
   dirWords,
@@ -185,4 +186,48 @@ test("while the owner works in a table, rows keep their places and new ones go a
   const before = ["b", "a", "c"];
   const rows = [{ k: "a" }, { k: "d" }, { k: "b" }, { k: "e" }];
   assert.deepEqual(keepOrder(rows, before, (r) => r.k).map((r) => r.k), ["b", "a", "d", "e"]);
+});
+
+test("held while the owner works in a row, a reading that comes in moves no row to another group or out of the filter", () => {
+  const devices = [
+    { id: 1, name: "NAS", health: "up" },
+    { id: 2, name: "Printer", health: "up" },
+    { id: 3, name: "TV", health: "down" },
+  ];
+  const how = { cols: [COLS.name, COLS.health], filter: "", only: {}, sort: { col: "name", dir: "asc" }, group: COLS.health, keyOf: (r) => r.id };
+  const first = arrange(devices, how);
+  const read = (a) => a.groups.map((g) => `${g.label}: ${names(g.rows).join(", ")}`).join(" | ");
+  assert.equal(read(first), "down: TV | up: NAS, Printer");
+
+  // The NAS goes down (while it is being renamed, say), and a new device turns up.
+  const later = [{ ...devices[0], health: "down" }, devices[1], devices[2], { id: 4, name: "Camera", health: "up" }];
+  const held = arrange(later, how, first.shown);
+  assert.equal(read(held), "down: TV | up: NAS, Printer, Camera");
+  // Held again on the next reading, it is still where it was.
+  assert.equal(read(arrange(later, how, held.shown)), "down: TV | up: NAS, Printer, Camera");
+  // Let go, everything is where its values put it.
+  assert.equal(read(arrange(later, how)), "down: NAS, TV | up: Camera, Printer");
+
+  // Only the devices that are up: the NAS stays shown while held, and goes once let go.
+  const onlyUp = { ...how, group: null, only: { health: "up" } };
+  const shown = arrange(devices, onlyUp);
+  assert.deepEqual(names(shown.rows), ["NAS", "Printer"]);
+  assert.deepEqual(names(arrange(later, onlyUp, shown.shown).rows), ["NAS", "Printer", "Camera"]);
+  assert.deepEqual(names(arrange(later, onlyUp).rows), ["Camera", "Printer"]);
+  // A row that was filtered out stays out while held: the TV comes back up, but nothing is put above the row worked in.
+  const tvUp = [devices[0], devices[1], { ...devices[2], health: "up" }];
+  assert.deepEqual(names(arrange(tvUp, onlyUp, shown.shown).rows), ["NAS", "Printer"]);
+});
+
+test("a group whose rows were all held from another value keeps its heading and place", () => {
+  const rows = [
+    { id: 1, name: "a", health: "down" },
+    { id: 2, name: "b", health: "up" },
+  ];
+  const how = { cols: [COLS.name, COLS.health], filter: "", only: {}, sort: null, group: COLS.health, keyOf: (r) => r.id };
+  const first = arrange(rows, how);
+  // Both swap: each stays under the heading it was under, in the same order.
+  const swapped = [{ ...rows[0], health: "up" }, { ...rows[1], health: "down" }];
+  const held = arrange(swapped, how, first.shown);
+  assert.deepEqual(held.groups.map((g) => `${g.label}: ${names(g.rows)}`), ["down: a", "up: b"]);
 });

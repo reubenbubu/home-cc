@@ -22,11 +22,20 @@
 
   let box = $state<HTMLInputElement>();
 
-  /** Columns with a quick choice: those whose rows have more than one value, or that have one chosen. */
+  /** Columns with a quick choice: those whose rows have more than one value, or that have one chosen. A
+   *  value chosen that no row has any more (the one device that was down is up again) stays in the menu,
+   *  with none, so the menu still says what is hiding the rows. */
   const choosing = $derived(
     view.columns
       .filter((c) => c.choose)
-      .map((c) => ({ col: c, choices: view.choicesOf(c) }))
+      .map((col) => {
+        const choices = view.choicesOf(col);
+        const chosen = view.only[col.id];
+        if (chosen !== undefined && !choices.some((c) => c.key === chosen)) {
+          choices.push({ key: chosen, label: chosen || col.none || "None", count: 0 });
+        }
+        return { col, choices };
+      })
       .filter(({ col, choices }) => choices.length > 1 || view.only[col.id] !== undefined),
   );
 

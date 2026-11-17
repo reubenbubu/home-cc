@@ -7,17 +7,16 @@
 // window's storage for next time, as a choice for this PC's screen; the filter text never is.
 import { drafts } from "./drafts.svelte";
 import {
+  arrange,
   choicesOf,
-  filterRows,
-  groupRows,
-  keepOrder,
   nextSort,
   parseSaved,
   sortChoices,
-  sortRows,
   usableGroup,
   usableSort,
+  type Arranged,
   type Column,
+  type Shown,
   type SortBy,
 } from "./table";
 
@@ -63,8 +62,8 @@ export class TableView<T> {
   #collapsed = $state<string[]>([]);
   #pointer = $state(false);
   #focus = $state(false);
-  /** The order shown last, and what it was worked out from, to keep rows still (see `steady`). */
-  #last: { how: string; keys: unknown[] } = { how: "", keys: [] };
+  /** What was shown last, and what it was worked out from, to keep rows still (see `steady`). */
+  #last: { how: string; shown: Shown<string | number> | null } = { how: "", shown: null };
 
   constructor(setup: TableSetup<T>) {
     this.#setup = setup;
@@ -96,7 +95,6 @@ export class TableView<T> {
   /** The sort in use: none when its column isn't in the table now. */
   sort = $derived.by(() => usableSort(this.#sort, this.columns));
   groupColumn = $derived.by(() => usableGroup(this.#group, this.columns));
-  sortColumn = $derived.by(() => (this.sort ? this.columns.find((c) => c.id === this.sort?.col) : undefined));
   groupable = $derived.by(() => this.columns.filter((c) => c.group));
   sortable = $derived.by(() => sortChoices(this.columns));
 
@@ -170,25 +168,26 @@ export class TableView<T> {
   }
 
   total = $derived.by(() => this.#setup.rows().length);
-  #shownRows = $derived.by(() => {
-    const cols = this.columns;
+  #arranged: Arranged<T, string | number> = $derived.by(() => {
     const only = Object.fromEntries(Object.entries(this.#only).filter(([id]) => this.#activeChoices.includes(id)));
-    const rows = filterRows(this.#setup.rows(), cols, this.#filter, only);
-    const sorted = this.sort && this.sortColumn ? sortRows(rows, this.sortColumn, this.sort.dir) : rows;
-    // While the owner points at the rows or works in one, a reading that comes in doesn't move them; a
-    // sort, grouping or filter they choose still does.
+    // While the owner points at the rows or works in one, a reading that comes in doesn't move them: not
+    // to another place, another group, or out of the filter. A sort, grouping or filter they choose does.
     const how = JSON.stringify([this.sort, this.group, this.#filter, only]);
-    const out = this.steady && how === this.#last.how ? keepOrder(sorted, this.#last.keys, this.#setup.key) : sorted;
-    this.#last = { how, keys: out.map(this.#setup.key) };
+    const held = this.steady && how === this.#last.how ? this.#last.shown : null;
+    const out = arrange(
+      this.#setup.rows(),
+      { cols: this.columns, filter: this.#filter, only, sort: this.sort, group: this.groupColumn, keyOf: this.#setup.key },
+      held,
+    );
+    this.#last = { how, shown: out.shown };
     return out;
   });
-  shown = $derived.by(() => this.#shownRows.length);
+  shown = $derived.by(() => this.#arranged.rows.length);
 
   sections: Section<T>[] = $derived.by(() => {
-    const rows = this.#shownRows;
-    const col = this.groupColumn;
-    if (!col) return [{ key: "", label: null, count: rows.length, open: true, rows }];
-    return groupRows(rows, col, this.sort).map((g) => ({
+    const { rows, groups } = this.#arranged;
+    if (!groups) return [{ key: "", label: null, count: rows.length, open: true, rows }];
+    return groups.map((g) => ({
       key: g.key,
       label: g.label,
       count: g.rows.length,
@@ -204,24 +203,34 @@ export class TableView<T> {
 
   /** For the <table>: notices the pointer over the rows and focus in them (see `steady`). */
   watch = (node: HTMLElement) => {
-    const inRows = (t: EventTarget | null) => t instanceof Element && !!t.closest("tbody");
+    // The rows: a <tbody>, or for a table made of other elements, each role="rowgroup" holding its rows.
+    const inRows = (t: EventTarget | null) => t instanceof Element && node.contains(t) && !!t.closest('tbody, [role="rowgroup"]');
     const move = (e: PointerEvent) => (this.#pointer = inRows(e.target));
     const leave = () => (this.#pointer = false);
-    // Focus also moves while the screen is being redrawn (a focused button replaced by another), when
-    // state can't be changed: noted just after.
-    const focusIn = (e: FocusEvent) => queueMicrotask(() => (this.#focus = inRows(e.target)));
-    const focusOut = (e: FocusEvent) =>
-      queueMicrotask(() => (this.#focus = node.contains(e.relatedTarget as Node | null) && inRows(e.relatedTarget)));
+    // Where focus is now, rather than what the last event said: a focused button or field that is taken
+    // away (Start swapped for "Starting…", a row added to another table, a rename finished with Enter)
+    // gives no focusout in every browser, and focus is then nowhere in the rows. Focus also moves while
+    // the screen is being redrawn, when state can't be changed: noted just after.
+    const check = () => queueMicrotask(() => (this.#focus = inRows(document.activeElement)));
+    // Leaving one control for another, focus is on neither for a moment: where it goes decides.
+    const focusOut = (e: FocusEvent) => queueMicrotask(() => (this.#focus = inRows(e.relatedTarget)));
+    const gone = new MutationObserver(() => {
+      if (this.#focus) check();
+    });
+    gone.observe(node, { childList: true, subtree: true });
     node.addEventListener("pointermove", move);
     node.addEventListener("pointerleave", leave);
-    node.addEventListener("focusin", focusIn);
+    node.addEventListener("focusin", check);
     node.addEventListener("focusout", focusOut);
     return {
       destroy: () => {
+        gone.disconnect();
         node.removeEventListener("pointermove", move);
         node.removeEventListener("pointerleave", leave);
-        node.removeEventListener("focusin", focusIn);
+        node.removeEventListener("focusin", check);
         node.removeEventListener("focusout", focusOut);
+        this.#pointer = false;
+        this.#focus = false;
       },
     };
   };

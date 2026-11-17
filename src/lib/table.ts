@@ -226,17 +226,31 @@ export function groupKey<T>(row: T, col: Column<T>): string {
 
 /** The rows under a heading for each value of the column. The groups are in the column's order (the other
  *  way round when the table is sorted by that very column the other way), with rows that have no value
- *  last; the rows in each keep the order they came in, so a sort by another column holds inside them. */
-export function groupRows<T>(rows: readonly T[], col: Column<T>, sort: SortBy | null = null): Group<T>[] {
-  const groups = new Map<string, Group<T> & { v: Cell }>();
+ *  last; the rows in each keep the order they came in, so a sort by another column holds inside them.
+ *  `keyOf` can put a row under another group than its value says (see `arrange`). */
+export function groupRows<T>(
+  rows: readonly T[],
+  col: Column<T>,
+  sort: SortBy | null = null,
+  keyOf: (row: T) => string = (row) => groupKey(row, col),
+): Group<T>[] {
+  const groups = new Map<string, Group<T> & { v: Cell; own: boolean }>();
   for (const row of rows) {
-    const key = groupKey(row, col);
+    const key = keyOf(row);
     let g = groups.get(key);
     if (!g) {
-      g = { key, label: key || col.none || "None", rows: [], v: key ? col.value(row) : null };
+      g = { key, label: key || col.none || "None", rows: [], v: null, own: false };
       groups.set(key, g);
     }
     g.rows.push(row);
+    // The group's place comes from a row that has its value now, when one does.
+    if (key && !g.own) {
+      const own = groupKey(row, col) === key;
+      if (own || g.rows.length === 1) {
+        g.v = col.value(row);
+        g.own = own;
+      }
+    }
   }
   const sign = sort?.col === col.id && sort.dir === "desc" ? -1 : 1;
   return [...groups.values()]
@@ -338,4 +352,62 @@ export function keepOrder<T, K>(rows: readonly T[], before: readonly K[], keyOf:
       return x.was - y.was;
     })
     .map((x) => x.row);
+}
+
+// --- Rows worked out --------------------------------------------------------------------------------------
+
+/** How a table showed its rows last time, so it can show them the same way while the owner works in it. */
+export interface Shown<K> {
+  /** The rows shown, in order. */
+  keys: K[];
+  /** Every row the table had: whether it was shown, and the group it was under ("" when not grouped). */
+  rows: Map<K, { shown: boolean; group: string }>;
+  /** The group headings, in order. */
+  groups: string[];
+}
+
+export interface Arranged<T, K> {
+  rows: T[];
+  /** Null when the table isn't grouped. */
+  groups: Group<T>[] | null;
+  shown: Shown<K>;
+}
+
+export interface Arrangement<T, K> {
+  cols: readonly Column<T>[];
+  filter: string;
+  only: Readonly<Record<string, string>>;
+  sort: SortBy | null;
+  group: Column<T> | null;
+  keyOf: (row: T) => K;
+}
+
+/** The rows a table shows, filtered, sorted and grouped.
+ *
+ *  With `held` (what it showed last, while the owner points at the rows or works in one, with the same
+ *  sort, grouping and filter), the rows it had then stay as they were: in the same order, under the same
+ *  group heading, and shown or hidden as before, even when a reading that came in since says otherwise.
+ *  Otherwise a row being renamed could jump to another group, or be filtered out, under the owner's
+ *  hands. Rows that are new since then go after them, where the rules put them. */
+export function arrange<T, K>(rows: readonly T[], how: Arrangement<T, K>, held: Shown<K> | null = null): Arranged<T, K> {
+  const { keyOf, group } = how;
+  const live = new Set(filterRows(rows, how.cols, how.filter, how.only));
+  const was = (row: T) => held?.rows.get(keyOf(row));
+  const passing = rows.filter((row) => was(row)?.shown ?? live.has(row));
+  const col = how.sort ? how.cols.find((c) => c.id === how.sort?.col && c.sortable !== false) : undefined;
+  const sorted = col && how.sort ? sortRows(passing, col, how.sort.dir) : passing;
+  const ordered = held ? keepOrder(sorted, held.keys, keyOf) : sorted;
+  const groupOf = (row: T) => (group ? (was(row)?.group ?? groupKey(row, group)) : "");
+  let groups = group ? groupRows(ordered, group, how.sort, groupOf) : null;
+  if (groups && held) groups = keepOrder(groups, held.groups, (g) => g.key);
+  const showing = new Set(passing);
+  return {
+    rows: ordered,
+    groups,
+    shown: {
+      keys: ordered.map(keyOf),
+      rows: new Map(rows.map((row) => [keyOf(row), { shown: showing.has(row), group: groupOf(row) }])),
+      groups: groups?.map((g) => g.key) ?? [],
+    },
+  };
 }
