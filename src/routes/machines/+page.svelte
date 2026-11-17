@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { tick, untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
+  import { flip } from "svelte/animate";
   import { page } from "$app/state";
   import { devices, isMachine } from "$lib/devices.svelte";
   import { stats } from "$lib/stats.svelte";
@@ -14,8 +15,10 @@
     type DeviceKind,
     type Os,
   } from "$lib/api";
+  import { arrange, keyMove, moveItem, slotAt, type Box } from "$lib/arrange";
   import { icons } from "$lib/icons";
   import { macToSend, repointed } from "$lib/net";
+  import { machineOrder } from "$lib/order.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
@@ -187,34 +190,292 @@
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const oses = Object.entries(OS_LABELS) as [Os, string][];
+
+  // Moving the cards: dragged by the grip in each card's header, or with the arrow keys on that grip.
+  // Pointer events rather than the browser's own drag and drop, which the app's windows on Windows and
+  // Linux don't handle the same way. Only the grip starts a move, so buttons, text and approvals in a
+  // card work as before.
+
+  /** The cards in the order the owner chose. */
+  const ordered = $derived(machineOrder.arrange(machines));
+  /** While a card is being dragged: which one, and the order the cards would have if it were let go now. */
+  let drag = $state<{ id: number; order: number[] } | null>(null);
+  /** The cards as drawn: while dragging, with the dragged card's place showing where it would land. */
+  const cards = $derived(drag ? arrange(machines, drag.order) : ordered);
+  const customised = $derived(ordered.some((m, i) => m.id !== machines[i]?.id));
+  /** The lifted copy of the dragged card that follows the pointer, in the grid's own pixels. */
+  let ghost = $state<Box | null>(null);
+  let ghostCopy: HTMLElement | null = null;
+  let cardsEl = $state<HTMLElement>();
+  /** Said by screen readers after a card has moved. */
+  let said = $state("");
+
+  /** A press on a grip, which becomes a drag once the pointer has moved a little. */
+  let press: { id: number; pointerId: number; x: number; y: number; slot: HTMLElement } | null = null;
+  /** The pointer's last place on screen, and where on the card it took hold (in the grid's pixels). */
+  let pointer = { x: 0, y: 0 };
+  let hold = { x: 0, y: 0 };
+  let scroller: HTMLElement | null = null;
+  let scrollFrame = 0;
+
+  // A machine that is removed loses its place, so the saved order only holds machines that exist.
+  $effect(() => {
+    if (!devices.loaded || devices.error) return;
+    const ids = devices.list.map((d) => d.id);
+    untrack(() => machineOrder.keepOnly(ids));
+  });
+
+  const allIds = () => devices.list.map((d) => d.id);
+  const nameOf = (id: number) => devices.byId.get(id)?.name ?? "The card";
+  const quick = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180);
+
+  function tell(text: string) {
+    // The same words twice in a row are only read out again if they are new to the page.
+    said = said === text ? `${text} ` : text;
+  }
+
+  function tellPlace(id: number, to: number, from: number, count: number) {
+    if (to !== from) tell(`${nameOf(id)} moved to place ${to + 1} of ${count}.`);
+    else tell(`${nameOf(id)} is already ${to === 0 ? "first" : to === count - 1 ? "last" : `at place ${to + 1} of ${count}`}.`);
+  }
+
+  async function focusGrip(id: number) {
+    await tick();
+    cardsEl?.querySelector<HTMLElement>(`[data-move="${id}"]`)?.focus();
+  }
+
+  function moveByKey(e: KeyboardEvent, id: number) {
+    if (drag || press || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const order = ordered.map((m) => m.id);
+    const from = order.indexOf(id);
+    const to = keyMove(e.key, from, order.length);
+    if (to === null || from < 0) return;
+    // Also keeps Alt+Left from going back a screen.
+    e.preventDefault();
+    if (to !== from) machineOrder.set(moveItem(order, from, to), allIds());
+    tellPlace(id, to, from, order.length);
+    // Moving the card can take the focus off its grip.
+    focusGrip(id);
+  }
+
+  function resetOrder() {
+    const first = machines[0]?.id;
+    machineOrder.reset();
+    tell("The cards are back in name order.");
+    // The button goes away, so the focus goes to the first card's grip.
+    if (first != null) focusGrip(first);
+  }
+
+  /** Where a point on screen is in the grid's own pixels, which differ when the window is zoomed. */
+  function inGrid(grid: HTMLElement, x: number, y: number) {
+    const r = grid.getBoundingClientRect();
+    const scale = grid.offsetWidth ? r.width / grid.offsetWidth : 1;
+    return { x: (x - r.left) / scale, y: (y - r.top) / scale };
+  }
+
+  function grab(e: PointerEvent, id: number) {
+    if (e.button !== 0 || drag || press) return;
+    const slot = (e.currentTarget as HTMLElement).closest<HTMLElement>(".slot");
+    if (!slot) return;
+    press = { id, pointerId: e.pointerId, x: e.clientX, y: e.clientY, slot };
+    pointer = { x: e.clientX, y: e.clientY };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", cancelDrag);
+    window.addEventListener("blur", cancelDrag);
+    window.addEventListener("keydown", onDragKey, true);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!press || e.pointerId !== press.pointerId) return;
+    pointer = { x: e.clientX, y: e.clientY };
+    if (!drag) {
+      // A small slip while clicking the grip isn't a drag.
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 5) return;
+      lift(press);
+    }
+    follow();
+  }
+
+  function lift(p: NonNullable<typeof press>) {
+    if (!cardsEl) return;
+    const at = inGrid(cardsEl, p.x, p.y);
+    const { offsetLeft: x, offsetTop: y, offsetWidth: w, offsetHeight: h } = p.slot;
+    hold = { x: at.x - x, y: at.y - y };
+    // A still copy of the card is what the pointer carries; the card's own place shows where it will land.
+    const copy = p.slot.firstElementChild?.cloneNode(true);
+    ghostCopy = copy instanceof HTMLElement ? copy : null;
+    ghostCopy?.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+    ghost = { x, y, w, h };
+    drag = { id: p.id, order: cards.map((m) => m.id) };
+    getSelection()?.removeAllRanges();
+    document.documentElement.classList.add("moving-card");
+    scroller = scrollerOf(cardsEl);
+    scrollFrame = requestAnimationFrame(autoScroll);
+  }
+
+  /** Moves the copy with the pointer, and the dragged card's place to the card under it. */
+  function follow() {
+    if (!drag || !cardsEl || !ghost) return;
+    const at = inGrid(cardsEl, pointer.x, pointer.y);
+    // Kept inside the grid, so it never makes the screen wider or longer than it is.
+    const inside = (v: number, room: number) => Math.max(0, Math.min(v, room));
+    ghost = {
+      ...ghost,
+      x: inside(at.x - hold.x, cardsEl.offsetWidth - ghost.w),
+      y: inside(at.y - hold.y, cardsEl.offsetHeight - ghost.h),
+    };
+    // Where the cards are laid out, not where a sliding card happens to be drawn at this moment.
+    const slots = [...cardsEl.querySelectorAll<HTMLElement>(":scope > .slot")];
+    const to = slotAt(
+      slots.map((s) => ({ x: s.offsetLeft, y: s.offsetTop, w: s.offsetWidth, h: s.offsetHeight })),
+      at.x,
+      at.y,
+    );
+    const now = cards.map((m) => m.id);
+    const from = now.indexOf(drag.id);
+    if (to >= 0 && from >= 0 && to !== from) drag.order = moveItem(now, from, to);
+  }
+
+  function scrollerOf(el: HTMLElement): HTMLElement | null {
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      const overflow = getComputedStyle(p).overflowY;
+      if (overflow === "auto" || overflow === "scroll") return p;
+    }
+    return null;
+  }
+
+  /** Near the top or bottom of the screen it scrolls, so a card can be taken past what is in view. */
+  function autoScroll() {
+    if (!drag) return;
+    if (scroller) {
+      const r = scroller.getBoundingClientRect();
+      const edge = 56;
+      const over = pointer.y < r.top + edge ? pointer.y - (r.top + edge) : pointer.y > r.bottom - edge ? pointer.y - (r.bottom - edge) : 0;
+      if (over) {
+        const before = scroller.scrollTop;
+        scroller.scrollTop += Math.max(-24, Math.min(24, over / 3));
+        if (scroller.scrollTop !== before) follow();
+      }
+    }
+    scrollFrame = requestAnimationFrame(autoScroll);
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    if (!press || e.pointerId !== press.pointerId) return;
+    const moved = drag;
+    endDrag();
+    if (!moved) return;
+    const before = ordered.map((m) => m.id);
+    const after = arrange(machines, moved.order).map((m) => m.id);
+    if (after.join() !== before.join()) machineOrder.set(after, allIds());
+    tellPlace(moved.id, after.indexOf(moved.id), before.indexOf(moved.id), after.length);
+    focusGrip(moved.id);
+  }
+
+  function onDragKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancelDrag();
+  }
+
+  /** Lets go without moving anything: the card goes back to where it was. */
+  function cancelDrag() {
+    const moved = drag;
+    endDrag();
+    if (moved) tell(`Move cancelled. ${nameOf(moved.id)} stays where it was.`);
+  }
+
+  function endDrag() {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", cancelDrag);
+    window.removeEventListener("blur", cancelDrag);
+    window.removeEventListener("keydown", onDragKey, true);
+    cancelAnimationFrame(scrollFrame);
+    document.documentElement.classList.remove("moving-card");
+    press = null;
+    drag = null;
+    ghost = null;
+    ghostCopy = null;
+    scroller = null;
+  }
+
+  onDestroy(endDrag);
 </script>
+
+<!-- The grip that moves a card. Only there when there are two cards or more. -->
+{#snippet grip(m: Device, i: number)}
+  {#if cards.length > 1}
+    <button
+      class="grip"
+      type="button"
+      data-move={m.id}
+      aria-label="Move {m.name}, place {i + 1} of {cards.length}"
+      aria-describedby="move-hint"
+      title="Drag to move this card"
+      onpointerdown={(e) => grab(e, m.id)}
+      onkeydown={(e) => moveByKey(e, m.id)}
+    >
+      <Icon path={icons.grip} size={16} />
+    </button>
+  {/if}
+{/snippet}
 
 <header class="page-head">
   <h1>Machines</h1>
-  <button class="btn primary" onclick={startAdd}>Add machine</button>
+  <div class="actions">
+    {#if customised}
+      <button class="btn small quiet" title="Put the cards back in name order" onclick={resetOrder}>Reset order</button>
+    {/if}
+    <button class="btn primary" onclick={startAdd}>Add machine</button>
+  </div>
 </header>
 
 <div class="layout" class:with-form={editing !== null}>
   <div class="main">
     {#if machines.length > 0}
-      <section class="cards" aria-label="Machine stats">
-        {#each machines as m (m.id)}
-          <!-- A reading this card can't draw must not take the other machines down with it. -->
-          <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
-            <MachineCard device={m} onedit={startEdit} />
-            {#snippet failed(_error, reset)}
-              <article class="panel broken" role="alert">
-                <h3 class="ellipsis" title={m.name}>{m.name}</h3>
-                <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
-                <div class="form-actions">
-                  <button class="btn small" onclick={reset}>Try again</button>
-                  <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
-                </div>
-              </article>
-            {/snippet}
-          </svelte:boundary>
+      <section class="cards" aria-label="Machine stats" bind:this={cardsEl}>
+        {#each cards as m, i (m.id)}
+          <div class="slot" class:landing={drag?.id === m.id} animate:flip={{ duration: quick() }}>
+            <!-- A reading this card can't draw must not take the other machines down with it. -->
+            <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
+              <MachineCard device={m} onedit={startEdit}>
+                {#snippet handle()}{@render grip(m, i)}{/snippet}
+              </MachineCard>
+              {#snippet failed(_error, reset)}
+                <article class="panel broken" role="alert">
+                  <header class="broken-head">
+                    {@render grip(m, i)}
+                    <h3 class="ellipsis" title={m.name}>{m.name}</h3>
+                  </header>
+                  <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
+                  <div class="form-actions">
+                    <button class="btn small" onclick={reset}>Try again</button>
+                    <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
+                  </div>
+                </article>
+              {/snippet}
+            </svelte:boundary>
+          </div>
         {/each}
+        {#if ghost}
+          <div
+            class="ghost"
+            style:transform="translate({ghost.x}px, {ghost.y}px)"
+            style:width="{ghost.w}px"
+            style:height="{ghost.h}px"
+            aria-hidden="true"
+            inert
+            {@attach (el) => {
+              if (ghostCopy) el.append(ghostCopy);
+            }}
+          ></div>
+        {/if}
       </section>
+      <p id="move-hint" class="sr-only">Arrow keys move the card one place earlier or later, Home and End to the start or the end.</p>
+      <p class="sr-only" aria-live="polite">{said}</p>
     {/if}
 
     <section class="panel table-wrap">
@@ -352,7 +613,7 @@
   /* Spec section 6: 2 to 3 cards across at 1080p, 3 to 4 at 1440p, 5 to 6 on the ultrawide.
      Counted from the room the cards really have, so it still holds with the form open. */
   .main { container-type: inline-size; }
-  .cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
+  .cards { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
   @container (min-width: 62rem) {
     .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
@@ -369,7 +630,43 @@
     .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   }
 
+  /* Each card fills its place, so the cards in a row stay the same height. */
+  .slot { display: grid; min-width: 0; }
+  /* The dragged card's place: where it lands when let go. */
+  .slot.landing {
+    border-radius: var(--radius);
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  .slot.landing > :global(*) { visibility: hidden; }
+  .ghost { position: absolute; top: 0; left: 0; z-index: 5; display: grid; pointer-events: none; }
+  .ghost > :global(*) { border-color: var(--accent); box-shadow: 0 14px 36px rgb(0 0 0 / 0.5); }
+  .grip {
+    display: inline-grid;
+    place-items: center;
+    width: 1.5rem;
+    height: 2.25rem;
+    flex: none;
+    margin: 0 -0.3rem 0 -0.55rem;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--muted);
+    opacity: 0.65;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+  .grip:hover, .grip:focus-visible { opacity: 1; color: var(--text); background: var(--panel-raised); }
+  .grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  :global(html.moving-card), :global(html.moving-card *) { cursor: grabbing !important; user-select: none !important; }
+  .quiet { border-color: transparent; background: none; color: var(--muted); }
+  .quiet:hover { color: var(--text); }
+
   .broken { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; border-color: var(--bad); }
+  .broken-head { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
   .broken h3 { margin: 0; font-size: 1.08rem; font-weight: 600; }
   .broken p { margin: 0; line-height: 1.5; }
 

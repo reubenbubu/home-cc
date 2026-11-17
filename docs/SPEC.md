@@ -124,6 +124,9 @@ can take one more timer period to show as down.
   disk space per drive.
 - Warn (colour change) when a disk is above 85% full or RAM above 90%. Both
   levels can be changed.
+- The machine cards can be put in any order: drag a card by the grip in its
+  header, or use the arrow keys on that grip. The order is remembered on this
+  PC; new machines go at the end, and "Reset order" goes back to name order.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.

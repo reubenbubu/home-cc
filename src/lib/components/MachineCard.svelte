@@ -13,8 +13,10 @@
   import Icon from "./Icon.svelte";
   import Meter from "./Meter.svelte";
   import StatusDot from "./StatusDot.svelte";
+  import type { Snippet } from "svelte";
 
-  let { device, onedit }: { device: Device; onedit: (d: Device) => void } = $props();
+  /** `handle`: the grip the screen puts at the start of the header, to move the card by. */
+  let { device, onedit, handle }: { device: Device; onedit: (d: Device) => void; handle?: Snippet } = $props();
 
   const s = $derived(status.get(device));
   const entry = $derived(stats.get(device.id));
@@ -62,6 +64,7 @@
 
 <article class="panel card">
   <header>
+    {@render handle?.()}
     <StatusDot health={status.health(device)} />
     <h3 class="ellipsis" title={device.name}>{device.name}</h3>
     {#if s?.up && s.rttMs != null}

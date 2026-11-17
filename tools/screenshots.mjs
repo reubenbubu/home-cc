@@ -57,7 +57,7 @@ const SCREENS = [
     async before(page) {
       // The sample data has one machine in each state that waits for the owner; all must be in the picture.
       await page.getByText("This machine's identity has changed").waitFor();
-      await page.getByText("First connection to Media PC").waitFor();
+      await page.getByText("Before the stored password is used for Media PC").waitFor();
       await page.getByText("home-cc has stopped trying this machine").waitFor();
     },
   },
