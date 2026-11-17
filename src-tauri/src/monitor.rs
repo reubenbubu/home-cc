@@ -319,12 +319,6 @@ impl Monitor {
     /// One entry per machine with an SSH user, and one for this PC, read or
     /// not. Which device is this PC is worked out off the async threads: listing
     /// the network adapters can take a moment (see `localstats::this_pc_ids`).
-    /// The latest stats entry kept for one device, if it has been read at all. Doesn't
-    /// look anything up, so it can be asked from anywhere (the Docker screen uses it).
-    pub fn stats_entry(&self, device_id: i64) -> Option<MachineStatsEntry> {
-        self.stats.lock().unwrap().get(&device_id).map(|s| s.entry.clone())
-    }
-
     pub async fn stats_entries(&self, inv: &Inventory) -> Result<Vec<MachineStatsEntry>> {
         let list = inv.list()?;
         let this_pc = localstats::this_pc_ids_now(list.clone()).await;
