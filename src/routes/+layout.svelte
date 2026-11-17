@@ -9,12 +9,17 @@
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import { zoom } from "$lib/zoom.svelte";
   import Icon from "$lib/components/Icon.svelte";
 
   let { children } = $props();
 
   // One load of everything, then the stores follow the back end's events.
   onMount(() => startLive());
+
+  // The size the owner left the app at, before the first screen is drawn; then the zoom keys work everywhere.
+  zoom.restore();
+  onMount(() => zoom.listen());
 
   /** True in a browser with the sample back end instead of the real one. */
   const sample = "__HOME_CC_MOCK__" in window;
@@ -84,7 +89,9 @@
 </div>
 
 <style>
-  .shell { display: flex; height: 100vh; }
+  /* --page-zoom is only set in a browser with the sample data, where zoom.svelte.ts scales the page, which
+     also scales vh. In the app the window itself zooms and this is plain 100vh. */
+  .shell { display: flex; height: calc(100vh / var(--page-zoom, 1)); }
 
   .sidebar {
     width: 220px;
@@ -147,5 +154,9 @@
     .brand { justify-content: center; padding-inline: 0; }
     .brand-name, .nav-label { display: none; }
     .nav-item { justify-content: center; padding: 0; }
+  }
+  /* A small window zoomed right in: less room lost around the edges. */
+  @media (max-width: 600px) {
+    .content { padding: 1rem; }
   }
 </style>

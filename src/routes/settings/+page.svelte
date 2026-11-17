@@ -3,6 +3,8 @@
   import { api, errorText, secretKeys, type AppInfo, type Settings } from "$lib/api";
   import { icons } from "$lib/icons";
   import { settings } from "$lib/settings.svelte";
+  import { zoom } from "$lib/zoom.svelte";
+  import { ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN } from "$lib/zoom";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
 
@@ -248,6 +250,28 @@
         <p class="hint">Kept in your system's keychain, not in the settings file, and never shown again.</p>
       </div>
     </section>
+
+    <!-- Not saved with the form: a change here applies straight away. -->
+    <section class="panel">
+      <h2 class="section-title">Display</h2>
+      <div class="field">
+        <span id="zoom-label">Size of everything in the window</span>
+        <div class="zoom" role="group" aria-labelledby="zoom-label">
+          <button class="btn step" type="button" onclick={() => zoom.act("out")} disabled={zoom.percent <= ZOOM_MIN}
+            aria-label="Smaller" title="Smaller (Ctrl and -)">−</button>
+          <output class="mono zoom-now" aria-live="polite">{zoom.percent}%</output>
+          <button class="btn step" type="button" onclick={() => zoom.act("in")} disabled={zoom.percent >= ZOOM_MAX}
+            aria-label="Bigger" title="Bigger (Ctrl and +)">+</button>
+          <button class="btn" type="button" onclick={() => zoom.act("reset")} disabled={zoom.percent === ZOOM_DEFAULT}
+            title="Back to 100% (Ctrl and 0)">Normal size</button>
+        </div>
+        {#if zoom.error}<p class="alert" role="alert">Couldn't change the size: {zoom.error}</p>{/if}
+        <p class="hint">
+          Changes straight away, without Save, and is kept for next time. Anywhere in the app you can also hold Ctrl
+          and press + or - (0 for 100%), or hold Ctrl and turn the mouse wheel.
+        </p>
+      </div>
+    </section>
   </div>
 
   <div class="save-bar">
@@ -264,7 +288,7 @@
 </form>
 
 <style>
-  /* Four panels: one row on the ultrawide, two by two on the other screens. */
+  /* Five panels: one row on the ultrawide, two side by side on the other screens. */
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr)); gap: var(--gap); align-items: start; }
   @media (min-width: 1500px) and (max-width: 3000px) {
     .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -286,6 +310,10 @@
   .stored > span:first-child { display: flex; align-items: center; gap: 0.4rem; }
   .stored :global(svg), .saved :global(svg) { color: var(--ok); }
   .stored-actions { display: flex; gap: 0.4rem; }
+
+  .zoom { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.2rem; }
+  .zoom .step { min-width: 2.75rem; padding: 0; font-size: 1.15rem; }
+  .zoom-now { min-width: 5ch; text-align: center; font-size: 1.05rem; }
 
   .save-bar { display: flex; align-items: center; gap: 0.6rem 1rem; flex-wrap: wrap; margin-top: var(--gap); }
   .saved { display: flex; align-items: center; gap: 0.35rem; }

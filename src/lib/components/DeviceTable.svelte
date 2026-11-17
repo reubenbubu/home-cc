@@ -304,4 +304,34 @@
   @container (max-width: 56rem) {
     .known .c-seen, .fresh .c-rtt, .ignored .c-host { display: none; }
   }
+
+  /* Too narrow for columns (a small window zoomed in): each device is a short block of lines instead.
+     Status, name and response on the first line, the address and type under them, then any buttons. */
+  @container (max-width: 48rem) {
+    table, tbody { display: block; }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    tr {
+      display: grid;
+      grid-template-columns: 2.1rem minmax(0, 1fr) auto;
+      align-items: center;
+      padding-block: 0.3rem;
+      border-bottom: 1px solid var(--border);
+    }
+    tr:last-child { border-bottom: 0; }
+    td { display: block; height: auto; border-bottom: 0; padding-block: 0.15rem; }
+    .box td { width: auto; }
+    .c-seen, .c-spark, .c-maker, .c-host { display: none; }
+    td.c-dot { grid-area: 1 / 1; }
+    td.c-name { grid-area: 1 / 2; }
+    td.c-rtt { grid-area: 1 / 3; text-align: right; }
+    td.c-ip { grid-area: 2 / 2; }
+    td.c-type { grid-area: 2 / 3; }
+    td.c-accept { grid-area: 3 / 1 / 4 / -1; }
+    .c-accept .buttons { flex-wrap: wrap; }
+    .ignored tr { grid-template-columns: minmax(0, 1fr) auto; }
+    .ignored td.c-name { grid-area: 1 / 1; }
+    .ignored td.c-ip { grid-area: 2 / 1; }
+    .ignored td.c-type { grid-area: 1 / 2; }
+    .ignored td.c-remove { grid-area: 2 / 2; }
+  }
 </style>
