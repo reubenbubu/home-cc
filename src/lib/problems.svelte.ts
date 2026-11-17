@@ -4,7 +4,7 @@
 import { page } from "$app/state";
 import { api, errorText, KIND_LABELS, OS_LABELS, type Device } from "./api";
 import { names } from "./names.svelte";
-import { agentPrompt, type Context, type Details, type Problem } from "./report";
+import { agentPrompt, type Context, type Details, type Problem, type PromptKind } from "./report";
 export { copyText } from "./clipboard";
 import { settings } from "./settings.svelte";
 import { status } from "./status.svelte";
@@ -73,7 +73,7 @@ function settingsDetails(): Details {
 }
 
 /** Gathers the context and writes the prompt. Never rejects: a part that can't be read is named instead. */
-export async function buildPrompt(p: Problem, extra?: () => Promise<Details>): Promise<string> {
+export async function buildPrompt(p: Problem, extra?: () => Promise<Details>, kind: PromptKind = "bug"): Promise<string> {
   const missing: string[] = [];
   const [info, log, more] = await Promise.allSettled([
     api.appInfo(),
@@ -104,5 +104,5 @@ export async function buildPrompt(p: Problem, extra?: () => Promise<Details>): P
     missing,
   };
   const details = { ...p.details, ...(more.status === "fulfilled" ? more.value : {}) };
-  return agentPrompt({ ...p, details }, ctx);
+  return agentPrompt({ ...p, details }, ctx, kind);
 }

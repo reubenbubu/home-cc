@@ -306,6 +306,26 @@ The app must work well on all three and when moved between them.
   next time, and every screen stays usable at 200% in the smallest window
   (960x600).
 - The app remembers its window size and position, and which monitor it was on.
+- **Problems and agent prompts:** every failure is shown where it happened,
+  with prompts the owner can copy for a coding agent such as Claude Code. Each
+  carries the message word for word, the machine (name, address and hostname,
+  SSH user and port), what was being done, the app's version and recent
+  problems and log, and never a password, token or passphrase. A problem
+  about a machine or a service on it (stats, an SSH login or identity, key
+  login, a terminal, Docker, Proxmox, Pi-hole, pinging and scanning from this
+  PC) offers three:
+  - **Investigate:** go to the machine, as home-cc reaches it (the SSH command
+    with user and port, or the service's own address), look into what is
+    reported and report back, changing nothing.
+  - **Remediate:** go to the machine and fix it there, saying first what will
+    change and asking before anything destructive or hard to undo.
+  - **I have a bug:** find out why home-cc showed it, starting from home-cc's
+    own code, and fix that if the fault is there.
+
+  A problem about home-cc itself (its settings, saved devices, keychain, zoom,
+  live updates, a screen that failed, a list it couldn't load from its own
+  back end) offers only "I have a bug". Each prompt can be shown before it is
+  sent, and copied by hand if the clipboard can't be used.
 - Done when: every screen is checked at all three resolutions, at 100% and
   125% scaling, with no cut-off text or overlapping parts.
 

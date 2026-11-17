@@ -1,7 +1,10 @@
 // Turns a problem shown on a screen into a prompt the owner can paste into a
-// coding agent (such as Claude Code, opened in a checkout of home-cc) to find
-// out what went wrong and fix it. Pure functions only, so it can be tested
-// without the app; components/AgentPrompt.svelte gathers the context.
+// coding agent such as Claude Code. Three kinds: "I have a bug" asks it to find
+// what went wrong in home-cc's own code; "Investigate" and "Remediate" send it
+// to the machine or service the problem is about, to look into it or to fix it
+// there (offered only when there is such a machine: see promptKinds). Pure
+// functions only, so it can be tested without the app;
+// components/AgentPrompt.svelte gathers the context.
 
 export const REPO_URL = "https://github.com/reubenbubu/home-cc";
 
@@ -128,6 +131,101 @@ export interface Problem {
   details?: Details;
   /** A stack trace or other long text, shown as it is. */
   trace?: string;
+  /** The problem is in home-cc itself although its area is about machines (a list it couldn't load from
+   *  its own back end, say), so there is nothing on a machine to investigate or fix. */
+  inHomeCc?: boolean;
+}
+
+/** Which prompt: look into it on the machine, fix it on the machine, or find the bug in home-cc. */
+export type PromptKind = "investigate" | "remediate" | "bug";
+
+/** The words on each prompt's button, and what it asks for (its tooltip). */
+export const PROMPT_KINDS: Record<PromptKind, { label: string; asks: string }> = {
+  investigate: {
+    label: "Investigate",
+    asks: "Copies a prompt asking an agent to look into this on the machine itself and report back, changing nothing",
+  },
+  remediate: {
+    label: "Remediate",
+    asks: "Copies a prompt asking an agent to fix this on the machine itself, saying first what it will change and asking before anything destructive",
+  },
+  bug: {
+    label: "I have a bug",
+    asks: "Copies a prompt asking an agent to find out why home-cc showed this, and to fix home-cc's code if the fault is there",
+  },
+};
+
+/** What a problem in each area is about, outside home-cc: a saved machine or a service on it ("machine"),
+ *  this PC and the network around it ("this PC", for pinging and scanning), or nothing but home-cc itself
+ *  (null: its saved devices, settings, keychain, zoom, live updates, screens). The one place that decides
+ *  which problems get "Investigate" and "Remediate" (with reachOf). */
+export const AREA_REACH: Record<Area, "machine" | "this PC" | null> = {
+  stats: "machine",
+  trust: "machine",
+  keys: "machine",
+  terminal: "machine",
+  docker: "machine",
+  proxmox: "machine",
+  pihole: "machine",
+  scan: "this PC",
+  status: "this PC",
+  devices: null,
+  secrets: null,
+  settings: null,
+  live: null,
+  zoom: null,
+  screen: null,
+};
+
+/** Where an agent sent to investigate or fix a problem is to go, and how it gets there. */
+export type Reach =
+  | {
+      on: "machine";
+      name: string;
+      address: string;
+      /** The name the address resolves to, when there is one. */
+      hostname?: string;
+      /** Set when home-cc logs in to it over SSH. */
+      ssh?: { user: string; port: number };
+      /** The service's own web address, when home-cc reaches it that way (Proxmox, Pi-hole). */
+      api?: { what: string; url: string };
+    }
+  | { on: "this PC"; name?: string };
+
+const textOf = (v: Details[string]) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+
+/** Where the problem is, outside home-cc, or null when it is about home-cc itself. A machine's problem
+ *  needs the machine's address among its details (deviceDetails), or there is nowhere to send an agent. */
+export function reachOf(p: Problem): Reach | null {
+  const area = p.inHomeCc ? null : AREA_REACH[p.area];
+  if (area === "this PC") return { on: "this PC" };
+  if (area !== "machine") return null;
+  const d = p.details ?? {};
+  const address = textOf(d["Address"]);
+  if (!address) return null;
+  const name = textOf(d["Device"]) ?? address;
+  // This PC's own stats are read without SSH: the agent works here, not on another machine.
+  if (d["Read on this PC without SSH"] === true) return { on: "this PC", name };
+  const reach: Reach = { on: "machine", name, address };
+  const hostname = textOf(d["Resolved hostname"]);
+  // Only an actual name, not "none found" or "still being looked up".
+  if (hostname && !/\s/.test(hostname) && hostname !== address) reach.hostname = hostname;
+  const user = textOf(d["SSH user"]);
+  if (user) reach.ssh = { user, port: typeof d["SSH port"] === "number" ? d["SSH port"] : 22 };
+  if (p.area === "proxmox") {
+    const port = typeof d["API port"] === "number" ? d["API port"] : 8006;
+    reach.api = { what: "Proxmox's web page and API", url: `https://${address}:${port}` };
+  } else if (p.area === "pihole" && typeof d["Port"] === "number") {
+    const scheme = d["Connection"] === "plain HTTP" ? "http" : "https";
+    reach.api = { what: "Pi-hole's web page and API", url: `${scheme}://${address}:${d["Port"]}/admin` };
+  }
+  return reach;
+}
+
+/** The prompts offered under a problem, in the order shown: all three when it is about a machine or
+ *  service, only "I have a bug" when it is about home-cc itself. */
+export function promptKinds(p: Problem): PromptKind[] {
+  return reachOf(p) ? ["investigate", "remediate", "bug"] : ["bug"];
 }
 
 export interface LogLine {
@@ -188,12 +286,12 @@ function newest<T>(list: T[] | undefined): { shown: T[]; dropped: number } {
   return { shown, dropped: all.length - shown.length };
 }
 
-/** The prompt, as Markdown. */
-export function agentPrompt(problem: Problem, ctx: Context): string {
-  const out: string[] = [];
-  out.push(
-    `I use home-cc (${REPO_URL}), a desktop app for managing my home network, built with Tauri 2, Rust and Svelte. ` +
-      "It showed the problem below. Please find out why it happened.",
+const ABOUT_HOME_CC = `I use home-cc (${REPO_URL}), a desktop app for managing my home network, built with Tauri 2, Rust and Svelte.`;
+
+/** "I have a bug": find out why home-cc showed it, starting from home-cc's own code. */
+function bugIntro(): string[] {
+  return [
+    `${ABOUT_HOME_CC} It showed the problem below. Please find out why it happened.`,
     "",
     "- Start from the source of home-cc. If you are not in a checkout of it, clone the repository first, " +
       "and check out the commit named under App if one is given, so you read the code I am running.",
@@ -202,6 +300,83 @@ export function agentPrompt(problem: Problem, ctx: Context): string {
     "- If it is a bug, fix it with the smallest change that makes sense, add or update a test, and tell me what changed.",
     "- If it is on my side, give me the exact steps to fix it, saying which machine to run each command on.",
     "- If you can't tell from what is here, tell me what to check or run and what to send back.",
+  ];
+}
+
+function whereName(reach: Reach): string {
+  if (reach.on === "machine") return `my machine "${reach.name}"`;
+  return reach.name ? `this PC ("${reach.name}"), the one home-cc runs on` : "this PC, the one home-cc runs on, or the network around it";
+}
+
+/** "Investigate" and "Remediate": go to the machine and look, or fix it there. */
+function machineIntro(kind: "investigate" | "remediate", reach: Reach): string[] {
+  const go = "- Go to the machine named under Where it is, the way it says there, and find the cause on it.";
+  const ifHomeCc =
+    "the source of home-cc is at the address above, and the files to start from are listed at the end.";
+  if (kind === "investigate") {
+    return [
+      `${ABOUT_HOME_CC} It showed the problem below, about ${whereName(reach)}. ` +
+        "Please look into it there and tell me what is causing it. Don't change anything.",
+      "",
+      go,
+      "- Read whatever helps (logs, services and containers, disk space, settings), but change nothing: " +
+        "no restarts, installs, edits or deletes. If something can only be found out by changing something, ask me first.",
+      "- Tell me what is causing it and how sure you are, what you looked at to find out, and what would fix it: " +
+        "the exact steps, saying which machine to run each command on.",
+      `- If what home-cc reports doesn't match what you find on the machine, the fault may be in home-cc instead. Say so: ${ifHomeCc}`,
+      "- If you can't reach the machine, tell me what to run there and what to send back.",
+    ];
+  }
+  return [
+    `${ABOUT_HOME_CC} It showed the problem below, about ${whereName(reach)}. Please fix it there.`,
+    "",
+    go,
+    "- Before you change anything, tell me what you will change and why.",
+    "- Ask me, and wait for my yes, before anything destructive or hard to undo: deleting or overwriting files or data, " +
+      "removing containers, images or volumes, stopping or restarting services, containers or VMs, rebooting, " +
+      "or changing the firewall, the network settings or how I log in.",
+    "- Make the smallest change that fixes it, and keep a copy of any file before you edit it.",
+    "- Afterwards, check that it is fixed (home-cc should stop showing the problem on its next reading), " +
+      "and tell me exactly what you changed, so I can undo it.",
+    `- If the cause is in home-cc rather than on the machine, say so and change nothing on the machine: ${ifHomeCc}`,
+    "- If you can't reach the machine, tell me what to run there and what to send back.",
+  ];
+}
+
+/** Which machine to reach and how, for "Investigate" and "Remediate". Never a password or token. */
+function reachLines(reach: Reach, area: Area): string[] {
+  if (reach.on === "this PC") {
+    const lines = [
+      `- ${reach.name ? `This PC ("${reach.name}")` : "This PC"}: the one home-cc runs on (see Running on, under App), ` +
+        "probably the one you are working on now. Work here; no SSH is needed.",
+    ];
+    if (!reach.name) lines.push("- The devices home-cc checks and scans are on the network around it.");
+    return lines;
+  }
+  const lines = [`- Machine: "${reach.name}" at ${reach.address}${reach.hostname ? ` (hostname ${reach.hostname})` : ""}`];
+  if (reach.ssh) {
+    lines.push(
+      `- Over SSH, as home-cc does: \`ssh -p ${reach.ssh.port} ${reach.ssh.user}@${reach.address}\`. ` +
+        "home-cc logs in from this PC, with its SSH key (the SSH key file under Settings) or a password stored for it. " +
+        "If a password is asked for, ask me to log in myself or to add your key; never ask me to paste one here.",
+    );
+    if (area === "docker") lines.push("- Docker: run docker and docker compose there, over that SSH login, as home-cc does.");
+  } else {
+    lines.push("- home-cc has no SSH login for it. If you need to log in to it, ask me how.");
+  }
+  if (reach.api) {
+    lines.push(`- ${reach.api.what}: ${reach.api.url} (the token or password home-cc uses is not included)`);
+  }
+  return lines;
+}
+
+/** The prompt, as Markdown. "Investigate" and "Remediate" fall back to "I have a bug" for a problem
+ *  about home-cc itself (promptKinds doesn't offer them there). */
+export function agentPrompt(problem: Problem, ctx: Context, kind: PromptKind = "bug"): string {
+  const reach = kind === "bug" ? null : reachOf(problem);
+  const out: string[] = [];
+  out.push(
+    ...(reach && kind !== "bug" ? machineIntro(kind, reach) : bugIntro()),
     "",
     "## What happened",
     "",
@@ -209,6 +384,8 @@ export function agentPrompt(problem: Problem, ctx: Context): string {
     "",
     fenced(problem.error.trim()),
   );
+
+  if (reach) out.push("", "## Where it is", "", ...reachLines(reach, problem.area));
 
   const details = detailLines(problem.details);
   if (details.length) out.push("", "## Details", "", ...details);
@@ -248,7 +425,12 @@ export function agentPrompt(problem: Problem, ctx: Context): string {
     out.push("", "## Not included", "", ...ctx.missing.map((m) => `- ${m}`));
   }
 
-  out.push("", "## Where to start looking", "", ...AREA_FILES[problem.area].map((f) => `- ${f}`));
+  out.push(
+    "",
+    reach ? "## home-cc's code, if the cause turns out to be there" : "## Where to start looking",
+    "",
+    ...AREA_FILES[problem.area].map((f) => `- ${f}`),
+  );
   out.push(
     "",
     "No passwords or other secrets are included. Ask me if you need something that isn't here.",

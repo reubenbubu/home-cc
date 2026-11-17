@@ -1,15 +1,22 @@
 <script lang="ts">
-  // A small button under a problem: copies a prompt that asks a coding agent to find out what went wrong,
-  // with what the app knows around it (see report.ts). The prompt can be shown, so the owner can read
-  // what they are about to send, and copied by hand if the clipboard can't be used.
+  // Buttons under a problem that copy a prompt for a coding agent, with what the app knows around it (see
+  // report.ts). A problem about a machine or service offers three: Investigate (look into it there and
+  // report back), Remediate (fix it there) and I have a bug (find the fault in home-cc's code). A problem
+  // about home-cc itself offers only the last, as one "Copy a prompt for an agent" button (promptKinds
+  // decides). The prompt can be shown, so the owner can read what they are about to send, and copied by
+  // hand if the clipboard can't be used.
   import { icons } from "$lib/icons";
   import { buildPrompt, copyText } from "$lib/problems.svelte";
-  import type { Details, Problem } from "$lib/report";
+  import { PROMPT_KINDS, promptKinds, type Details, type Problem, type PromptKind } from "$lib/report";
   import Icon from "./Icon.svelte";
 
   let { problem, extra }: { problem: Problem; extra?: () => Promise<Details> } = $props();
 
+  const kinds = $derived(promptKinds(problem));
+
   let text = $state<string | null>(null);
+  /** Which prompt is being made, or was made last. */
+  let kind = $state<PromptKind>("bug");
   let phase = $state<"idle" | "working" | "copied" | "failed">("idle");
   let open = $state(false);
 
@@ -28,10 +35,11 @@
     open = false;
   });
 
-  async function copy() {
-    const gen = generation;
+  async function copy(k: PromptKind) {
+    const gen = ++generation;
+    kind = k;
     phase = "working";
-    const made = await buildPrompt(problem, extra);
+    const made = await buildPrompt(problem, extra, k);
     if (gen !== generation) return;
     text = made;
     const copied = await copyText(made);
@@ -39,24 +47,34 @@
     phase = copied ? "copied" : "failed";
     if (!copied) open = true;
   }
+
+  const one = $derived(kinds.length === 1);
 </script>
 
 <div class="agent">
   <div class="row">
-    <button
-      class="ask"
-      onclick={copy}
-      disabled={phase === "working"}
-      title="Copies a prompt for a coding agent such as Claude Code, with this message and what home-cc knows around it"
-    >
-      <Icon path={icons.copy} size={14} />
-      {phase === "working" ? "Preparing…" : "Copy a prompt for an agent"}
-    </button>
+    {#if one}
+      <button class="ask" onclick={() => copy("bug")} disabled={phase === "working"} title={PROMPT_KINDS.bug.asks}>
+        <Icon path={icons.copy} size={14} />
+        {phase === "working" ? "Preparing…" : "Copy a prompt for an agent"}
+      </button>
+    {:else}
+      <div class="kinds" role="group" aria-label="Copy a prompt for an agent">
+        <span class="lead" aria-hidden="true"><Icon path={icons.copy} size={14} /> Copy a prompt for an agent:</span>
+        {#each kinds as k (k)}
+          <button class="ask" onclick={() => copy(k)} disabled={phase === "working"} title={PROMPT_KINDS[k].asks}>
+            {phase === "working" && kind === k ? "Preparing…" : PROMPT_KINDS[k].label}
+          </button>
+        {/each}
+      </div>
+    {/if}
     {#if text}
       <button class="ask" aria-expanded={open} onclick={() => (open = !open)}>{open ? "Hide it" : "Show it"}</button>
     {/if}
     <span class="said" role="status">
-      {#if phase === "copied"}Copied. Paste it into Claude Code, ideally opened in your home-cc folder.
+      {#if phase === "copied"}
+        {#if kind === "bug"}Copied{one ? "" : ` "${PROMPT_KINDS.bug.label}"`}. Paste it into Claude Code, ideally opened in your home-cc folder.
+        {:else}Copied "{PROMPT_KINDS[kind].label}". Paste it into Claude Code on this PC, which can reach the machine.{/if}
       {:else if phase === "failed"}Couldn't copy it. Select the text below and copy it yourself.{/if}
     </span>
   </div>
@@ -66,7 +84,7 @@
       readonly
       rows="12"
       value={text}
-      aria-label="Prompt for an agent"
+      aria-label={one ? "Prompt for an agent" : `Prompt for an agent: ${PROMPT_KINDS[kind].label}`}
       onfocus={(e) => e.currentTarget.select()}
     ></textarea>
   {/if}
@@ -75,6 +93,8 @@
 <style>
   .agent { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.45rem; }
   .row { display: flex; align-items: center; gap: 0.3rem 0.9rem; flex-wrap: wrap; }
+  .kinds { display: flex; align-items: center; gap: 0.1rem 0.8rem; flex-wrap: wrap; min-width: 0; }
+  .lead { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.9rem; }
   .ask {
     display: inline-flex;
     align-items: center;
