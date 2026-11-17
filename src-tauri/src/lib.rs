@@ -11,6 +11,7 @@ mod secrets;
 pub mod settings;
 pub mod ssh;
 pub mod stats;
+mod terminal;
 
 use inventory::Inventory;
 use monitor::Monitor;
@@ -28,6 +29,7 @@ pub fn run() {
             let inventory = Inventory::open(&dir.join("home-cc.db"))?;
             app.manage(inventory);
             app.manage(Monitor::default());
+            app.manage(terminal::Terminals::default());
             Monitor::start(app.handle());
             Ok(())
         })
@@ -53,7 +55,22 @@ pub fn run() {
             commands::machine_stats,
             commands::refresh_stats,
             commands::trust_host_key,
+            // Terminals
+            commands::terminal_open,
+            commands::terminal_write,
+            commands::terminal_resize,
+            commands::terminal_ack,
+            commands::terminal_close,
+            commands::terminal_close_all,
+            commands::clipboard_read_text,
+            commands::clipboard_write_text,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running home-cc");
+        .build(tauri::generate_context!())
+        .expect("error while running home-cc")
+        .run(|app, event| {
+            // Open terminals say goodbye to their machines instead of just dropping off.
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(app.state::<terminal::Terminals>().close_all());
+            }
+        });
 }

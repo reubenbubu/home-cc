@@ -486,7 +486,7 @@ impl Monitor {
     }
 }
 
-fn remember(app: &AppHandle, device_id: i64, host: &str, port: u16, key: &HostKey) {
+pub(crate) fn remember(app: &AppHandle, device_id: i64, host: &str, port: u16, key: &HostKey) {
     if let Err(e) = app.state::<Inventory>().remember_host_key(device_id, host, port, key) {
         crate::diag::note(format!("could not store the identity of device {device_id}: {e}"));
     }
@@ -528,15 +528,15 @@ async fn named_devices(app: &AppHandle, found: &[Found]) -> Result<HashMap<Strin
 }
 
 /// A login ready to try, and whether the stored password was left out of it.
-struct Prepared {
-    login: Login,
+pub(crate) struct Prepared {
+    pub(crate) login: Login,
     /// A password is stored, but the owner hasn't approved this machine's
     /// identity yet, so it must not be sent.
-    password_held_back: bool,
+    pub(crate) password_held_back: bool,
 }
 
 /// Gather what is needed to log in: stored identity, key file and secrets.
-async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepared> {
+pub(crate) async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepared> {
     let inv = app.state::<Inventory>();
     let settings = inv.settings()?;
     let known_key = inv.host_key(device.id)?;
