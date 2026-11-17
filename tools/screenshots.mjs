@@ -3,9 +3,13 @@
 // sideways. Needs Playwright with Chromium, installed globally or locally.
 //
 //   node tools/screenshots.mjs <output folder> [--url http://127.0.0.1:1420]
-//        [--only overview,settings] [--sizes 1920x1080,1280x720@1.5]
+//        [--only overview,settings] [--sizes 1920x1080,1280x720@1.5] [--zoom 200]
 //
 // --sizes takes any WIDTHxHEIGHT, with @SCALE for display scaling.
+// --zoom 200 takes every picture as if the app were zoomed to 200% (Ctrl and +
+// in the app), for example "--sizes 960x600 --zoom 200" for the smallest
+// window zoomed right in. The app's zoom is the window's own, which is the same
+// as a window that is that much smaller with that much more display scaling.
 //
 // Without --url it starts its own dev server on a free port and stops it at
 // the end. Exits with an error if any screen is wider than its window, logs
@@ -99,10 +103,10 @@ const SCREENS = [
 ];
 
 function parseArgs(argv) {
-  const args = { out: null, url: null, only: null, sizes: null };
+  const args = { out: null, url: null, only: null, sizes: null, zoom: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--url" || a === "--only" || a === "--sizes") args[a.slice(2)] = argv[++i] ?? "";
+    if (a === "--url" || a === "--only" || a === "--sizes" || a === "--zoom") args[a.slice(2)] = argv[++i] ?? "";
     else if (!args.out) args.out = a;
   }
   return args;
@@ -112,6 +116,17 @@ function parseSize(name) {
   const m = /^(\d+)x(\d+)(?:@(\d+(?:\.\d+)?))?$/.exec(name);
   if (!m) throw new Error(`"${name}" is not a size. Write it like 1920x1080 or 1536x864@1.25.`);
   return { name, width: Number(m[1]), height: Number(m[2]), scale: Number(m[3] ?? 1) };
+}
+
+/** A size as the screens see it with the app zoomed to `percent`. */
+function zoomed(size, percent) {
+  const z = percent / 100;
+  return {
+    name: `${size.name}-zoom${percent}`,
+    width: Math.round(size.width / z),
+    height: Math.round(size.height / z),
+    scale: size.scale * z,
+  };
 }
 
 /** Playwright is usually installed globally, where a plain import from this folder can't see it. */
@@ -541,6 +556,43 @@ async function checkFlows(browser, url) {
         if (!got.title.includes(NAS_MAC)) throw new Error(`the address's tooltip doesn't have the hardware address (it reads "${got.title}")`);
       },
     },
+    {
+      what: "the zoom keys, the wheel and the Settings buttons change the size, and it is kept after a restart",
+      path: "/settings",
+      async run(page) {
+        const now = page.locator("output.zoom-now");
+        const expectZoom = async (want, when) => {
+          await page.waitForFunction((w) => document.querySelector("output.zoom-now")?.textContent === `${w}%`, want, { timeout: 3000 }).catch(() => {});
+          const shown = await now.textContent();
+          const applied = await page.evaluate(() => document.documentElement.style.zoom || "1");
+          if (shown !== `${want}%` || Number(applied) !== want / 100) {
+            throw new Error(`${when}: Settings shows ${shown} and the page is at ${applied}, not ${want}%`);
+          }
+        };
+        await expectZoom(100, "at the start");
+        await page.keyboard.press("Control+Equal");
+        await expectZoom(110, "after Ctrl and =");
+        // In a box too: the keys work everywhere.
+        await page.getByLabel("How often to check that every device is there").focus();
+        await page.keyboard.press("Control+Minus");
+        await page.keyboard.press("Control+Minus");
+        await expectZoom(90, "after Ctrl and - twice");
+        await page.mouse.move(600, 400);
+        await page.keyboard.down("Control");
+        await page.mouse.wheel(0, -100);
+        await page.keyboard.up("Control");
+        await expectZoom(100, "after Ctrl and the wheel");
+        await page.getByRole("button", { name: "Bigger" }).click();
+        await page.getByRole("button", { name: "Bigger" }).click();
+        await expectZoom(125, "after Bigger twice");
+        await page.reload({ waitUntil: "networkidle" });
+        await expectZoom(125, "after starting again");
+        await page.keyboard.press("Control+Digit0");
+        await expectZoom(100, "after Ctrl and 0");
+        await page.reload({ waitUntil: "networkidle" });
+        await expectZoom(100, "after starting again at 100%");
+      },
+    },
   ];
   const problems = [];
   for (const flow of flows) {
@@ -569,13 +621,18 @@ async function checkFlows(browser, url) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.out) {
-    console.error("usage: node tools/screenshots.mjs <output folder> [--url URL] [--only names] [--sizes names]");
+    console.error("usage: node tools/screenshots.mjs <output folder> [--url URL] [--only names] [--sizes names] [--zoom percent]");
     process.exit(2);
   }
   const out = resolve(args.out);
   mkdirSync(out, { recursive: true });
   const screens = args.only ? SCREENS.filter((s) => args.only.split(",").includes(s.name)) : SCREENS;
-  const sizes = args.sizes ? args.sizes.split(",").map(parseSize) : SIZES;
+  let sizes = args.sizes ? args.sizes.split(",").map(parseSize) : SIZES;
+  if (args.zoom) {
+    const percent = Number(args.zoom);
+    if (!(percent >= 50 && percent <= 200)) throw new Error(`--zoom takes a percentage from 50 to 200, not "${args.zoom}".`);
+    sizes = sizes.map((s) => zoomed(s, percent));
+  }
 
   const chromium = await loadChromium();
   const server = args.url ? { url: args.url.replace(/\/$/, ""), stop() {} } : await startDevServer();

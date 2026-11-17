@@ -757,8 +757,34 @@
   @container (max-width: 72rem) {
     .c-notes { display: none; }
   }
-  @container (max-width: 56rem) {
+  @container (max-width: 66rem) {
     .c-os { display: none; }
+  }
+  /* Too narrow for columns (a small window zoomed in): the name on one line, the address, type and SSH
+     login under it, and the buttons beside both. */
+  @container (max-width: 56rem) {
+    table, tbody { display: block; }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    tr {
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr) auto;
+      align-items: baseline;
+      column-gap: 0.2rem;
+      padding-block: 0.3rem;
+      border-bottom: 1px solid var(--border);
+    }
+    tr:last-child { border-bottom: 0; }
+    tr.selected { background: var(--panel-raised); }
+    td { display: block; height: auto; border-bottom: 0; padding-block: 0.15rem; }
+    .box td { width: auto; }
+    td.c-name { grid-area: 1 / 1 / 2 / 4; }
+    td.c-ip { grid-area: 2 / 1; }
+    td.c-type { grid-area: 2 / 2; }
+    td.c-ssh { grid-area: 2 / 3; }
+    td.c-actions { grid-area: 1 / 4 / 3 / 5; align-self: center; }
+  }
+  @container (max-width: 30rem) {
+    .c-ssh { display: none; }
   }
 
   .form { display: flex; flex-direction: column; gap: 0.9rem; }

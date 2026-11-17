@@ -205,6 +205,10 @@ The app must work well on all three and when moved between them.
   machine list, a terminal and container logs all at once.
 - Text and controls follow Windows' display scaling, so they stay a readable
   size if a monitor is scaled to 125% or 150%.
+- The whole app can be zoomed from 50% to 200%: Ctrl with + / - (0 for 100%),
+  Ctrl with the mouse wheel, or the buttons in Settings. The size is kept for
+  next time, and every screen stays usable at 200% in the smallest window
+  (960x600).
 - The app remembers its window size and position, and which monitor it was on.
 - Done when: every screen is checked at all three resolutions, at 100% and
   125% scaling, with no cut-off text or overlapping parts.

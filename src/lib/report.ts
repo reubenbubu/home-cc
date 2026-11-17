@@ -6,7 +6,7 @@
 export const REPO_URL = "https://github.com/reubenbubu/home-cc";
 
 /** Which part of the app a problem came from. Decides where the agent is told to start looking. */
-export type Area = "stats" | "trust" | "scan" | "status" | "devices" | "secrets" | "settings" | "live" | "screen";
+export type Area = "stats" | "trust" | "scan" | "status" | "devices" | "secrets" | "settings" | "live" | "zoom" | "screen";
 
 /** Source files to start from for each area. Paths are from the root of the repository. */
 export const AREA_FILES: Record<Area, string[]> = {
@@ -46,6 +46,10 @@ export const AREA_FILES: Record<Area, string[]> = {
   settings: [
     "src-tauri/src/settings.rs (saving and checking settings)",
     "src/lib/settings.svelte.ts and src/routes/settings/+page.svelte",
+  ],
+  zoom: [
+    "src/lib/zoom.svelte.ts and src/lib/zoom.ts (zooming the app, remembering the size)",
+    "src-tauri/capabilities/default.json (the permission to zoom the window)",
   ],
   live: [
     "src/lib/live.svelte.ts (listening for back-end events)",

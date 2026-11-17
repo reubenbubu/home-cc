@@ -9,6 +9,7 @@
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import { zoom } from "$lib/zoom.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Problem from "$lib/components/Problem.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
@@ -17,6 +18,11 @@
 
   // One load of everything, then the stores follow the back end's events.
   onMount(() => startLive());
+
+  // The size the owner left the app at, before the first screen is seen (the app stays out of sight until
+  // the window has zoomed); then the zoom keys work everywhere.
+  zoom.restore();
+  onMount(() => zoom.listen());
 
   /** True in a browser with the sample back end instead of the real one. */
   const sample = "__HOME_CC_MOCK__" in window;
@@ -57,7 +63,7 @@
   }
 </script>
 
-<div class="shell">
+<div class="shell" class:zooming={!zoom.ready}>
   <nav class="sidebar" aria-label="Main">
     <div class="brand">
       <div class="logo" aria-hidden="true"></div>
@@ -79,6 +85,17 @@
     {#if sample}<div class="sample" title="Not connected to the app: this is made-up sample data">Sample<span class="nav-label">&nbsp;data</span></div>{/if}
   </nav>
   <main class="content">
+    <!-- A size that couldn't be set by a key or the wheel, or put back as the app started. Settings shows
+         it next to its own size buttons instead. -->
+    {#if zoom.problem && !page.url.pathname.startsWith("/settings")}
+      <div class="zoom-problem">
+        <Problem
+          problem={{ area: "zoom", what: zoom.problem.what, error: zoom.problem.error }}
+          message="{zoom.problem.what}: {zoom.problem.error}"
+        />
+        <button class="btn" type="button" onclick={() => zoom.dismiss()}>OK</button>
+      </div>
+    {/if}
     {#each problems as problem (problem.area)}
       <Problem class="load-problem" {problem} message="{problem.lead}: {problem.error}" />
     {/each}
@@ -101,7 +118,10 @@
 </div>
 
 <style>
-  .shell { display: flex; height: 100vh; }
+  /* --page-zoom is only set in a browser with the sample data, where zoom.svelte.ts scales the page, which
+     also scales vh. In the app the window itself zooms and this is plain 100vh. */
+  .shell { display: flex; height: calc(100vh / var(--page-zoom, 1)); }
+  .shell.zooming { visibility: hidden; }
 
   .sidebar {
     width: 220px;
@@ -154,6 +174,19 @@
     padding: 1.5rem 1.85rem;
   }
   .content :global(.load-problem) { margin-bottom: var(--gap); }
+  /* Stays in view while the screen scrolls, as it can come from a key pressed anywhere on it. */
+  .zoom-problem {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-bottom: var(--gap);
+    background: var(--bg);
+  }
+  .zoom-problem :global(.alert) { flex: 1; min-width: 0; }
+  .zoom-problem .btn { flex: none; }
   .broken { display: flex; flex-direction: column; gap: 0.75rem; max-width: 46rem; border-color: var(--bad); }
   .broken h1 { margin: 0; font-size: 1.3rem; font-weight: 600; }
   .broken p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
@@ -164,5 +197,9 @@
     .brand { justify-content: center; padding-inline: 0; }
     .brand-name, .nav-label { display: none; }
     .nav-item { justify-content: center; padding: 0; }
+  }
+  /* A small window zoomed right in: less room lost around the edges. */
+  @media (max-width: 600px) {
+    .content { padding: 1rem; }
   }
 </style>
