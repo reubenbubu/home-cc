@@ -96,7 +96,8 @@ const MAX_TEXT: usize = 200;
 /// `prev` is the `cpu_ticks` from the previous reading of the same machine.
 /// `first_use` is handed the machine's identity on a first connection (no
 /// `login.known_key`), once and before anything is offered to the machine, so
-/// it can be stored even if the login or the reading then fails; see
+/// the caller has it even if the login or the reading then fails. It may be
+/// stored there and then only if no password is stored for the machine: see
 /// [`ssh::connect`].
 /// Bounded by timeouts: never takes more than about 30 seconds.
 pub async fn collect(
@@ -824,8 +825,8 @@ disk=\n\
         sendable(&collect(&login, Os::Linux, None, &|_| {}));
     }
 
-    /// The identity reaches the caller on a first connection even when the login then
-    /// fails, so it can be stored whatever happens next.
+    /// The identity reaches the caller on a first connection before the login, so it
+    /// is there even when the login then fails.
     #[tokio::test]
     async fn first_connection_identity_is_handed_over_before_the_login() {
         use crate::ssh::test_server;

@@ -62,8 +62,9 @@ fn fail(e: &SshError, took: Duration) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// What the app does on a first connection is store the identity. Here it is printed,
-/// straight away, so the output shows it came before the login.
+/// On a first connection the app stores the identity here, unless a password is stored
+/// for the machine: then it waits for the owner to approve it (see `ssh::connect`). Here
+/// it is printed, straight away, so the output shows it came before the login.
 fn first_use(key: &HostKey) {
     println!("first use: {} {}", key.algorithm, key.fingerprint);
 }

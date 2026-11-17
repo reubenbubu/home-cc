@@ -42,7 +42,9 @@ pub struct Login {
     pub user: String,
     /// The identity stored for this machine, if it has been reached before.
     /// None means a first connection: whatever the server presents is accepted for
-    /// logging in with a key, but the stored password is not sent to it.
+    /// logging in with a key, but the stored password is not sent to it. An identity in
+    /// here is what lets the stored password out, so [`connect`] says when one may be
+    /// stored.
     pub known_key: Option<HostKey>,
     /// Private key file chosen in settings. None means try the usual files
     /// in the user's .ssh folder.
@@ -50,6 +52,15 @@ pub struct Login {
     pub key_passphrase: Option<String>,
     /// Password for this machine, if the owner stored one.
     pub password: Option<String>,
+}
+
+impl Login {
+    /// True if a password is stored for this machine; an empty one does not count. On a
+    /// first connection this decides whether the identity handed to `first_use` may be
+    /// stored without asking the owner: see [`connect`].
+    pub fn has_password(&self) -> bool {
+        self.password.as_deref().is_some_and(|p| !p.is_empty())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -147,16 +158,23 @@ impl std::fmt::Debug for Session {
 /// offered.
 ///
 /// If it is not set, this is a first connection. `first_use` is called once with the
-/// identity the server showed, before anything is offered to it, so the caller can store
-/// the identity whatever happens next. Key files and the agent are then tried as usual:
-/// they give the server nothing it could use elsewhere. The stored password is not sent.
-/// If nothing else gets in and a password is stored, this fails with
+/// identity the server showed, before anything is offered to it, so the caller has it
+/// even if the login or what follows then fails. Key files and the agent are then tried
+/// as usual: they give the server nothing it could use elsewhere. The stored password is
+/// not sent. If nothing else gets in and a password is stored, this fails with
 /// [`SshError::NewHost`]; the password gets its turn once the owner has approved the
 /// identity and it comes back in `login.known_key`.
 ///
-/// An identity in `login.known_key` counts as approved, wherever it came from. A caller
-/// that stores what `first_use` hands it and passes it back next time has approved it
-/// without asking anyone, so where a password is stored that should wait for the owner.
+/// What `first_use` may do with the identity depends on [`Login::has_password`], because
+/// an identity in `login.known_key` counts as approved by the owner, wherever it came
+/// from, and the stored password is sent to it:
+/// - No password stored: store it there and then. Nothing that could be used elsewhere
+///   is ever sent to this machine, and a later change of identity is noticed.
+/// - A password stored: do NOT store it from `first_use`. It would come back as
+///   `known_key` on the next connection and the password would go to a machine nobody
+///   has looked at. Store it only once the owner has approved the identity shown with
+///   [`SshError::NewHost`], or once this function has returned a [`Session`] (a key got
+///   in without the password; the identity is in [`Session::host_key`]).
 pub async fn connect(
     login: &Login,
     first_use: &(dyn Fn(&HostKey) + Send + Sync),
@@ -215,7 +233,7 @@ pub async fn connect(
         }
     };
     if !logged_in {
-        let password_stored = login.password.as_deref().is_some_and(|p| !p.is_empty());
+        let password_stored = login.has_password();
         let windows_server = server_version.contains("Windows");
         let message = auth_message(host, user, &auth.tried, password_stored, windows_server);
         say_goodbye(&handle).await;
@@ -1895,6 +1913,16 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_password_is_not_a_stored_password() {
+        let mut login = login();
+        assert!(!login.has_password());
+        login.password = Some(String::new());
+        assert!(!login.has_password());
+        login.password = Some("secret".into());
+        assert!(login.has_password());
+    }
+
+    #[test]
     fn identity_problems_read_as_plain_words() {
         let old = HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:old".into() };
         let new = HostKey { algorithm: "ssh-rsa".into(), fingerprint: "SHA256:new".into() };
@@ -2004,6 +2032,52 @@ mod tests {
             other => panic!("expected a failed login, got {other:?}"),
         }
         assert_eq!(server.attempts(), ["none", "password not the password"]);
+    }
+
+    /// The rule for callers in the notes on [`connect`], followed over several
+    /// connections the way a background reading makes them: with a password stored the
+    /// identity is not stored from `first_use`, so the password stays here until the
+    /// owner approves, however many times the machine is tried.
+    #[tokio::test]
+    async fn storing_the_identity_by_the_rule_keeps_the_password_back_until_approved() {
+        let server = test_server::start(&[MethodKind::Password]).await;
+        let stored: Mutex<Option<HostKey>> = Mutex::new(None);
+        let mut login = server.login();
+        login.password = Some(PASSWORD.into());
+        for _ in 0..3 {
+            login.known_key = stored.lock().unwrap().clone();
+            let first_use = |key: &HostKey| {
+                if !login.has_password() {
+                    *stored.lock().unwrap() = Some(key.clone());
+                }
+            };
+            match connect(&login, &first_use).await {
+                Err(SshError::NewHost(key)) => assert_eq!(key, server.host_key),
+                other => panic!("expected to be asked to approve the identity, got {other:?}"),
+            }
+        }
+        assert_eq!(*stored.lock().unwrap(), None);
+        assert_eq!(server.attempts(), ["none", "none", "none"]);
+
+        // The owner approves what was shown: only now does the password leave this PC.
+        login.known_key = Some(server.host_key.clone());
+        let session = connect(&login, &never).await.expect("the password is accepted");
+        assert_eq!(server.attempts().last(), Some(&format!("password {PASSWORD}")));
+        session.close().await;
+
+        // With no password stored the same rule stores the identity on the spot, even
+        // though the login then fails, and the next connection is checked against it.
+        let server = test_server::start(&[MethodKind::Password]).await;
+        let mut login = server.login();
+        let first_use = |key: &HostKey| {
+            if !login.has_password() {
+                *stored.lock().unwrap() = Some(key.clone());
+            }
+        };
+        assert!(matches!(connect(&login, &first_use).await, Err(SshError::AuthFailed(_))));
+        assert_eq!(*stored.lock().unwrap(), Some(server.host_key.clone()));
+        login.known_key = stored.lock().unwrap().clone();
+        assert!(matches!(connect(&login, &never).await, Err(SshError::AuthFailed(_))));
     }
 
     #[tokio::test]
