@@ -16,17 +16,29 @@ const HEADER: usize = 32;
 const PLACEHOLDERS: [&str; 2] = ["Private", "IEEE Registration Authority"];
 
 /// Made-up address ranges that virtual machine software always uses, so they
-/// can be labelled even though no maker registered them.
-const VIRTUAL: [(&[u8], &str); 3] = [
-    (&[0x52, 0x54, 0x00], "QEMU/KVM"),
-    (&[0x02, 0x42], "Docker"),
-    (&[0x0A, 0x00, 0x27], "VirtualBox"),
+/// can be labelled even though no maker registered them. Every entry is three
+/// bytes long: a shorter one would also claim too many of the private
+/// addresses that phones make up (about one in four million match one entry).
+///
+/// Docker builds an address from 02:42 and the container's own IP address,
+/// so the third byte is the start of a home network range (10, 172 or 192).
+const VIRTUAL: [([u8; 3], &str); 5] = [
+    ([0x52, 0x54, 0x00], "QEMU/KVM"),
+    ([0x02, 0x42, 0x0A], "Docker"),
+    ([0x02, 0x42, 0xAC], "Docker"),
+    ([0x02, 0x42, 0xC0], "Docker"),
+    ([0x0A, 0x00, 0x27], "VirtualBox"),
 ];
 
 /// Maker name for a hardware address in any common format
 /// ("aa:bb:cc:dd:ee:ff", "AA-BB-..."). None when it is unknown, randomised
 /// (phones and laptops often use a made-up address per network) or not a
 /// real device address.
+///
+/// One exception: virtual machines and containers also use made-up addresses,
+/// but from fixed ranges, so for those the answer is the name of the software
+/// ("QEMU/KVM", "Docker", "VirtualBox") rather than of a maker, and
+/// `is_randomised` is false.
 pub fn vendor(mac: &str) -> Option<String> {
     let mac = parse_mac(mac)?;
     if !is_device(mac) {
@@ -39,7 +51,7 @@ pub fn vendor(mac: &str) -> Option<String> {
 }
 
 /// True for an address a device made up for itself rather than one its maker
-/// assigned.
+/// assigned. False for the fixed virtual machine ranges that `vendor` names.
 pub fn is_randomised(mac: &str) -> bool {
     parse_mac(mac).is_some_and(|mac| is_device(mac) && is_local(mac) && virtual_label(mac).is_none())
 }
@@ -278,6 +290,18 @@ mod tests {
         assert_eq!(vendor("0a:00:27:00:00:10").as_deref(), Some("VirtualBox"));
         assert!(!is_randomised("52:54:00:12:34:56"));
         assert!(!looks_like_mesh("QEMU/KVM"));
+        // Docker: 02:42 and then the container's address (10.x, 172.x, 192.x).
+        for mac in ["02:42:0a:00:01:05", "02:42:ac:12:00:03", "02:42:c0:a8:44:32"] {
+            assert_eq!(vendor(mac).as_deref(), Some("Docker"), "{mac}");
+            assert!(!is_randomised(mac), "{mac}");
+        }
+        // Any other address starting 02:42 is a phone's or laptop's private one.
+        for mac in ["02:42:5e:91:3c:07", "02:42:00:00:00:01", "02:42:ab:00:00:01", "02:42:c1:a8:44:32"] {
+            assert_eq!(vendor(mac), None, "{mac}");
+            assert!(is_randomised(mac), "{mac}");
+        }
+        // Labels are only for made-up addresses and never shorter than three bytes.
+        assert!(VIRTUAL.iter().all(|(prefix, _)| is_local([prefix[0], prefix[1], prefix[2], 0, 0, 0])));
     }
 
     #[test]

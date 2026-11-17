@@ -99,11 +99,18 @@ fn choose(ips: &[Ipv4Addr], sources: &Sources) -> HashMap<Ipv4Addr, String> {
             sources.netbios.get(ip).map(|name| tidy(name)),
             generic.map(tidy),
         ];
-        if let Some(name) = candidates.into_iter().flatten().find(|name| !name.is_empty()) {
+        if let Some(name) = candidates.into_iter().flatten().find(|name| is_readable(name)) {
             out.insert(*ip, name);
         }
     }
     out
+}
+
+/// True when a tidied name has at least one letter or digit. Dashes, symbols
+/// or characters that draw as blank would show as an empty-looking row, so
+/// such a name gives way to the next source.
+fn is_readable(name: &str) -> bool {
+    name.chars().any(char::is_alphanumeric)
 }
 
 fn whole_name(name: &str) -> &str {
@@ -159,10 +166,34 @@ fn tidy(text: &str) -> String {
     cut.trim_end().to_string()
 }
 
-/// Characters that take no space or change the direction of the text
-/// around them, which could make one name look like another.
+/// Characters that draw nothing, draw as blank, or change the direction of
+/// the text around them, which could make one name look like another or like
+/// no name at all. Several of them count as letters (the Hangul fillers), so
+/// they must go before a name is checked for being readable.
 fn is_invisible(c: char) -> bool {
-    matches!(c, '\u{AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{34F}'
+            | '\u{61C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{2800}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
 }
 
 /// Sends `question` to every address on `port`, then gathers names from the
@@ -376,6 +407,36 @@ mod tests {
             netbios: map(&[(1, "   ")]),
         });
         assert_eq!(names, map(&[(2, "ok")]));
+
+        // Names that would draw as blank are no names either: fillers that
+        // count as letters, blank symbols, and marks that only steer the text.
+        let names = chosen(Sources {
+            reverse: map(&[(1, "\u{3164}\u{3164}.lan"), (2, "---.lan")]),
+            mdns: map(&[
+                (1, "\u{3164}\u{3164}"),
+                (2, "\u{115F}\u{1160}\u{FFA0}"),
+                (3, "\u{2800}\u{61C}\u{180E}\u{FE0F}\u{FFF9}\u{E0041}"),
+                (4, "\u{3164}"),
+                (5, "-_-"),
+                (6, "\u{FFFD}\u{FFFD}"),
+            ]),
+            netbios: map(&[(2, "TV"), (4, "LAPTOP-7"), (5, "\u{61C}")]),
+        });
+        assert_eq!(names, map(&[(2, "TV"), (4, "LAPTOP-7")]));
+        // Every character on the list is dropped, wherever it sits in a name.
+        let hidden = "\u{AD}\u{34F}\u{61C}\u{115F}\u{1160}\u{17B4}\u{180B}\u{180F}\u{200B}\u{202E}\u{2066}\
+                      \u{206F}\u{2800}\u{3164}\u{FE00}\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}\u{FFFB}\u{1BCA0}\
+                      \u{1D173}\u{E0001}\u{E007F}\u{E0FFF}";
+        for c in hidden.chars() {
+            assert!(is_invisible(c), "{:x}", u32::from(c));
+            assert_eq!(tidy(&format!("a{c}b")), "ab", "{:x}", u32::from(c));
+        }
+        assert!(!is_readable(&tidy(hidden)));
+        // Real names in other scripts, and ones with symbols, are kept.
+        for name in ["한글-pc", "Büro 2", "7", "テレビ", "🏠 hub"] {
+            assert_eq!(tidy(name), name);
+            assert!(is_readable(name), "{name}");
+        }
         // Only addresses that were asked for come back.
         let sources = Sources { mdns: map(&[(1, "one"), (200, "stray")]), ..Default::default() };
         assert_eq!(choose(&[ip(1)], &sources), map(&[(1, "one")]));
