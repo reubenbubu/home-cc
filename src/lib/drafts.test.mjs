@@ -1,7 +1,7 @@
 // Run with "npm test" (Node reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { differs, fileOnReturn, sameValues } from "./drafts.ts";
+import { differs, draftFor, fileOnReturn, replacesFileDraft, sameValues } from "./drafts.ts";
 
 test("the same values, looking inside lists and objects", () => {
   assert.ok(sameValues("a", "a"));
@@ -39,4 +39,21 @@ test("a file seen again keeps the owner's text, and says when the host's copy ch
   assert.deepEqual(fileOnReturn({ original: "a", text: "a2" }, "b"), { original: "b", text: "a2", hostChanged: true });
   // The host now holds exactly what the owner typed (saved elsewhere): nothing left unsaved.
   assert.deepEqual(fileOnReturn({ original: "a", text: "b" }, "b"), { original: "b", text: "b", hostChanged: false });
+});
+
+test("a file's draft is used for every read of that file, and isn't overwritten by another file unasked", () => {
+  const edited = { path: "/srv/media/compose.yml", original: "a: 1\n", text: "a: 2\n" };
+  assert.equal(draftFor(edited, "/srv/media/compose.yml"), edited);
+  assert.equal(draftFor(edited, "/srv/media/.env"), undefined);
+  assert.equal(draftFor(undefined, "/srv/media/.env"), undefined);
+
+  const other = { path: "/srv/media/.env", original: "X=1\n", text: "X=1\n" };
+  // Its file couldn't be read again, and another one was opened: the edits stay held.
+  assert.ok(!replacesFileDraft(edited, other));
+  // Once the owner types into the other file, that is what they are working on now.
+  assert.ok(replacesFileDraft(edited, { ...other, text: "X=2\n" }));
+  // A draft without edits, or one for the same file, simply follows what is shown.
+  assert.ok(replacesFileDraft({ ...edited, text: edited.original }, other));
+  assert.ok(replacesFileDraft(edited, { ...edited, text: "a: 3\n" }));
+  assert.ok(replacesFileDraft(undefined, other));
 });

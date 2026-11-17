@@ -45,3 +45,18 @@ export function fileOnReturn(draft: Pick<FileDraft, "original" | "text">, onHost
   if (!edited || draft.text === onHost) return { original: onHost, text: onHost, hostChanged: false };
   return { original: onHost, text: draft.text, hostChanged: onHost !== draft.original };
 }
+
+/** The file draft to use when a file is opened: the one held for that very file, if there is one, so every
+ *  read of it (a retry after an error, a click on its tab) goes through fileOnReturn and keeps the owner's
+ *  text. */
+export function draftFor(held: FileDraft | undefined, path: string): FileDraft | undefined {
+  return held?.path === path ? held : undefined;
+}
+
+/** Whether the file shown now may take the place of the draft held. Not when the draft holds unsaved text for
+ *  another file that couldn't be shown again (its read failed, or it is no longer listed) while nothing has
+ *  been typed into the file shown: that would lose the owner's text without a word. */
+export function replacesFileDraft(held: FileDraft | undefined, now: FileDraft): boolean {
+  if (!held || held.path === now.path) return true;
+  return held.text === held.original || now.text !== now.original;
+}

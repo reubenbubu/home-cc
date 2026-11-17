@@ -3,7 +3,7 @@
   // confirm, with a copy of the old file kept next to it on the host), then bring the stack up with the change.
   import { onMount, untrack } from "svelte";
   import { errorText, type Device } from "$lib/api";
-  import { fileOnReturn, type FileDraft } from "$lib/drafts";
+  import { draftFor, fileOnReturn, replacesFileDraft, type FileDraft } from "$lib/drafts";
   import { drafts } from "$lib/drafts.svelte";
   import { dockerApi, type DockerHost, type SavedFile, type Stack } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
@@ -30,11 +30,19 @@
   /** The text came back from before the owner left the screen. */
   let restored = $state(false);
 
+  /** Unsaved text from before whose file couldn't be shown again (its read failed, or it is no longer
+   *  listed). It stays held until it can be, or until the owner types into another file or closes. */
+  let kept = $state<FileDraft | null>(null);
+
   // The file open and the owner's unsaved text stay while another screen is shown (drafts.svelte.ts). Only
-  // Close (or a save) lets them go.
+  // Close (or a save) lets them go; a file shown in place of one that couldn't be read doesn't (replacesFileDraft).
   const draftKey = untrack(() => `docker-file:${host.deviceId}:${stack.name}`);
   $effect(() => {
-    if (path != null) drafts.set<FileDraft>(draftKey, { path, original, text });
+    if (path == null) return;
+    const now: FileDraft = { path, original, text };
+    if (!replacesFileDraft(drafts.get<FileDraft>(draftKey), now)) return;
+    drafts.set<FileDraft>(draftKey, now);
+    kept = null;
   });
 
   function close() {
@@ -54,16 +62,25 @@
       files = await dockerApi.stackFiles(host.deviceId, stack.name);
       const draft = drafts.get<FileDraft>(draftKey);
       if (draft && files.includes(draft.path)) await open(draft.path, draft);
-      else if (files.length && (path == null || !files.includes(path))) await open(files[0]);
+      else if (draft && draft.text !== draft.original) {
+        // Edited, and no longer listed: try it anyway. If it can't be read, the edits stay held (kept) and
+        // the first file is shown beside the note.
+        await open(draft.path, draft);
+        if (path == null && files.length) await open(files[0]);
+      } else if (files.length && (path == null || !files.includes(path))) await open(files[0]);
     } catch (e) {
       error = { what: `Listing the files of the "${stack.name}" stack`, message: errorText(e) };
+      const draft = drafts.get<FileDraft>(draftKey);
+      if (draft && draft.text !== draft.original) kept = draft;
     } finally {
       loading = false;
     }
   }
 
-  /** Reads a file from the host. With a draft, the owner's text from before stays (see fileOnReturn). */
+  /** Reads a file from the host. With a draft, the owner's text from before stays (see fileOnReturn); the
+   *  draft held for this file is used when none is passed, so a retry or a click on its tab keeps it too. */
   async function open(next: string, draft?: FileDraft) {
+    draft ??= draftFor(drafts.get<FileDraft>(draftKey), next);
     loading = true;
     error = null;
     saved = null;
@@ -77,6 +94,7 @@
       restored = shown.text !== shown.original;
     } catch (e) {
       error = { what: `Opening ${next}`, message: errorText(e) };
+      if (draft && draft.text !== draft.original) kept = draft;
     } finally {
       loading = false;
     }
@@ -118,7 +136,7 @@
       <h2 class="ellipsis">{stack.name}: files</h2>
       {#if stack.workingDir}<span class="muted small mono ellipsis" title={stack.workingDir}>{stack.workingDir}</span>{/if}
     </div>
-    {#if changed}
+    {#if changed || kept}
       <ConfirmButton label="Close" confirmLabel="Close without saving" onconfirm={close} />
     {:else}
       <button class="icon-btn" aria-label="Close the files" title="Close" onclick={close}><Icon path={dockerIcons.close} size={16} /></button>
@@ -146,6 +164,19 @@
 
   {#if error}
     <Problem problem={dockerProblem(device, `${error.what} on "${name}"`, error.message, host)} />
+  {/if}
+
+  {#if kept}
+    <div class="alert warn small" role="status">
+      <p>
+        Your unsaved changes to <span class="mono">{baseName(kept.path)}</span> are still kept, but the file couldn't be
+        opened again{files.length && !files.includes(kept.path) ? ": it is no longer among this stack's files" : ""}.
+        Try again to get back to them. Typing into another file, or closing, lets them go.
+      </p>
+      <div class="bar">
+        <button class="btn small" disabled={loading || saving} onclick={() => kept && (files.length ? open(kept.path, kept) : listFiles())}>Try again</button>
+      </div>
+    </div>
   {/if}
 
   {#if path != null}
