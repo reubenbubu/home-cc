@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KIND_LABELS, OS_LABELS, type Device, type MachineStats, type StatsErrorKind } from "$lib/api";
+  import { OS_LABELS, type Device, type MachineStats, type StatsErrorKind } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { devices, isMachine } from "$lib/devices.svelte";
   import { ms, pct, relTime, share } from "$lib/format";
@@ -18,10 +18,15 @@
   import DockerSummary from "$lib/components/docker/DockerSummary.svelte";
   import { summarise } from "$lib/docker/logic";
   import { docker } from "$lib/docker/store.svelte";
+  import { byKind, kindHeading } from "$lib/overview";
 
   const byName = (a: Device, b: Device) => a.name.localeCompare(b.name, undefined, { numeric: true });
   const shown = $derived(devices.list.filter((d) => d.kind !== "ignore"));
   const machines = $derived(shown.filter(isMachine).sort(byName));
+  /** PCs, servers, VMs and containers, as cards under a heading for their type. */
+  const kinds = $derived(byKind(machines));
+  /** Printers, TVs and the like: mostly no stats to show, so a small tile like the other devices. */
+  const appliances = $derived(machines.filter((d) => d.kind === "appliance"));
   const meshNodes = $derived(shown.filter((d) => d.kind === "mesh").sort(byName));
   const others = $derived(shown.filter((d) => d.kind === "other" && d.reviewed).sort(byName));
   const fresh = $derived(shown.filter((d) => !d.reviewed));
@@ -118,6 +123,66 @@
   {/if}
 {/snippet}
 
+{#snippet card(m: Device)}
+  {@const entry = stats.get(m.id)}
+  {@const st = entry?.stats}
+  {@const disk = st ? fullestDisk(st) : null}
+  {@const ram = share(st?.memUsedKb, st?.memTotalKb)}
+  <!-- This PC is read here, without SSH: it needs no SSH user. -->
+  {@const local = stats.local(m)}
+  <article class="panel card">
+    <div class="card-top">
+      <div class="card-name">
+        <StatusDot health={status.health(m)} />
+        <span class="ellipsis" title={m.name}>{m.name}</span>
+      </div>
+      {@render response(m)}
+    </div>
+    <div class="muted small where">
+      <Address host={m.host} known={m.hostname} />
+      <!-- The type is the heading above. -->
+      <span class="ellipsis">· {OS_LABELS[m.os]}</span>
+    </div>
+    <Sparkline history={status.get(m)?.history ?? []} />
+    {#if !m.sshUser && !local}
+      <a class="small quiet-link" href="/machines?edit={m.id}">Add an SSH user to see stats</a>
+    {:else if entry?.error}
+      <a class="small note" href="/machines" title={entry.error}>
+        <Icon path={icons.warn} size={13} />
+        {(entry.errorKind && NOTE[entry.errorKind]) || NOTE.other}
+      </a>
+    {:else if st}
+      <div class="minis" title={local ? "Read on this PC, without SSH" : undefined}>
+        {#if st.cpuPct == null && st.load1 != null}
+          <MiniMeter label="Load" value={null} text={st.load1.toFixed(2)} />
+        {:else}
+          <MiniMeter label="CPU" value={st.cpuPct} />
+        {/if}
+        <MiniMeter
+          label="RAM"
+          value={ram}
+          warn={ram != null && ram > settings.value.ramWarnPct ? `RAM is above your ${settings.value.ramWarnPct}% warning level` : null}
+        />
+        <MiniMeter
+          label="Disk"
+          value={disk?.used ?? null}
+          warn={disk && disk.used > settings.value.diskWarnPct ? `Disk ${disk.mount} is nearly full` : null}
+        />
+      </div>
+    {:else}
+      <div class="muted small">Waiting for the first reading…</div>
+    {/if}
+  </article>
+{/snippet}
+
+{#snippet tile(d: Device)}
+  <div class="chip">
+    <StatusDot health={status.health(d)} />
+    <span class="ellipsis" title={d.name}>{d.name}</span>
+    {@render response(d)}
+  </div>
+{/snippet}
+
 <header class="page-head">
   <h1>Overview</h1>
   <div class="actions">
@@ -161,87 +226,59 @@
 
 <div class="layout">
   <div class="main">
-    <section>
-      <h2 class="section-title">Machines</h2>
-      {#if devices.loaded && machines.length === 0}
-        <div class="panel empty">
-          <p>No machines yet. Add your PCs, VMs and Proxmox host, or scan the network and pick them out.</p>
-          <a class="btn primary link-btn" href="/machines?add=1">Add your first machine</a>
-        </div>
-      {:else}
-        <div class="auto-grid">
-          {#each machines as m (m.id)}
-            {@const entry = stats.get(m.id)}
-            {@const st = entry?.stats}
-            {@const disk = st ? fullestDisk(st) : null}
-            {@const ram = share(st?.memUsedKb, st?.memTotalKb)}
-            <!-- This PC is read here, without SSH: it needs no SSH user. -->
-            {@const local = stats.local(m)}
-            <!-- An appliance's system is mostly not known ("Other"), and then not worth its place. -->
-            {@const system = m.kind === "appliance" && m.os === "other" ? [] : [OS_LABELS[m.os]]}
-            <article class="panel card">
-              <div class="card-top">
-                <div class="card-name">
-                  <StatusDot health={status.health(m)} />
-                  <span class="ellipsis" title={m.name}>{m.name}</span>
-                </div>
-                {@render response(m)}
-              </div>
-              <div class="muted small where">
-                <Address host={m.host} known={m.hostname} />
-                <span class="ellipsis">· {[...system, KIND_LABELS[m.kind]].join(" · ")}</span>
-              </div>
-              <Sparkline history={status.get(m)?.history ?? []} />
-              {#if !m.sshUser && !local && m.kind === "appliance"}
-                <!-- Most appliances have no SSH, so there are no stats to ask for: just when it was last there. -->
-                <div class="muted small">Last seen {relTime(status.get(m)?.lastSeen ?? m.lastSeen, clock.now)}</div>
-              {:else if !m.sshUser && !local}
-                <a class="small quiet-link" href="/machines?edit={m.id}">Add an SSH user to see stats</a>
-              {:else if entry?.error}
-                <a class="small note" href="/machines" title={entry.error}>
-                  <Icon path={icons.warn} size={13} />
-                  {(entry.errorKind && NOTE[entry.errorKind]) || NOTE.other}
-                </a>
-              {:else if st}
-                <div class="minis" title={local ? "Read on this PC, without SSH" : undefined}>
-                  {#if st.cpuPct == null && st.load1 != null}
-                    <MiniMeter label="Load" value={null} text={st.load1.toFixed(2)} />
-                  {:else}
-                    <MiniMeter label="CPU" value={st.cpuPct} />
-                  {/if}
-                  <MiniMeter
-                    label="RAM"
-                    value={ram}
-                    warn={ram != null && ram > settings.value.ramWarnPct ? `RAM is above your ${settings.value.ramWarnPct}% warning level` : null}
-                  />
-                  <MiniMeter
-                    label="Disk"
-                    value={disk?.used ?? null}
-                    warn={disk && disk.used > settings.value.diskWarnPct ? `Disk ${disk.mount} is nearly full` : null}
-                  />
-                </div>
-              {:else}
-                <div class="muted small">Waiting for the first reading…</div>
-              {/if}
-            </article>
-          {/each}
-        </div>
-      {/if}
-    </section>
-
-    {#if others.length > 0}
+    {#if kinds.length > 0 || (devices.loaded && machines.length === 0)}
       <section>
-        <h2 class="section-title">Other devices</h2>
-        <div class="chips">
-          {#each others as d (d.id)}
-            <div class="chip">
-              <StatusDot health={status.health(d)} />
-              <span class="ellipsis" title={d.name}>{d.name}</span>
-              {@render response(d)}
-            </div>
-          {/each}
-        </div>
+        <h2 class="section-title">Machines</h2>
+        {#if machines.length === 0}
+          <div class="panel empty">
+            <p>No machines yet. Add your PCs, VMs and Proxmox host, or scan the network and pick them out.</p>
+            <a class="btn primary link-btn" href="/machines?add=1">Add your first machine</a>
+          </div>
+        {:else}
+          <div class="kinds">
+            {#each kinds as g (g.kind)}
+              {@const down = downOf(g.items)}
+              <section class="kind" aria-labelledby="kind-{g.kind}" style="--n: {g.items.length}">
+                <h3 class="kind-title" id="kind-{g.kind}">
+                  {kindHeading(g.kind, g.items.length)} <span class="muted">· {g.items.length}</span>{#if down > 0}
+                    {" "}<span class="down">· {down} down</span>{/if}
+                </h3>
+                <div class="auto-grid">
+                  {#each g.items as m (m.id)}
+                    {@render card(m)}
+                  {/each}
+                </div>
+              </section>
+            {/each}
+          </div>
+        {/if}
       </section>
+    {/if}
+
+    <!-- Below the cards, always on a line of their own; side by side when they fit. -->
+    {#if appliances.length > 0 || others.length > 0}
+      <div class="tile-groups">
+        {#if appliances.length > 0}
+          <section class="tile-group" style="--n: {appliances.length}">
+            <h2 class="section-title">Appliances</h2>
+            <div class="chips">
+              {#each appliances as d (d.id)}
+                {@render tile(d)}
+              {/each}
+            </div>
+          </section>
+        {/if}
+        {#if others.length > 0}
+          <section class="tile-group" style="--n: {others.length}">
+            <h2 class="section-title">Other devices</h2>
+            <div class="chips">
+              {#each others as d (d.id)}
+                {@render tile(d)}
+              {/each}
+            </div>
+          </section>
+        {/if}
+      </div>
     {/if}
   </div>
 
@@ -316,6 +353,18 @@
   .note :global(svg) { color: var(--warn); flex: none; }
   .note:hover, .quiet-link:hover { text-decoration: underline; }
   .quiet-link { color: var(--muted); text-decoration: none; }
+
+  /* Types share a row when their cards fit side by side (each asks for room for its own cards), so a wide
+     window isn't a column of half-empty rows; a type with more cards than fit wraps them as before. */
+  .kinds { display: flex; flex-wrap: wrap; gap: 1.1rem var(--gap); }
+  .kind { flex: 1 1 calc(var(--n) * 18.5rem + (var(--n) - 1) * var(--gap)); min-width: 0; max-width: 100%; }
+  .kind-title { margin: 0 0 0.55rem; font-size: 1rem; font-weight: 600; color: var(--text-soft); }
+  .kind-title .down { font-weight: 600; }
+
+  /* Each takes room for its own tiles and the next follows it on the same line, wrapping only when it
+     doesn't fit; a long list wraps its tiles inside. */
+  .tile-groups { display: flex; flex-wrap: wrap; gap: 1.4rem 2rem; }
+  .tile-group { flex: 0 1 calc(var(--n) * 15rem + (var(--n) - 1) * 0.5rem); min-width: min(100%, 15rem); max-width: 100%; }
 
   .chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); gap: 0.5rem; }
   .chip {

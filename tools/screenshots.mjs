@@ -1231,6 +1231,49 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "on the Overview the machines are under a heading per type, and appliances are small tiles like the other devices",
+      path: "/",
+      viewport: { width: 1920, height: 1080 },
+      async run(page) {
+        await page.locator(".card").first().waitFor();
+        const got = await page.evaluate(() => ({
+          headings: [...document.querySelectorAll(".kind-title")].map((h) => h.textContent.replace(/\s+/g, " ").trim()),
+          cards: Object.fromEntries(
+            [...document.querySelectorAll(".kind")].map((k) => [
+              k.querySelector(".kind-title").textContent.trim().split(" ")[0],
+              [...k.querySelectorAll("article.card .card-name")].map((n) => n.textContent.trim()),
+            ]),
+          ),
+        }));
+        const order = got.headings.map((h) => h.split(" ")[0]);
+        const want = ["PC", "PCs", "Server", "Servers", "VM", "VMs", "Container", "Containers"];
+        const ranks = order.map((h) => Math.floor(want.indexOf(h) / 2));
+        if (ranks.some((r) => r < 0) || ranks.some((r, i) => i > 0 && r <= ranks[i - 1])) throw new Error(`the headings read ${JSON.stringify(got.headings)}`);
+        if (!got.cards.VMs?.includes("Homelab VM")) throw new Error(`Homelab VM isn't under VMs: ${JSON.stringify(got.cards)}`);
+        for (const name of ["Living room TV", "Printer"]) {
+          if (Object.values(got.cards).flat().includes(name)) throw new Error(`${name} is still a machine card`);
+        }
+        const appliances = page.locator("section", { has: page.getByRole("heading", { name: "Appliances", exact: true }) });
+        await appliances.locator(".chip", { hasText: "Printer" }).waitFor();
+        await appliances.locator(".chip", { hasText: "Living room TV" }).waitFor();
+        // As tall as the other devices' tiles.
+        const tv = await appliances.locator(".chip", { hasText: "Living room TV" }).boundingBox();
+        const phone = await page.locator(".chip", { hasText: "Sam's phone" }).boundingBox();
+        if (Math.abs(tv.height - phone.height) > 1) throw new Error(`an appliance tile is ${tv.height}px tall, another device's ${phone.height}px`);
+        // Types share a line when their cards fit (in a 1920px window PCs and Servers do), and the tiles come
+        // on a line of their own after every card, Appliances and Other devices side by side.
+        const at = (sel) => page.locator(sel).first().boundingBox();
+        const pcs = await at("#kind-pc");
+        const servers = await at("#kind-server");
+        if (Math.abs(pcs.y - servers.y) > 1 || servers.x <= pcs.x) throw new Error("Servers didn't come next to PCs in a 1920px window");
+        const lastCard = Math.max(...(await page.locator("article.card").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().bottom))));
+        const appl = await page.locator(".tile-group").filter({ hasText: "Printer" }).boundingBox();
+        const other = await page.locator(".tile-group").filter({ hasText: "Tablet" }).boundingBox();
+        if (appl.y < lastCard) throw new Error("the appliances start beside the cards, not below them");
+        if (Math.abs(appl.y - other.y) > 1 || other.x <= appl.x) throw new Error("Other devices didn't come next to Appliances");
+      },
+    },
+    {
       what: "on the Overview each Deco mesh node's hostname is shown in full",
       path: "/",
       viewport: { width: 1536, height: 864 },
