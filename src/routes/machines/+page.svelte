@@ -41,6 +41,7 @@
   import { startingUser, userAfterKind } from "$lib/newmachine";
   import { settings } from "$lib/settings.svelte";
   import { status } from "$lib/status.svelte";
+  import { offersAuto, systemLabel, systemNote, systemTitle, systemToSend } from "$lib/system";
   import type { Column } from "$lib/table";
   import { TableView } from "$lib/table.svelte";
   import Address from "$lib/components/Address.svelte";
@@ -57,12 +58,14 @@
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
 
-  /** A new machine's form. The SSH user starts as the default chosen in Settings (none when it isn't set). */
+  /** A new machine's form. The SSH user starts as the default chosen in Settings (none when it isn't set).
+   *  The System starts as Other, for home-cc to work out unless the owner chooses one. */
   const blank = (): DeviceInput => ({
     name: "",
     host: "",
     kind: "vm",
-    os: "linux",
+    os: "other",
+    osAuto: false,
     sshUser: startingUser("vm", settings.value.defaultSshUser),
     sshPort: 22,
     notes: "",
@@ -92,6 +95,7 @@
           host: form.host,
           kind: form.kind,
           os: form.os,
+          osAuto: !!form.osAuto,
           sshUser: form.sshUser,
           sshPort: form.sshPort,
           mac: form.mac,
@@ -159,7 +163,7 @@
     { id: "address", label: "Address", kind: "ip", value: (d) => d.host },
     { id: "hostname", label: "Hostname", value: (d) => names.text(d.host, d.hostname) },
     { id: "type", label: "Type", value: (d) => KIND_LABELS[d.kind], group: true, choose: true },
-    { id: "os", label: "System", value: (d) => OS_LABELS[d.os], group: true },
+    { id: "os", label: "System", value: (d) => OS_LABELS[d.os], search: (d) => systemLabel(d, OS_LABELS), group: true },
     { id: "ssh", label: "SSH", value: sshText },
     { id: "notes", label: "Notes", value: (d) => d.notes },
   ];
@@ -247,6 +251,7 @@
       host: d.host,
       kind: d.kind,
       os: d.os,
+      osAuto: false,
       sshUser: d.sshUser ?? "",
       sshPort: d.sshPort,
       notes: d.notes,
@@ -305,8 +310,10 @@
     try {
       // The hardware address: nothing when the box wasn't touched (kept), "" when it was emptied (removed).
       // The group the same way, so a group given meanwhile with the card's menu isn't undone.
+      // The System with the one the form started from, so one home-cc found meanwhile isn't undone.
       const input = {
         ...form,
+        ...systemToSend(form, base.os),
         sshPort: Number(form.sshPort) || 22,
         mac: macToSend(stored.mac, form.mac ?? ""),
         group: groupToSend(stored.group, form.group ?? ""),
@@ -372,7 +379,10 @@
       stored = { host: saved.host, sshPort: saved.sshPort, mac: saved.mac, group: saved.group ?? "" };
       form.mac = saved.mac ?? "";
       form.group = saved.group ?? "";
-      base = { name: saved.name, host: saved.host, kind: saved.kind, os: saved.os, sshUser: saved.sshUser ?? "", sshPort: saved.sshPort, notes: saved.notes, mac: saved.mac ?? "", group: saved.group ?? "" };
+      // Saved: a System left to home-cc is now simply not known yet.
+      form.os = saved.os;
+      form.osAuto = false;
+      base = { name: saved.name, host: saved.host, kind: saved.kind, os: saved.os, osAuto: false, sshUser: saved.sshUser ?? "", sshPort: saved.sshPort, notes: saved.notes, mac: saved.mac ?? "", group: saved.group ?? "" };
       formError = formProblem("secrets", "Storing the password for a machine just saved", `Saved, but the password couldn't be stored: ${errorText(err)}`);
       return false;
     }
@@ -428,6 +438,27 @@
       base.group = now;
     });
   });
+
+  // home-cc found the System of the machine in the form meanwhile (from its SSH login, say): the field
+  // follows, unless the owner has chosen one in it.
+  $effect(() => {
+    if (typeof editing !== "number") return;
+    const now = devices.byId.get(editing)?.os;
+    untrack(() => {
+      if (!now || now === base.os) return;
+      if (form.os === base.os && !form.osAuto) form.os = now;
+      base.os = now;
+    });
+  });
+
+  /** The machine in the form as saved, for where its System came from. None for a new one. */
+  const storedSystem = $derived(typeof editing === "number" ? (devices.byId.get(editing) ?? null) : null);
+
+  /** "Let home-cc work it out": the System the owner set goes when the form is saved, to be found again. */
+  function workItOut() {
+    form.os = "other";
+    form.osAuto = true;
+  }
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const oses = Object.entries(OS_LABELS) as [Os, string][];
@@ -1085,7 +1116,7 @@
                   </td>
                   <td class="c-host"><Address host={d.host} known={d.hostname} part="name" /></td>
                   <td class="c-type">{KIND_LABELS[d.kind]}</td>
-                  <td class="c-os">{OS_LABELS[d.os]}</td>
+                  <td class="c-os" title={systemTitle(d, OS_LABELS)}>{systemLabel(d, OS_LABELS)}</td>
                   <td class="c-ssh mono muted">{d.sshUser ? `${d.sshUser} · port ${d.sshPort}` : "–"}</td>
                   <td class="c-notes muted" title={d.notes}>{d.notes}</td>
                   <td class="c-actions"><div class="row-actions">
@@ -1126,10 +1157,17 @@
           </select>
         </label>
         <label>System
-          <select bind:value={form.os}>
+          <!-- A System picked here is the owner's from then on, so "Let home-cc work it out" is undone. -->
+          <select bind:value={form.os} onchange={() => (form.osAuto = false)}>
             {#each oses as [value, label]}<option {value}>{label}</option>{/each}
           </select>
         </label>
+      </div>
+      <div class="system-note">
+        <p class="hint">{systemNote(form, storedSystem, base.os)}</p>
+        {#if offersAuto(form, storedSystem)}
+          <button class="btn small" type="button" onclick={workItOut}>Let home-cc work it out</button>
+        {/if}
       </div>
       <!-- The same name puts machines together under one heading. The names there are come up as suggestions. -->
       <label>Group (optional)
@@ -1370,25 +1408,26 @@
   .c-ip { width: 10rem; }
   .c-host { width: 11rem; }
   .c-type { width: 7.5rem; }
-  .c-os { width: 8rem; }
+  /* Room for "Proxmox VE (guessed)". The columns below give way 5rem sooner for it. */
+  .c-os { width: 13rem; }
   .c-ssh { width: 12rem; }
   .c-actions { width: 19.5rem; }
   td.c-actions { overflow: visible; }
   .row-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .host-line { display: none; font-size: 0.85rem; line-height: 1.3; }
-  @container (max-width: 80rem) {
+  @container (max-width: 85rem) {
     .c-host { display: none; }
     .host-line { display: block; overflow: hidden; }
     td.c-ip { line-height: 1.3; }
   }
-  @container (max-width: 72rem) {
+  @container (max-width: 77rem) {
     .c-notes { display: none; }
   }
   /* The cards above show the groups, so the column gives way before the system does. */
-  @container (max-width: 69rem) {
+  @container (max-width: 74rem) {
     .c-group { display: none; }
   }
-  @container (max-width: 66rem) {
+  @container (max-width: 71rem) {
     .c-os { display: none; }
   }
   /* Too narrow for columns (a small window zoomed in): the name on one line, the address, type and SSH
@@ -1430,6 +1469,7 @@
   .hint { margin: 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
   /* A note about the field right above it. */
   .hint.under { margin-top: -0.55rem; }
+  .system-note { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-top: -0.55rem; }
   .resolved { display: flex; gap: 0.5rem; min-width: 0; }
   .resolved :global(.address) { color: var(--text-soft); }
   .resolved .pending { font-style: italic; }

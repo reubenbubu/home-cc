@@ -84,6 +84,80 @@ impl Os {
     }
 }
 
+/// Where a device's System came from. Each kind of answer is stronger than
+/// the ones after it: the owner's own choice, this PC itself, an SSH login, a
+/// working Proxmox API, and a guess from what answers on the network. None
+/// stored (null for the screens) is not known yet, with the System "Other".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsSource {
+    /// Chosen by the owner in the machine form. Never changed by home-cc.
+    Manual,
+    /// The PC home-cc runs on, which knows its own system.
+    ThisPc,
+    /// What the stats script found over an SSH login (`pveversion` answering
+    /// means Proxmox).
+    Ssh,
+    /// A Proxmox host whose API answered.
+    Proxmox,
+    /// The ports that answer on the network (see `net::hints`).
+    Network,
+}
+
+impl OsSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            OsSource::Manual => "manual",
+            OsSource::ThisPc => "this-pc",
+            OsSource::Ssh => "ssh",
+            OsSource::Proxmox => "proxmox",
+            OsSource::Network => "network",
+        }
+    }
+
+    /// None for nothing stored, or a word this build doesn't know (say, from
+    /// a newer one): either way home-cc may work the System out again.
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "manual" => OsSource::Manual,
+            "this-pc" => OsSource::ThisPc,
+            "ssh" => OsSource::Ssh,
+            "proxmox" => OsSource::Proxmox,
+            "network" => OsSource::Network,
+            _ => return None,
+        })
+    }
+
+    /// Higher is stronger.
+    fn rank(self) -> u8 {
+        match self {
+            OsSource::Network => 1,
+            OsSource::Proxmox => 2,
+            OsSource::Ssh => 3,
+            OsSource::ThisPc => 4,
+            OsSource::Manual => 5,
+        }
+    }
+}
+
+/// Whether home-cc may store `found_os`, learned from `found`, in place of the
+/// System it has (`stored_os`, from `stored`). Nothing replaces the owner's
+/// choice; otherwise an answer as strong as the one stored, or stronger, does.
+/// Only a real answer counts ("Other" says nothing). One exception: a Proxmox
+/// host whose API answered stays Proxmox when an SSH login sees only Linux
+/// (`pveversion` can be missing from that user's path).
+pub fn may_replace(stored_os: Os, stored: Option<OsSource>, found_os: Os, found: OsSource) -> bool {
+    if found_os == Os::Other || found == OsSource::Manual {
+        return false;
+    }
+    match stored {
+        None => true,
+        Some(OsSource::Manual) => false,
+        Some(OsSource::Proxmox) if stored_os == Os::Proxmox && found_os == Os::Linux => false,
+        Some(stored) => found.rank() >= stored.rank(),
+    }
+}
+
 /// A device as stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +168,8 @@ pub struct Device {
     pub host: String,
     pub kind: DeviceKind,
     pub os: Os,
+    /// Where `os` came from; none while it isn't known (`os` is then Other).
+    pub os_source: Option<OsSource>,
     /// User name for SSH, if this machine is reached over SSH.
     pub ssh_user: Option<String>,
     pub ssh_port: u16,
@@ -169,6 +245,15 @@ pub struct DeviceInput {
     /// send one); empty takes the device out of its group.
     #[serde(default)]
     pub group: Option<String>,
+    /// The System the form showed when it was opened. When given and the same
+    /// as `os`, the owner didn't change it, so the stored System stays as it
+    /// is (home-cc may have found it out since). See [`Inventory::update`].
+    #[serde(default)]
+    pub os_was: Option<Os>,
+    /// "Let home-cc work it out": forget the System, and the owner's choice of
+    /// it, so home-cc fills it in again by itself.
+    #[serde(default)]
+    pub os_auto: bool,
 }
 
 /// The longest group name, in characters.
@@ -315,8 +400,17 @@ CREATE TABLE ssh_host_keys (
 /// by user_version, so it can't clash with another change that numbers itself.
 const GROUP_COLUMN: &str = "ALTER TABLE devices ADD COLUMN group_name TEXT;";
 
+/// Added for telling the System by itself: where it came from. Applied when
+/// the column is missing, like the group. A System already set can't be told
+/// apart from one the owner chose, so it counts as theirs and is never
+/// changed; one left at "Other" is not known yet.
+const OS_SOURCE_COLUMN: &str = "
+ALTER TABLE devices ADD COLUMN os_source TEXT;
+UPDATE devices SET os_source = 'manual' WHERE os != 'other';
+";
+
 const COLUMNS: &str = "id, name, host, kind, os, ssh_user, ssh_port, notes, \
-     mac, vendor, hostname, source, reviewed, first_seen, last_seen, group_name";
+     mac, vendor, hostname, source, reviewed, first_seen, last_seen, group_name, os_source";
 
 pub fn now() -> i64 {
     std::time::SystemTime::now()
@@ -375,6 +469,12 @@ impl Inventory {
         if grouped.is_none() {
             conn.execute_batch(GROUP_COLUMN)?;
         }
+        let sourced: Option<i64> = conn
+            .query_row("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'os_source'", [], |r| r.get(0))
+            .optional()?;
+        if sourced.is_none() {
+            conn.execute_batch(&format!("BEGIN; {OS_SOURCE_COLUMN} COMMIT;"))?;
+        }
         Ok(Self { conn: Mutex::new(conn), purged: AtomicI64::new(i64::MIN) })
     }
 
@@ -406,20 +506,25 @@ impl Inventory {
                 Some(name) => Some(spelled_as_stored(&conn, name, None, None)?),
                 None => None,
             };
+            // A System chosen in the form is the owner's; "Other" (or "Let
+            // home-cc work it out") leaves it to be found.
+            let os = if input.os_auto { Os::Other } else { input.os };
+            let os_source = (os != Os::Other).then_some(OsSource::Manual);
             conn.execute(
-                "INSERT INTO devices (name, host, kind, os, ssh_user, ssh_port, notes, mac, first_seen, group_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO devices (name, host, kind, os, ssh_user, ssh_port, notes, mac, first_seen, group_name, os_source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     input.name.trim(),
                     input.host.trim(),
                     input.kind.as_str(),
-                    input.os.as_str(),
+                    os.as_str(),
                     clean(input.ssh_user),
                     input.ssh_port.unwrap_or(22),
                     input.notes,
                     clean(input.mac).and_then(|m| normalize_mac(&m)),
                     now(),
                     group,
+                    os_source.map(OsSource::as_str),
                 ],
             )?;
             conn.last_insert_rowid()
@@ -439,22 +544,32 @@ impl Inventory {
     /// form sends it with every save. Another address or SSH port is also
     /// another SSH server, so the stored identity goes and the first-contact
     /// rules apply again.
+    ///
+    /// The System: one other than what is stored is the owner's choice (Other
+    /// too), never changed by home-cc after that. The same one keeps where it
+    /// came from. With `os_was` the same as `os` the owner didn't touch it,
+    /// and what is stored stays, even if home-cc found another System after
+    /// the form was opened, unless the device was pointed at another address:
+    /// a System home-cc found at the old one is then forgotten like the
+    /// hardware address. `os_auto` forgets it, for home-cc to work out again.
     pub fn update(&self, id: i64, input: DeviceInput) -> Result<Device> {
         input.validate()?;
         {
             let mut conn = self.conn.lock().unwrap();
             let tx = conn.transaction()?;
-            let stored: Option<(String, i64, Option<String>)> = tx
-                .query_row("SELECT host, ssh_port, mac FROM devices WHERE id = ?1", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            let stored: Option<(String, i64, Option<String>, String, Option<String>)> = tx
+                .query_row("SELECT host, ssh_port, mac, os, os_source FROM devices WHERE id = ?1", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
                 })
                 .optional()?;
-            let Some((old_host, old_port, old_mac)) = stored else {
+            let Some((old_host, old_port, old_mac, old_os, old_source)) = stored else {
                 return Err(Error::NotFound(format!("device {id}")));
             };
             let host = input.host.trim();
             let port = input.ssh_port.unwrap_or(22);
             let moved = !host.eq_ignore_ascii_case(&old_host);
+            let (os, os_source) =
+                system_after_save((Os::parse(&old_os), old_source.as_deref().and_then(OsSource::parse)), &input, moved);
             // Trimmed as validate() does, so that what it accepted is what is
             // stored. Empty or blank gives none.
             let typed = input.mac.as_deref().map(|typed| normalize_mac(typed.trim()));
@@ -482,13 +597,14 @@ impl Inventory {
                  ssh_user = ?5, ssh_port = ?6, notes = ?7, mac = ?8,
                  vendor = CASE WHEN ?9 THEN vendor END, hostname = CASE WHEN ?10 THEN hostname END,
                  group_name = CASE WHEN ?12 THEN ?13 ELSE group_name END,
+                 os_source = ?14,
                  reviewed = 1
                  WHERE id = ?11",
                 params![
                     input.name.trim(),
                     host,
                     input.kind.as_str(),
-                    input.os.as_str(),
+                    os.as_str(),
                     clean(input.ssh_user),
                     port,
                     input.notes,
@@ -498,6 +614,7 @@ impl Inventory {
                     id,
                     group.is_some(),
                     group.flatten(),
+                    os_source.map(OsSource::as_str),
                 ],
             )?;
             if moved || i64::from(port) != old_port {
@@ -506,6 +623,26 @@ impl Inventory {
             tx.commit()?;
         }
         self.get(id)
+    }
+
+    /// Store a System home-cc found out by itself (`source` says how), if
+    /// [`may_replace`] allows it over what is stored. True when the device
+    /// changed; false when it was so already, the answer is weaker, the owner
+    /// chose the System, or the device is gone.
+    pub fn learn_os(&self, id: i64, os: Os, source: OsSource) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let stored: Option<(String, Option<String>)> = tx
+            .query_row("SELECT os, os_source FROM devices WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((old_os, old_source)) = stored else { return Ok(false) };
+        let (old_os, old_source) = (Os::parse(&old_os), old_source.as_deref().and_then(OsSource::parse));
+        if (old_os, old_source) == (os, Some(source)) || !may_replace(old_os, old_source, os, source) {
+            return Ok(false);
+        }
+        tx.execute("UPDATE devices SET os = ?1, os_source = ?2 WHERE id = ?3", params![os.as_str(), source.as_str(), id])?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Puts one device in a group (or, with an empty name, in none), and
@@ -748,6 +885,22 @@ fn seen_again(db: &Connection, id: i64, host: &str, f: &Found, mac: Option<&str>
     Ok(())
 }
 
+/// The System and where it came from once the owner's form is saved over
+/// `stored`: see [`Inventory::update`]. `moved`: the device now points at
+/// another address, so a System home-cc found at the old one is forgotten
+/// (the owner's own choice stays).
+fn system_after_save(stored: (Os, Option<OsSource>), input: &DeviceInput, moved: bool) -> (Os, Option<OsSource>) {
+    if input.os_auto {
+        return (Os::Other, None);
+    }
+    let untouched = input.os_was.map_or(input.os == stored.0, |was| was == input.os);
+    match stored {
+        _ if !untouched => (input.os, Some(OsSource::Manual)),
+        (_, Some(source)) if moved && source != OsSource::Manual => (Os::Other, None),
+        stored => stored,
+    }
+}
+
 fn clean(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -770,6 +923,7 @@ fn row_to_device(row: &rusqlite::Row) -> rusqlite::Result<Device> {
         first_seen: row.get(13)?,
         last_seen: row.get(14)?,
         group: row.get(15)?,
+        os_source: row.get::<_, Option<String>>(16)?.as_deref().and_then(OsSource::parse),
     })
 }
 
@@ -788,6 +942,8 @@ mod tests {
             notes: String::new(),
             mac: None,
             group: None,
+            os_was: None,
+            os_auto: false,
         }
     }
 
@@ -1039,6 +1195,173 @@ mod tests {
         assert_eq!(group_of(&inv, d.id).as_deref(), Some("NAS PC"));
         let version: i64 = inv.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn a_stronger_answer_replaces_a_weaker_one_and_nothing_replaces_the_owner() {
+        use OsSource::*;
+        let found_some_way = [ThisPc, Ssh, Proxmox, Network];
+        // Not known yet: any real answer fills it in.
+        for source in found_some_way {
+            assert!(may_replace(Os::Other, None, Os::Linux, source), "{source:?}");
+        }
+        // "Other" says nothing, and only the owner's form makes a System theirs.
+        assert!(!may_replace(Os::Other, None, Os::Other, Ssh));
+        assert!(!may_replace(Os::Other, None, Os::Linux, Manual));
+        // The owner's choice stays, whatever finds otherwise: "Other" chosen on purpose too.
+        for source in found_some_way {
+            assert!(!may_replace(Os::Linux, Some(Manual), Os::Windows, source), "{source:?}");
+            assert!(!may_replace(Os::Other, Some(Manual), Os::Windows, source), "{source:?}");
+        }
+        // As strong or stronger replaces; weaker doesn't.
+        assert!(may_replace(Os::Windows, Some(Network), Os::Linux, Ssh));
+        assert!(may_replace(Os::Linux, Some(Network), Os::Windows, Network), "a newer guess");
+        assert!(may_replace(Os::Linux, Some(Ssh), Os::Windows, Ssh), "reinstalled since");
+        assert!(may_replace(Os::Linux, Some(Ssh), Os::Windows, ThisPc));
+        assert!(may_replace(Os::Linux, Some(Network), Os::Proxmox, Proxmox));
+        assert!(!may_replace(Os::Linux, Some(Ssh), Os::Windows, Network));
+        assert!(!may_replace(Os::Linux, Some(ThisPc), Os::Windows, Ssh));
+        assert!(!may_replace(Os::Windows, Some(Ssh), Os::Proxmox, Proxmox));
+        // Proxmox's own API answering isn't undone by a login that sees only Linux.
+        assert!(!may_replace(Os::Proxmox, Some(Proxmox), Os::Linux, Ssh));
+        assert!(may_replace(Os::Proxmox, Some(Proxmox), Os::Proxmox, Ssh));
+        assert!(may_replace(Os::Proxmox, Some(Network), Os::Linux, Ssh), "only guessed from its web port");
+    }
+
+    #[test]
+    fn every_source_is_saved_and_read_back() {
+        let sources = [
+            (OsSource::Manual, "manual"),
+            (OsSource::ThisPc, "this-pc"),
+            (OsSource::Ssh, "ssh"),
+            (OsSource::Proxmox, "proxmox"),
+            (OsSource::Network, "network"),
+        ];
+        for (source, text) in sources {
+            // The same word in the database and for the screens.
+            assert_eq!(source.as_str(), text);
+            assert_eq!(OsSource::parse(text), Some(source));
+            assert_eq!(serde_json::to_string(&source).unwrap(), format!("\"{text}\""));
+        }
+        // A word this build doesn't know (say, from a newer one) reads as not known.
+        assert_eq!(OsSource::parse("crystal-ball"), None);
+    }
+
+    #[test]
+    fn a_system_found_by_itself_is_stored_with_where_it_came_from() {
+        let inv = Inventory::in_memory().unwrap();
+        let id = scan_one(&inv, found("192.168.68.21", Some(MAC_A), Some("homelab")));
+        let d = inv.get(id).unwrap();
+        assert_eq!((d.os, d.os_source), (Os::Other, None), "a scan doesn't know");
+        assert!(inv.learn_os(id, Os::Windows, OsSource::Network).unwrap());
+        assert!(!inv.learn_os(id, Os::Windows, OsSource::Network).unwrap(), "so already");
+        assert!(inv.learn_os(id, Os::Linux, OsSource::Ssh).unwrap());
+        assert!(!inv.learn_os(id, Os::Windows, OsSource::Network).unwrap(), "weaker");
+        let d = inv.get(id).unwrap();
+        assert_eq!((d.os, d.os_source), (Os::Linux, Some(OsSource::Ssh)));
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!((json["os"].as_str(), json["osSource"].as_str()), (Some("linux"), Some("ssh")));
+        // Seen again by a scan: left as it is.
+        scan(&inv, &[found("192.168.68.21", Some(MAC_A), Some("homelab"))], 300);
+        assert_eq!(inv.get(id).unwrap().os_source, Some(OsSource::Ssh));
+        assert!(!inv.learn_os(999, Os::Linux, OsSource::Ssh).unwrap(), "no such device");
+        let unknown = serde_json::to_value(inv.add(DeviceInput { os: Os::Other, ..input("x", "192.168.68.9") }).unwrap()).unwrap();
+        assert_eq!(unknown["osSource"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_system_chosen_in_the_form_is_the_owners_and_stays() {
+        let inv = Inventory::in_memory().unwrap();
+        let at = |os: Os| DeviceInput { os, ..input("dev", "192.168.68.22") };
+        let state = |id: i64| {
+            let d = inv.get(id).unwrap();
+            (d.os, d.os_source)
+        };
+        // Added with a System: the owner's. Added as Other, or left to home-cc: not known yet.
+        assert_eq!(inv.add(input("nas", "192.168.68.10")).unwrap().os_source, Some(OsSource::Manual));
+        let auto = inv.add(DeviceInput { os_auto: true, ..input("vm", "192.168.68.23") }).unwrap();
+        assert_eq!((auto.os, auto.os_source), (Os::Other, None));
+        let id = inv.add(at(Os::Other)).unwrap().id;
+        assert_eq!(state(id), (Os::Other, None));
+
+        // Found from its login, then saved with the System as it is: still found, not chosen.
+        inv.learn_os(id, Os::Linux, OsSource::Ssh).unwrap();
+        inv.update(id, DeviceInput { notes: "x".into(), ..at(Os::Linux) }).unwrap();
+        assert_eq!(state(id), (Os::Linux, Some(OsSource::Ssh)));
+        // A form opened before it was found sends the System it showed, untouched: nothing changes.
+        inv.update(id, DeviceInput { os_was: Some(Os::Other), ..at(Os::Other) }).unwrap();
+        assert_eq!(state(id), (Os::Linux, Some(OsSource::Ssh)));
+
+        // Changed in the form: the owner's, and nothing found later undoes it.
+        inv.update(id, DeviceInput { os_was: Some(Os::Linux), ..at(Os::Windows) }).unwrap();
+        assert_eq!(state(id), (Os::Windows, Some(OsSource::Manual)));
+        assert!(!inv.learn_os(id, Os::Linux, OsSource::ThisPc).unwrap());
+        // "Other" chosen on purpose too, so a wrong guess never comes back.
+        inv.update(id, DeviceInput { os_was: Some(Os::Windows), ..at(Os::Other) }).unwrap();
+        assert_eq!(state(id), (Os::Other, Some(OsSource::Manual)));
+        assert!(!inv.learn_os(id, Os::Linux, OsSource::Ssh).unwrap());
+
+        // "Let home-cc work it out": not known again, and found again.
+        inv.update(id, DeviceInput { os_auto: true, os_was: Some(Os::Other), ..at(Os::Other) }).unwrap();
+        assert_eq!(state(id), (Os::Other, None));
+        assert!(inv.learn_os(id, Os::Linux, OsSource::Network).unwrap());
+
+        // Without os_was (as older screens sent): another System than the stored one is a choice.
+        inv.update(id, at(Os::Windows)).unwrap();
+        assert_eq!(state(id), (Os::Windows, Some(OsSource::Manual)));
+
+        // What the screens send.
+        let sent: DeviceInput = serde_json::from_str(
+            r#"{"name":"dev","host":"192.168.68.22","kind":"vm","os":"other","osWas":"linux","osAuto":true}"#,
+        )
+        .unwrap();
+        assert_eq!((sent.os_was, sent.os_auto), (Some(Os::Linux), true));
+        let plain: DeviceInput =
+            serde_json::from_str(r#"{"name":"dev","host":"192.168.68.22","kind":"vm","os":"linux"}"#).unwrap();
+        assert_eq!((plain.os_was, plain.os_auto), (None, false));
+    }
+
+    #[test]
+    fn a_system_found_at_the_old_address_goes_with_it() {
+        let inv = Inventory::in_memory().unwrap();
+        let at = |host: &str| DeviceInput { os: Os::Other, os_was: Some(Os::Other), ..input("dev", host) };
+        let id = inv.add(at("192.168.68.22")).unwrap().id;
+        inv.learn_os(id, Os::Linux, OsSource::Ssh).unwrap();
+        // The form, opened before, sends Other untouched with a new address.
+        let d = inv.update(id, at("192.168.68.99")).unwrap();
+        assert_eq!((d.os, d.os_source), (Os::Other, None), "it belonged to whatever was at the old address");
+        // The owner's own choice goes with the entry.
+        let mut chosen = input("dev", "192.168.68.99");
+        chosen.os = Os::Windows;
+        inv.update(id, chosen).unwrap();
+        let d = inv.update(id, DeviceInput { os: Os::Windows, os_was: Some(Os::Windows), ..input("dev", "192.168.68.5") }).unwrap();
+        assert_eq!((d.os, d.os_source), (Os::Windows, Some(OsSource::Manual)));
+    }
+
+    #[test]
+    fn adds_the_os_source_column_to_a_database_without_it() {
+        // As every build before it left the database: a System already set
+        // counts as the owner's, "Other" as not known yet.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA} {SCHEMA_V2} {HOST_KEYS_TABLE} {GROUP_COLUMN}
+             INSERT INTO devices (name, host, kind, os, first_seen) VALUES ('nas', '192.168.68.10', 'server', 'windows', 5);
+             INSERT INTO devices (name, host, kind, os, first_seen) VALUES ('phone', '192.168.68.101', 'other', 'other', 5);
+             PRAGMA user_version = 2;"
+        ))
+        .unwrap();
+        let inv = Inventory::from_conn(conn).unwrap();
+        let list = inv.list().unwrap();
+        let (nas, phone) = (&list[0], &list[1]);
+        assert_eq!((nas.name.as_str(), nas.os, nas.os_source), ("nas", Os::Windows, Some(OsSource::Manual)));
+        assert_eq!((phone.name.as_str(), phone.os, phone.os_source), ("phone", Os::Other, None));
+        assert!(!inv.learn_os(nas.id, Os::Linux, OsSource::Ssh).unwrap(), "never changed");
+        assert!(inv.learn_os(phone.id, Os::Linux, OsSource::Network).unwrap());
+
+        // Opening again leaves the column and what is in it alone.
+        let inv = Inventory::from_conn(inv.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(inv.get(phone.id).unwrap().os_source, Some(OsSource::Network));
+        assert_eq!(inv.get(nas.id).unwrap().os_source, Some(OsSource::Manual));
     }
 
     fn found(ip: &str, mac: Option<&str>, hostname: Option<&str>) -> Found {

@@ -485,6 +485,7 @@ mod tests {
             first_seen: 0,
             last_seen: None,
             group: None,
+            os_source: None,
         }
     }
 
@@ -600,6 +601,8 @@ mod tests {
             notes: String::new(),
             mac: None,
             group: None,
+            os_was: None,
+            os_auto: false,
         }
     }
 

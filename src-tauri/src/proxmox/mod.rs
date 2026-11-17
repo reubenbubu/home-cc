@@ -391,6 +391,11 @@ impl Proxmox {
         };
         match result {
             Ok(overview) => {
+                // Its API answering shows it is a Proxmox host: a System only
+                // guessed from the network counts as found now.
+                if let Err(e) = inv.learn_os(device_id, Os::Proxmox, crate::inventory::OsSource::Proxmox) {
+                    crate::diag::note(format!("could not store that device {device_id} is a Proxmox host: {e}"));
+                }
                 status.overview = Some(overview);
                 status.fetched_at = Some(now());
             }
@@ -582,6 +587,7 @@ mod tests {
             first_seen: 0,
             last_seen: None,
             group: None,
+            os_source: None,
         }
     }
 
@@ -648,6 +654,8 @@ mod tests {
             notes: String::new(),
             mac: None,
             group: None,
+            os_was: None,
+            os_auto: false,
         }
     }
 

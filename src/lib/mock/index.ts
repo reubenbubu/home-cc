@@ -16,6 +16,7 @@ import type {
   MachineStats,
   MachineStatsEntry,
   Os,
+  OsSource,
   Sample,
   ScanProgress,
   ScanResult,
@@ -24,6 +25,7 @@ import type {
   Subnet,
 } from "../api";
 import { foldGroup } from "../arrange";
+import { mayReplace, systemAfterSave } from "../system";
 import { terminalCommands } from "./terminal";
 import { dockerMock } from "./docker";
 // Proxmox
@@ -133,6 +135,8 @@ export function installMock() {
       host,
       kind,
       os,
+      // What the back end makes of a database from before it knew where a System came from.
+      osSource: os === "other" ? null : "manual",
       sshUser: null,
       sshPort: 22,
       notes: "",
@@ -180,6 +184,23 @@ export function installMock() {
   for (const name of ["NAS", "Pi-hole 1"]) {
     const d = devices.find((x) => x.name === name);
     if (d) d.access = "password";
+  }
+  // Where each System came from. Dev VM and Old laptop were set by hand; the rest that have one were found:
+  // this PC knows its own, the Proxmox host's API answered, two were only guessed from the network (Pi-hole 1,
+  // whose login fails, and Media PC, waiting for its identity to be approved, which a reading then confirms).
+  const sources: [string, OsSource][] = [
+    ["Main PC", "this-pc"],
+    ["NAS", "ssh"],
+    ["Homelab VM", "ssh"],
+    ["Proxmox", "proxmox"],
+    ["Pi-hole 1", "network"],
+    ["Pi-hole 2", "network"],
+    ["Monitoring", "ssh"],
+    ["Media PC", "network"],
+  ];
+  for (const [name, source] of sources) {
+    const d = devices.find((x) => x.name === name);
+    if (d) d.osSource = source;
   }
   // Groups on the Machines screen: the Proxmox host with its containers, and the NAS PC with the VMs it
   // runs. The rest are in no group. "?nogroups" in the address: no machine is in a group.
@@ -487,6 +508,15 @@ export function installMock() {
         const cpuPct = stats.cpuPct ?? (prev?.stats && !stats.reduced && d.os !== "windows" ? 6 : null);
         const fresh = { ...stats, cpuPct: wobble(cpuPct), uptimeSecs: stats.uptimeSecs == null ? null : stats.uptimeSecs + (nowSecs() - start) };
         next = { ...blankEntry(d.id), stats: fresh, collectedAt: nowSecs() };
+        // What the reading shows fills in the System, unless the owner chose one (as the back end does).
+        const found: Os = /windows/i.test(stats.osName) ? "windows" : /proxmox/i.test(stats.osName) ? "proxmox" : "linux";
+        if (found !== d.os || d.osSource !== "ssh") {
+          if (mayReplace(d, found, "ssh")) {
+            d.os = found;
+            d.osSource = "ssh";
+            setTimeout(() => emit("status-changed"), 0);
+          }
+        }
       }
     }
     entries.set(d.id, next);
@@ -799,7 +829,9 @@ export function installMock() {
     list_devices: () => devices.map(publicDevice),
     add_device: ({ input }: { input: DeviceInput }) => {
       checkInput(input);
-      const d = dev(input.name.trim(), input.host.trim(), input.kind, input.os, "wired", {
+      const system = systemAfterSave(null, input);
+      const d = dev(input.name.trim(), input.host.trim(), input.kind, system.os, "wired", {
+        osSource: system.osSource,
         sshUser: input.sshUser?.trim() || null,
         sshPort: input.sshPort ?? 22,
         notes: input.notes ?? "",
@@ -836,7 +868,7 @@ export function installMock() {
         name: input.name.trim(),
         host,
         kind: input.kind,
-        os: input.os,
+        ...systemAfterSave(d, input, moved),
         sshUser: input.sshUser?.trim() || null,
         sshPort,
         notes: input.notes ?? "",

@@ -149,10 +149,15 @@ Windows machine.
     owner's own (the default SSH user, the key file, the range to scan) is a
     field of `Settings` in `settings.rs` (with `#[serde(default)]`, so a
     settings file from before it still loads), never written into the code;
-    hints on screen use made-up examples.
+    hints on screen use made-up examples. A device's System is stored with
+    where it came from (`OsSource`); whatever finds one out stores it with
+    `learn_os`, and `may_replace` decides which answer wins (never over the
+    owner's). `src/lib/system.ts` has the same rules for the screens and the
+    sample back end, tested against the same cases.
   - `secrets.rs` – passwords and tokens, kept in the system keychain.
   - `net/` – finding the home network, scanning it, naming devices and
-    checking they are up.
+    checking they are up. `net/hints.rs` guesses a machine's System from the
+    ports that answer.
   - `ssh.rs`, `stats.rs` – SSH logins, and the machine stats read over them.
     `localstats.rs` reads this PC's own stats with the same scripts, without SSH.
   - `keysetup.rs` – key login: shows this PC's key, makes one if there is

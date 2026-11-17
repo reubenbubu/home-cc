@@ -73,9 +73,10 @@ pub fn update_device(
 ) -> Result<Device> {
     let before = inv.get(id)?;
     let device = inv.update(id, input)?;
-    // Stats and login state belong to the machine the entry pointed at.
-    if (&before.host, before.ssh_port, &before.ssh_user, before.os)
-        != (&device.host, device.ssh_port, &device.ssh_user, device.os)
+    // Stats and login state belong to the machine the entry pointed at. A System
+    // left for home-cc to work out again (os_source gone) may be guessed again.
+    if (&before.host, before.ssh_port, &before.ssh_user, before.os, before.os_source)
+        != (&device.host, device.ssh_port, &device.ssh_user, device.os, device.os_source)
     {
         monitor.forget(id);
     }

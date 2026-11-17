@@ -3,14 +3,15 @@
 //! screens are told with an event whenever there is something new to show.
 
 use crate::error::{Error, Result};
-use crate::inventory::{Device, DeviceKind, Found, Inventory, now};
+use crate::history::Check;
+use crate::inventory::{Device, DeviceKind, Found, Inventory, OsSource, now};
 use crate::localstats;
 use crate::net::{self, Located, ScanProgress, Target};
 use crate::secrets;
 use crate::ssh::{self, HostKey, Login, Session, SshError};
 use crate::stats::{self, CpuTicks, MachineStats};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,8 @@ pub const KEY_PASSPHRASE: &str = "ssh-key-passphrase";
 const MIN_GAP: Duration = Duration::from_secs(2);
 /// Machines read at the same time.
 const STATS_AT_ONCE: usize = 4;
+/// Machines whose ports are looked at the same time, to guess their system.
+const HINTS_AT_ONCE: usize = 8;
 
 /// Keychain entry for one machine's SSH password.
 pub fn password_key(device_id: i64) -> String {
@@ -139,6 +142,9 @@ pub struct Monitor {
     checking: tokio::sync::Mutex<()>,
     scanning: AtomicBool,
     cancel_scan: Arc<AtomicBool>,
+    /// Machines whose system has been guessed from the network (or tried)
+    /// while the app runs: each one only once (see `hint_systems`).
+    hinted: Mutex<HashSet<i64>>,
 }
 
 /// Clears the "scan running" flag however the scan ends.
@@ -161,6 +167,28 @@ fn wants_stats(d: &Device) -> bool {
 /// (`this_pc`, from `localstats::this_pc_ids`), which needs none.
 fn reads_stats(d: &Device, this_pc: &BTreeSet<i64>) -> bool {
     wants_stats(d) || this_pc.contains(&d.id)
+}
+
+/// Machines whose system is guessed from the ports that answer: those on the
+/// Machines screen (the owner made them a PC, server, VM, container or
+/// appliance) whose system isn't known yet or was only guessed that way, and
+/// not this PC (`this_pc`), which knows its own.
+fn wants_hint(d: &Device, this_pc: &BTreeSet<i64>) -> bool {
+    let machine = matches!(
+        d.kind,
+        DeviceKind::Pc | DeviceKind::Server | DeviceKind::Vm | DeviceKind::Container | DeviceKind::Appliance
+    );
+    machine && matches!(d.os_source, None | Some(OsSource::Network)) && !this_pc.contains(&d.id)
+}
+
+/// Whether a reading begun with the device as it was then (`before`) still
+/// belongs to it as it is `now`: the same address, login and, if the owner
+/// chose one, System. A System home-cc found by itself meanwhile (guessed
+/// from the network while the login ran, say) doesn't make it another place.
+fn same_place(before: &Device, now: &Device) -> bool {
+    let chosen = |d: &Device| (d.os_source == Some(OsSource::Manual)).then_some(d.os);
+    (now.host.as_str(), now.ssh_port, &now.ssh_user, chosen(now))
+        == (before.host.as_str(), before.ssh_port, &before.ssh_user, chosen(before))
 }
 
 fn error_kind(e: &SshError) -> StatsErrorKind {
@@ -227,17 +255,18 @@ impl Monitor {
     /// Check every tracked device once and store the results.
     pub async fn check_round(&self, app: &AppHandle) -> Result<()> {
         let _one_at_a_time = self.checking.lock().await;
-        let targets: Vec<Target> = app
-            .state::<Inventory>()
-            .list()?
-            .into_iter()
+        let list = app.state::<Inventory>().list()?;
+        let targets: Vec<Target> = list
+            .iter()
             .filter(|d| d.kind != DeviceKind::Ignore)
-            .map(|d| Target { device_id: d.id, host: d.host, mac: d.mac })
+            .map(|d| Target { device_id: d.id, host: d.host.clone(), mac: d.mac.clone() })
             .collect();
         let outcome = match net::check(targets).await {
             Ok(results) => {
                 *self.check_problem.lock().unwrap() = None;
-                app.state::<Inventory>().record_pings(&results, now())
+                let recorded = app.state::<Inventory>().record_pings(&results, now());
+                self.hint_systems(app, &list, &results);
+                recorded
             }
             Err(e) => {
                 // Nothing is recorded: "down" would be wrong for every device.
@@ -247,6 +276,57 @@ impl Monitor {
         };
         app.emit(EVENT_STATUS, ()).ok();
         outcome
+    }
+
+    /// Guess the system of the machines that answered this round and want it
+    /// (`wants_hint`), from the ports that answer (`net::hints`). Each machine
+    /// at most once while the app runs, and in the background: the status
+    /// round doesn't wait for it.
+    fn hint_systems(&self, app: &AppHandle, list: &[Device], results: &[Check]) {
+        let up: HashSet<i64> = results.iter().filter(|c| c.up).map(|c| c.device_id).collect();
+        let this_pc = net::own_devices();
+        let due: Vec<(i64, String, u16)> = {
+            let mut hinted = self.hinted.lock().unwrap();
+            list.iter()
+                .filter(|d| up.contains(&d.id) && wants_hint(d, &this_pc))
+                .filter(|d| hinted.insert(d.id))
+                .map(|d| (d.id, d.host.clone(), d.ssh_port))
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let gate = Arc::new(Semaphore::new(HINTS_AT_ONCE));
+            let mut running = JoinSet::new();
+            for (device_id, host, ssh_port) in due {
+                let gate = gate.clone();
+                running.spawn(async move {
+                    let _slot = gate.acquire_owned().await;
+                    let os = net::hints::probe(&host, ssh_port).await;
+                    (device_id, host, os)
+                });
+            }
+            while let Some(done) = running.join_next().await {
+                let Ok((device_id, host, os)) = done else { continue };
+                // Pointed somewhere else meanwhile (the round's list may be from
+                // before the edit): the answer is about the old place, and the
+                // new one is tried in a later round.
+                if !app.state::<Inventory>().get(device_id).is_ok_and(|d| d.host == host) {
+                    app.state::<Monitor>().hinted.lock().unwrap().remove(&device_id);
+                    continue;
+                }
+                let Some(os) = os else { continue };
+                match app.state::<Inventory>().learn_os(device_id, os, OsSource::Network) {
+                    Ok(true) => {
+                        app.emit(EVENT_STATUS, ()).ok();
+                    }
+                    Ok(false) => {}
+                    Err(e) => crate::diag::note(format!("could not store the system guessed for device {device_id}: {e}")),
+                }
+            }
+        });
     }
 
     /// Why status checks can't work at all, with what to do about it.
@@ -342,6 +422,8 @@ impl Monitor {
     /// at a different machine.
     pub fn forget(&self, device_id: i64) {
         self.stats.lock().unwrap().remove(&device_id);
+        // Its system may be guessed again, at its new place.
+        self.hinted.lock().unwrap().remove(&device_id);
     }
 
     /// Let the timer try one machine again, after its password changed.
@@ -466,7 +548,10 @@ impl Monitor {
                 let first_use = move |key: &HostKey| remember(&first_app, device_id, &host, port, key);
                 let deadline = tokio::time::Instant::now() + stats::TOTAL_LIMIT;
                 match prepared.connect(&first_use).await {
-                    Ok(session) => stats::read(session, prepared.login.host.trim(), device.os, prev_ticks, deadline).await,
+                    Ok(session) => {
+                        let guessed = device.os_source == Some(OsSource::Network);
+                        stats::read(session, prepared.login.host.trim(), device.os, guessed, prev_ticks, deadline).await
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -476,13 +561,20 @@ impl Monitor {
         // The owner may have pointed the device somewhere else, or changed
         // its login, while this reading ran. Its outcome is about the old
         // place, so it is dropped; the edit already started a fresh reading.
-        let same_place = |d: &Device| {
-            (d.host.as_str(), d.ssh_port, &d.ssh_user, d.os)
-                == (device.host.as_str(), device.ssh_port, &device.ssh_user, device.os)
-        };
-        if !app.state::<Inventory>().get(device_id).is_ok_and(|d| same_place(&d)) {
+        if !app.state::<Inventory>().get(device_id).is_ok_and(|d| same_place(&device, &d)) {
             return self.stats.lock().unwrap().get(&device_id).map(|s| s.entry.clone())
                 .unwrap_or_else(|| MachineStatsEntry::empty(device_id));
+        }
+        // What the reading showed the machine runs fills in its System, unless the
+        // owner chose one (inventory::may_replace).
+        if let Some(os) = outcome.as_ref().ok().and_then(|c| c.system) {
+            match app.state::<Inventory>().learn_os(device_id, os, OsSource::Ssh) {
+                Ok(true) => {
+                    app.emit(EVENT_STATUS, ()).ok();
+                }
+                Ok(false) => {}
+                Err(e) => crate::diag::note(format!("could not store the system read from device {device_id}: {e}")),
+            }
         }
         let pinned = app.state::<Inventory>().host_key(device_id).ok().flatten().map(|k| k.fingerprint);
 
@@ -715,6 +807,7 @@ mod tests {
             first_seen: 0,
             last_seen: None,
             group: None,
+            os_source: None,
         }
     }
 
@@ -726,6 +819,41 @@ mod tests {
         assert!(wants_stats(&device(DeviceKind::Pc, Some("sam"))));
         assert!(!wants_stats(&device(DeviceKind::Pc, None)));
         assert!(!wants_stats(&device(DeviceKind::Ignore, Some("sam"))));
+    }
+
+    #[test]
+    fn the_system_is_guessed_only_for_machines_not_known_better() {
+        let machine = |kind, os_source| Device { os_source, ..device(kind, None) };
+        let none = BTreeSet::new();
+        assert!(wants_hint(&machine(DeviceKind::Pc, None), &none), "not known yet");
+        assert!(wants_hint(&machine(DeviceKind::Appliance, None), &none));
+        assert!(wants_hint(&machine(DeviceKind::Server, Some(OsSource::Network)), &none), "a guess may be made again");
+        for known in [OsSource::Manual, OsSource::ThisPc, OsSource::Ssh, OsSource::Proxmox] {
+            assert!(!wants_hint(&machine(DeviceKind::Vm, Some(known)), &none), "{known:?}");
+        }
+        // Not on the Machines screen: a mesh node, a phone, one set to Ignore.
+        for kind in [DeviceKind::Mesh, DeviceKind::Other, DeviceKind::Ignore] {
+            assert!(!wants_hint(&machine(kind, None), &none), "{kind:?}");
+        }
+        assert!(!wants_hint(&machine(DeviceKind::Pc, None), &BTreeSet::from([1])), "this PC");
+    }
+
+    #[test]
+    fn a_reading_is_dropped_only_when_the_owner_changed_where_it_goes() {
+        let before = Device { ssh_user: Some("sam".into()), ..device(DeviceKind::Vm, None) };
+        let with = |os, os_source| Device { os, os_source, ..before.clone() };
+        assert!(same_place(&before, &before));
+        // home-cc found the System by itself while the login ran.
+        assert!(same_place(&before, &with(Os::Linux, Some(OsSource::Network))));
+        assert!(same_place(&with(Os::Windows, Some(OsSource::Network)), &with(Os::Linux, Some(OsSource::Ssh))));
+        // The owner chose one, or gave theirs back to home-cc.
+        assert!(!same_place(&before, &with(Os::Windows, Some(OsSource::Manual))));
+        assert!(!same_place(&with(Os::Linux, Some(OsSource::Manual)), &before));
+        assert!(!same_place(&with(Os::Linux, Some(OsSource::Manual)), &with(Os::Windows, Some(OsSource::Manual))));
+        // Another address, port or user.
+        assert!(!same_place(&before, &Device { host: "192.168.68.41".into(), ..before.clone() }));
+        assert!(!same_place(&before, &Device { ssh_port: 2222, ..before.clone() }));
+        assert!(!same_place(&before, &Device { ssh_user: Some("root".into()), ..before.clone() }));
     }
 
     #[test]
