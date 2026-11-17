@@ -85,7 +85,8 @@
 
 <style>
   .page { display: flex; flex-direction: column; gap: var(--gap); }
-  .cards { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fill, minmax(min(100%, 34rem), 1fr)); align-items: start; }
+  /* The Pi-holes share the width (usually two of them), so a wide screen shows more of each, not empty space. */
+  .cards { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr)); align-items: start; }
   /* The pause choices are wider than a button: they go under the heading rather than squeezing it. */
   .actions { align-items: flex-start; }
 </style>
