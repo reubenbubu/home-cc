@@ -118,7 +118,11 @@ Windows machine.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
     `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH
-    identities) keep their tables in the same file.
+    identities) keep their tables in the same file. A value that is the
+    owner's own (the default SSH user, the key file, the range to scan) is a
+    field of `Settings` in `settings.rs` (with `#[serde(default)]`, so a
+    settings file from before it still loads), never written into the code;
+    hints on screen use made-up examples.
   - `secrets.rs` – passwords and tokens, kept in the system keychain.
   - `net/` – finding the home network, scanning it, naming devices and
     checking they are up.

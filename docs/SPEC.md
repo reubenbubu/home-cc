@@ -36,6 +36,12 @@ Not goals for now:
   already are, in the owner's own key files or SSH agent; the app only stores
   the path of the key file.
 - **Settings and inventory:** a local SQLite file in the user's app data folder.
+- **Nothing of the owner's in the code:** a value that is the owner's own (a
+  user name, a folder, a key file, an address, how many mesh nodes there are)
+  is a setting on the Settings screen or found by the app, never written into
+  the code. Examples in hints are made up ("Office PC", "192.168.1.20"); the
+  sample data and the tests may use made-up names too. Section 3 describes
+  the owner's network only to say what the app must cope with.
 
 Rust libraries:
 
@@ -130,6 +136,12 @@ can take one more timer period to show as down.
   when they were last seen. Most have no SSH, so they have no stats and the app
   doesn't ask for an SSH user; one that does have SSH (a NAS box, say) gets
   stats like any other machine.
+- A machine added by hand starts with the "Default SSH user" chosen in
+  Settings as its SSH user, which the owner can change in the form. With none
+  chosen the field starts empty, with no name suggested. An appliance starts
+  without one (the default comes back if its type is changed again, unless the
+  owner typed a user). Machines already added keep their own, and nothing is
+  filled in when connecting.
 - The PC home-cc runs on needs no SSH: its stats are read directly, with the
   same script and the same numbers an SSH reading would give, and without
   showing a window. If its system is still "Other", the app fills in Windows

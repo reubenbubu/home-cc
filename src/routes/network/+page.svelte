@@ -86,7 +86,7 @@
           {#if mesh.length > 0}<span class="muted small">{upCount(mesh)}</span>{/if}
         </div>
         {#if mesh.length === 0}
-          <p class="muted">No mesh nodes yet. A scan picks out your Deco nodes by their maker; you can also set a device's type to "Mesh node".</p>
+          <p class="muted">No mesh nodes yet. A scan picks out TP-Link Deco nodes by their maker; for any other kind, set a device's type to "Mesh node".</p>
         {:else}
           <DeviceTable list={mesh} variant="known" id="network-mesh" label="mesh nodes" />
         {/if}

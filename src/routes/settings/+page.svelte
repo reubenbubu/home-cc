@@ -109,7 +109,7 @@
 
   function rangeProblem(text: string): string | null {
     const m = RANGE.exec(text.trim());
-    if (!m) return 'Write the range like 192.168.68.0/22: an address, a slash, then a number.';
+    if (!m) return 'Write the range like 192.168.1.0/24: an address, a slash, then a number.';
     if (m.slice(1, 5).some((n) => Number(n) > 255)) return "Each of the four numbers in the address must be 255 or less.";
     if (Number(m[5]) > 32) return "The number after the slash must be 32 or less.";
     return null;
@@ -241,7 +241,7 @@
       {/if}
       {#if rangeChoice === "custom"}
         <label>Range
-          <input class="mono" bind:value={customRange} placeholder="192.168.68.0/22" spellcheck="false" autocomplete="off"
+          <input class="mono" bind:value={customRange} placeholder="192.168.1.0/24" spellcheck="false" autocomplete="off"
             aria-invalid={tried && !!problems.range} aria-describedby="p-range" />
         </label>
         {@render problem(problems.range, "p-range")}
@@ -276,6 +276,14 @@
 
     <section class="panel">
       <h2 class="section-title">SSH login</h2>
+      <label>Default SSH user
+        <input class="mono" bind:value={form.defaultSshUser} placeholder="Leave empty to type one for each machine"
+          spellcheck="false" autocomplete="off" />
+      </label>
+      <p class="hint">
+        Filled in as the SSH user when you add a machine, and you can change it there. Machines already added keep
+        their own.
+      </p>
       <label>Key file
         <input class="mono" bind:value={form.sshKeyPath} placeholder="Leave empty to use the usual ones in your .ssh folder"
           spellcheck="false" autocomplete="off" />

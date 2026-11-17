@@ -201,6 +201,7 @@ export function installMock() {
     diskWarnPct: 85,
     ramWarnPct: 90,
     sshKeyPath: "",
+    defaultSshUser: "",
   };
   const subnets: Subnet[] = [
     { cidr: "192.168.68.0/22", interface: "Ethernet", ownIp: "192.168.68.60", best: true },
@@ -893,7 +894,11 @@ export function installMock() {
       if (!(next.statsIntervalSecs >= 10 && next.statsIntervalSecs <= 3600)) throw "Stats timer must be between 10 seconds and 1 hour";
       const okPct = (n: number) => n >= 1 && n <= 100;
       if (!okPct(next.diskWarnPct) || !okPct(next.ramWarnPct)) throw "Warning levels must be between 1 and 100 percent";
-      Object.assign(settings, next, { scanRange: next.scanRange.trim(), sshKeyPath: unquote(next.sshKeyPath) });
+      Object.assign(settings, next, {
+        scanRange: next.scanRange.trim(),
+        sshKeyPath: unquote(next.sshKeyPath),
+        defaultSshUser: next.defaultSshUser.trim(),
+      });
       startTimers();
       return { ...settings };
     },
