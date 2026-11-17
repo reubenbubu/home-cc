@@ -76,7 +76,7 @@
             <h2 class="section-title">New <span class="badge">{fresh.length}</span></h2>
             <span class="muted small">Found by a scan. Name each one if you like, then pick what it is.</span>
           </div>
-          <DeviceTable list={fresh} variant="fresh" />
+          <DeviceTable list={fresh} variant="fresh" id="network-new" label="new devices" />
         </section>
       {/if}
 
@@ -88,7 +88,7 @@
         {#if mesh.length === 0}
           <p class="muted">No mesh nodes yet. A scan picks out your Deco nodes by their maker; you can also set a device's type to "Mesh node".</p>
         {:else}
-          <DeviceTable list={mesh} variant="known" />
+          <DeviceTable list={mesh} variant="known" id="network-mesh" label="mesh nodes" />
         {/if}
       </section>
     </div>
@@ -102,7 +102,7 @@
         {#if others.length === 0}
           <p class="muted">Devices you have added or accepted show here.</p>
         {:else}
-          <DeviceTable list={others} variant="known" />
+          <DeviceTable list={others} variant="known" id="network-devices" label="devices" />
         {/if}
       </section>
 
@@ -112,7 +112,7 @@
             <span class="section-title">Ignored</span>
             <span class="muted small">{count(ignored.length, "device")}, not checked</span>
           </summary>
-          <DeviceTable list={ignored} variant="ignored" />
+          <DeviceTable list={ignored} variant="ignored" id="network-ignored" label="ignored devices" />
         </details>
       {/if}
     </div>

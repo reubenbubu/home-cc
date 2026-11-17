@@ -37,8 +37,14 @@
   import { differs, rebased } from "$lib/drafts";
   import { macToSend, repointed } from "$lib/net";
   import { collapsedGroups, machineOrder, NO_GROUP } from "$lib/order.svelte";
+  import { names } from "$lib/names.svelte";
   import { status } from "$lib/status.svelte";
+  import type { Column } from "$lib/table";
+  import { TableView } from "$lib/table.svelte";
   import Address from "$lib/components/Address.svelte";
+  import GroupRow from "$lib/components/table/GroupRow.svelte";
+  import SortButton from "$lib/components/table/SortButton.svelte";
+  import TableTools from "$lib/components/table/TableTools.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import DraftNote from "$lib/components/DraftNote.svelte";
   import GroupMenu from "$lib/components/GroupMenu.svelte";
@@ -140,6 +146,27 @@
   const machines = $derived(devices.list.filter((d) => d.kind !== "ignore" && isMachine(d)).sort(byName));
   const rest = $derived(devices.list.filter((d) => d.kind === "ignore" || !isMachine(d)).sort(byName));
   const rows = $derived(showAll ? [...machines, ...rest] : machines);
+
+  // The "All machines" table can be sorted, grouped and filtered (table.ts). Grouping is offered for the
+  // values machines share: the group they are in (as the cards above), the type and the system.
+  const sshText = (d: Device) => (d.sshUser ? `${d.sshUser} · port ${d.sshPort}` : null);
+  const tableColumns: Column<Device>[] = [
+    { id: "name", label: "Name", value: (d) => d.name },
+    { id: "group", label: "Group", value: (d) => d.group, group: true, choose: true, none: "In no group" },
+    { id: "address", label: "Address", kind: "ip", value: (d) => d.host },
+    { id: "hostname", label: "Hostname", value: (d) => names.text(d.host, d.hostname) },
+    { id: "type", label: "Type", value: (d) => KIND_LABELS[d.kind], group: true, choose: true },
+    { id: "os", label: "System", value: (d) => OS_LABELS[d.os], group: true },
+    { id: "ssh", label: "SSH", value: sshText },
+    { id: "notes", label: "Notes", value: (d) => d.notes },
+  ];
+  const table = new TableView<Device>({
+    id: "machines-all",
+    columns: () => tableColumns,
+    rows: () => rows,
+    key: (d) => d.id,
+    usual: "by name",
+  });
 
   async function open(id: number | "new", input: DeviceInput) {
     if (editing === id && showRename) {
@@ -996,22 +1023,27 @@
         <p class="muted pad">Nothing here yet. Use "Add machine" to add your first one, or scan the network and set a device's type to PC, Server, VM or Appliance.</p>
       {:else}
         <div class="box">
-          <table>
+          <TableTools view={table} label={showAll ? "machines and other devices" : "machines"} noun={showAll ? "devices" : "machines"} />
+          {#if table.shown > 0}
+          <table use:table.watch>
             <thead>
               <tr>
-                <th class="c-name">Name</th>
-                <th class="c-group">Group</th>
-                <th class="c-ip">Address</th>
-                <th class="c-host">Hostname</th>
-                <th class="c-type">Type</th>
-                <th class="c-os">System</th>
-                <th class="c-ssh">SSH</th>
-                <th class="c-notes">Notes</th>
+                <th class="c-name" aria-sort={table.ariaSort("name")}><SortButton view={table} col="name" /></th>
+                <th class="c-group" aria-sort={table.ariaSort("group")}><SortButton view={table} col="group" /></th>
+                <th class="c-ip" aria-sort={table.ariaSort("address")}><SortButton view={table} col="address" /></th>
+                <th class="c-host" aria-sort={table.ariaSort("hostname")}><SortButton view={table} col="hostname" /></th>
+                <th class="c-type" aria-sort={table.ariaSort("type")}><SortButton view={table} col="type" /></th>
+                <th class="c-os" aria-sort={table.ariaSort("os")}><SortButton view={table} col="os" /></th>
+                <th class="c-ssh" aria-sort={table.ariaSort("ssh")}><SortButton view={table} col="ssh" /></th>
+                <th class="c-notes" aria-sort={table.ariaSort("notes")}><SortButton view={table} col="notes" /></th>
                 <th class="c-actions"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
+            {#each table.sections as section (section.key)}
             <tbody>
-              {#each rows as d (d.id)}
+              {#if section.label !== null}<GroupRow view={table} {section} />{/if}
+              {#if section.open}
+              {#each section.rows as d (d.id)}
                 <tr class:selected={editing === d.id}>
                   <td class="c-name name" title={d.name}>{d.name}</td>
                   <td class="c-group muted" title={d.group ?? "In no group"}>{d.group ?? "–"}</td>
@@ -1031,8 +1063,11 @@
                   </div></td>
                 </tr>
               {/each}
+              {/if}
             </tbody>
+            {/each}
           </table>
+          {/if}
         </div>
       {/if}
     </section>
