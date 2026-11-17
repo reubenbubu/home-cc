@@ -18,8 +18,30 @@ export interface ManualStep {
   command: string;
 }
 
+/** The part of a key line that names the key: its type and the key itself, without the comment. */
+export function keyBody(publicKey: string): string {
+  return publicKey.trim().split(/\s+/).slice(0, 2).join(" ");
+}
+
+/** PowerShell that adds the key to the file named by the variable $f, as home-cc's own script does: skipped if
+ *  the key is already on a line that isn't commented out, put on a line of its own even when the file doesn't end
+ *  with a line break, and written as UTF-8 without a byte order mark (the SSH server can't read UTF-16, which is
+ *  what Windows PowerShell's own ">>" and Add-Content may write). */
+function psAppend(key: string): string {
+  // "`n" and "`r`n" are PowerShell's line breaks.
+  return (
+    `$k=${psQuote(key)}; $b=${psQuote(keyBody(key))}; $t=''; ` +
+    "if (Test-Path -LiteralPath $f) { $t=[IO.File]::ReadAllText($f) }; " +
+    "if (-not ($t -split \"`n\" | Where-Object { $_ -notmatch '^\\s*#' -and $_.Contains($b) })) { " +
+    "if ($t.Length -gt 0 -and -not $t.EndsWith(\"`n\")) { $t+=\"`r`n\" }; " +
+    "[IO.File]::WriteAllText($f, $t+$k+\"`r`n\", (New-Object Text.UTF8Encoding $false)) }"
+  );
+}
+
 /** Commands that add the key by hand, to run on the machine itself. What home-cc does by itself, more or less,
- *  for when it can't (password logins turned off, say). */
+ *  for when it can't (password logins turned off, say). Like home-cc's own scripts, they can be run twice
+ *  without adding the key twice, and they never join the key onto the last line of a file that doesn't end with
+ *  a line break, which would spoil both keys. */
 export function manualSteps(publicKey: string, os: Os): ManualStep[] {
   const key = publicKey.trim();
   if (os === "windows") {
@@ -28,14 +50,14 @@ export function manualSteps(publicKey: string, os: Os): ManualStep[] {
       {
         where: "For an administrator account: in PowerShell run as administrator on that machine",
         command:
-          `Add-Content -Encoding ascii -Path "${admin}" -Value ${psQuote(key)}; ` +
-          `icacls.exe "${admin}" /inheritance:r /grant '*S-1-5-32-544:F' '*S-1-5-18:F'`,
+          `$f="${admin}"; ${psAppend(key)}; ` +
+          `icacls.exe $f /inheritance:r /grant '*S-1-5-32-544:F' '*S-1-5-18:F'`,
       },
       {
         where: "For any other account: in PowerShell, logged in as that user",
         command:
           `New-Item -Force -ItemType Directory "$env:USERPROFILE\\.ssh" | Out-Null; ` +
-          `Add-Content -Encoding ascii -Path "$env:USERPROFILE\\.ssh\\authorized_keys" -Value ${psQuote(key)}`,
+          `$f="$env:USERPROFILE\\.ssh\\authorized_keys"; ${psAppend(key)}`,
       },
     ];
   }
@@ -43,8 +65,10 @@ export function manualSteps(publicKey: string, os: Os): ManualStep[] {
     {
       where: "In a terminal on that machine, logged in as the SSH user",
       command:
-        `mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo ${shQuote(key)} >> ~/.ssh/authorized_keys && ` +
-        "chmod 600 ~/.ssh/authorized_keys",
+        `mkdir -p ~/.ssh && chmod 700 ~/.ssh && f="$HOME/.ssh/authorized_keys" && ` +
+        `{ grep -v '^[[:space:]]*#' "$f" 2>/dev/null | grep -qF ${shQuote(keyBody(key))} || ` +
+        `{ if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then echo >> "$f"; fi; printf '%s\\n' ${shQuote(key)} >> "$f"; }; } && ` +
+        `chmod 600 "$f"`,
     },
   ];
 }

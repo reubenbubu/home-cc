@@ -183,6 +183,27 @@ pub async fn connect(
     login: &Login,
     first_use: &(dyn Fn(&HostKey) + Send + Sync),
 ) -> Result<Session, SshError> {
+    connect_with(login, first_use, false).await
+}
+
+/// [`connect`] for a machine whose identity is stored in `login.known_key` but has not
+/// been approved by the owner: the password is held back just as on a first connection,
+/// and the failure is [`SshError::NewHost`] (with the identity the server showed) only if
+/// the password would otherwise have had its turn. A server that takes no passwords
+/// gives an ordinary [`SshError::AuthFailed`] instead, because approving would change
+/// nothing. A changed identity is still [`SshError::HostKeyChanged`].
+pub async fn connect_holding_password_back(
+    login: &Login,
+    first_use: &(dyn Fn(&HostKey) + Send + Sync),
+) -> Result<Session, SshError> {
+    connect_with(login, first_use, true).await
+}
+
+async fn connect_with(
+    login: &Login,
+    first_use: &(dyn Fn(&HostKey) + Send + Sync),
+    hold_password: bool,
+) -> Result<Session, SshError> {
     let deadline = Instant::now() + CONNECT_LIMIT;
     let host = login.host.trim();
     let user = login.user.trim();
@@ -227,6 +248,7 @@ pub async fn connect(
     }
 
     let mut auth = Auth::new(&mut handle, user);
+    auth.hold_password = hold_password;
     let logged_in = match timeout_at(deadline, auth.run(login)).await {
         Ok(logged_in) => logged_in,
         Err(_) => {
@@ -711,6 +733,9 @@ struct Auth<'a> {
     refused_keys: Vec<KeyId>,
     /// Key files that have not had their turn yet.
     files: Vec<KeyFile>,
+    /// The password must not be sent even to the identity in `known_key`, because the
+    /// owner hasn't approved it: see [`connect_holding_password_back`].
+    hold_password: bool,
 }
 
 impl<'a> Auth<'a> {
@@ -725,6 +750,7 @@ impl<'a> Auth<'a> {
             rsa_hash: None,
             refused_keys: Vec::new(),
             files: Vec::new(),
+            hold_password: false,
         }
     }
 
@@ -942,7 +968,7 @@ impl<'a> Auth<'a> {
             self.tried.push(Tried::CutOff);
             return false;
         }
-        let stored = password_to_send(login);
+        let stored = password_to_send(login, self.hold_password);
         if stored == Password::NotStored {
             return false;
         }
@@ -1025,11 +1051,12 @@ enum Password<'a> {
 /// The one place that decides whether the stored password is sent, for the plain
 /// password login and for the typed answer alike. With an identity in `known_key` the
 /// server has already shown exactly that one by the time anything is sent, or the
-/// connection would have ended with [`SshError::HostKeyChanged`].
-fn password_to_send(login: &Login) -> Password<'_> {
+/// connection would have ended with [`SshError::HostKeyChanged`]. `hold` keeps it back
+/// from an identity that is stored but not approved.
+fn password_to_send(login: &Login, hold: bool) -> Password<'_> {
     match login.password.as_deref().filter(|p| !p.is_empty()) {
         None => Password::NotStored,
-        Some(_) if login.known_key.is_none() => Password::Withheld,
+        Some(_) if hold || login.known_key.is_none() => Password::Withheld,
         Some(password) => Password::Send(password),
     }
 }
@@ -1914,16 +1941,18 @@ mod tests {
     #[test]
     fn stored_password_is_only_for_a_machine_whose_identity_is_stored() {
         let mut login = login();
-        assert_eq!(password_to_send(&login), Password::NotStored);
+        assert_eq!(password_to_send(&login, false), Password::NotStored);
         login.password = Some(String::new());
-        assert_eq!(password_to_send(&login), Password::NotStored, "an empty password is no password");
+        assert_eq!(password_to_send(&login, false), Password::NotStored, "an empty password is no password");
         login.password = Some("secret".into());
-        assert_eq!(password_to_send(&login), Password::Withheld, "first connection");
+        assert_eq!(password_to_send(&login, false), Password::Withheld, "first connection");
 
         login.known_key = Some(HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:abc".into() });
-        assert_eq!(password_to_send(&login), Password::Send("secret"));
+        assert_eq!(password_to_send(&login, false), Password::Send("secret"));
+        assert_eq!(password_to_send(&login, true), Password::Withheld, "stored but not approved");
         login.password = Some(String::new());
-        assert_eq!(password_to_send(&login), Password::NotStored);
+        assert_eq!(password_to_send(&login, false), Password::NotStored);
+        assert_eq!(password_to_send(&login, true), Password::NotStored);
     }
 
     #[test]

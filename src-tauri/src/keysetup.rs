@@ -25,7 +25,7 @@ use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
@@ -203,7 +203,9 @@ pub async fn setup_key_login(app: AppHandle, device_id: i64, password: Option<St
     let password_typed = typed.is_some();
     let password = typed.or(stored.filter(|p| !p.is_empty()));
     let job = Job {
-        password_held_back: password.is_some() && !approved,
+        // A password only ever goes to an identity the owner approved: `run` has ssh.rs
+        // hold it back otherwise.
+        identity_approved: approved,
         password_typed,
         login: Login {
             host: device.host.clone(),
@@ -212,8 +214,7 @@ pub async fn setup_key_login(app: AppHandle, device_id: i64, password: Option<St
             known_key,
             key_path: chosen,
             key_passphrase,
-            // A password only ever goes to an identity the owner approved.
-            password: password.filter(|_| approved),
+            password,
         },
         key,
         os: device.os,
@@ -513,12 +514,12 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
 
 /// Everything [`run`] needs, gathered by [`setup_key_login`].
 struct Job {
-    /// The password is in here only if the owner approved the machine's identity.
+    /// The password in here is sent only if `identity_approved` is true.
     login: Login,
-    /// A password is typed or stored, but it was left out of `login`: the identity
-    /// isn't approved.
-    password_held_back: bool,
-    /// The password (in `login` or held back) is the one typed in the form.
+    /// The owner approved the identity in `login.known_key`. If not, the password is
+    /// held back (see [`ssh::connect_holding_password_back`]).
+    identity_approved: bool,
+    /// The password in `login` is the one typed in the form.
     password_typed: bool,
     key: KeyLine,
     /// What the owner said the machine runs. The server's own greeting wins.
@@ -529,19 +530,20 @@ struct Job {
 
 impl Job {
     fn has_password(&self) -> bool {
-        self.login.has_password() || self.password_held_back
+        self.login.has_password()
     }
 }
 
 /// Log in, add the key, log in again with keys only. An error is a message for the owner.
 async fn run(job: &Job, first_use: &(dyn Fn(&HostKey) + Send + Sync)) -> std::result::Result<KeySetupOutcome, String> {
-    let shown: Arc<Mutex<Option<HostKey>>> = Arc::default();
-    let seen = shown.clone();
-    let remember = move |key: &HostKey| {
-        *seen.lock().unwrap() = Some(key.clone());
-        first_use(key);
+    // ssh.rs holds the password back from an identity nobody approved, and asks for
+    // the approval (NewHost) only if the server would have taken the password.
+    let connected = if job.identity_approved {
+        ssh::connect(&job.login, first_use).await
+    } else {
+        ssh::connect_holding_password_back(&job.login, first_use).await
     };
-    let session = match ssh::connect(&job.login, &remember).await {
+    let session = match connected {
         Ok(session) => session,
         Err(SshError::HostKeyChanged { expected, got }) => {
             return Ok(KeySetupOutcome::Approve {
@@ -551,17 +553,6 @@ async fn run(job: &Job, first_use: &(dyn Fn(&HostKey) + Send + Sync)) -> std::re
         }
         Err(SshError::NewHost(key)) => {
             return Ok(KeySetupOutcome::Approve { offered_key: OfferedKey::from(&key), expected_fingerprint: None });
-        }
-        // No key got in, and the password was kept back because nobody has approved
-        // this identity: show it to the owner.
-        Err(SshError::AuthFailed(message)) if job.password_held_back => {
-            let key = job.login.known_key.clone().or_else(|| shown.lock().unwrap().clone());
-            return match key {
-                Some(key) => {
-                    Ok(KeySetupOutcome::Approve { offered_key: OfferedKey::from(&key), expected_fingerprint: None })
-                }
-                None => Err(format!("{message} The machine did not show an identity to approve.")),
-            };
         }
         Err(SshError::AuthFailed(message)) => return Err(login_failed(job, &message)),
         Err(e) => return Err(format!("Couldn't connect to {} to set up key login. {e}", job.name)),
@@ -627,7 +618,9 @@ fn is_windows(server_version: &str, os: Os) -> bool {
 /// What the script for Linux and other Unix systems does, read from its stdin by `sh -s`,
 /// so no shell sees it as a command line. The key goes in single quotes; [`KeyLine`] has
 /// no character that could end them. Like ssh-copy-id: make ~/.ssh if needed, add the line
-/// unless the key is already there (with any comment or options), fix the permissions
+/// unless the key is already there (with any comment or options, but not on a line that
+/// is commented out; "NOTE options" if every copy has options before it, such as from=,
+/// which may keep this PC out), fix the permissions
 /// StrictModes wants, and report what it found as "HOMECC:" lines. chmod is allowed to
 /// fail: on a Proxmox host root's authorized_keys is a link into /etc/pve, which has no
 /// permissions to change.
@@ -643,8 +636,13 @@ dir="$HOME/.ssh"
 file="$dir/authorized_keys"
 [ -d "$dir" ] || mkdir "$dir" || fail mkdir
 chmod 700 "$dir" 2>/dev/null || say "NOTE chmod-dir"
-if [ -f "$file" ] && grep -qF -e "$body" "$file" 2>/dev/null; then
+found=
+[ -f "$file" ] && found=$(grep -v -e '^[[:space:]]*#' "$file" 2>/dev/null | grep -F -e "$body" | sed 's/^[[:space:]]*//')
+if [ -n "$found" ]; then
   say ALREADY
+  nl='
+'
+  case "$nl$found" in *"$nl$body"*) ;; *) say "NOTE options" ;; esac
 else
   if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
     printf '\n' >> "$file" || fail write
@@ -695,7 +693,9 @@ try{$text='';$bom=$false
 if(Test-Path -LiteralPath $file){$b=[IO.File]::ReadAllBytes($file)
 $bom=$b.Length -gt 1 -and $b[0] -in 0xEF,0xFE,0xFF
 $text=[IO.File]::ReadAllText($file)}
-$new=-not $text.Contains($body)
+$found=@($text -split "`n"|?{$_ -notmatch '^\s*#' -and $_.Contains($body)})
+$new=$found.Count -eq 0
+if(-not $new -and -not ($found|?{$_.TrimStart().StartsWith($body)})){Say 'NOTE options'}
 if($new){if($text.Length -gt 0 -and -not $text.EndsWith("`n")){$text+="`r`n"};$text+=$key+"`r`n"}
 if($new -or $bom){[IO.File]::WriteAllText($file,$text,(New-Object Text.UTF8Encoding $false))}
 if($bom){Say 'NOTE encoding'}
@@ -878,6 +878,19 @@ fn key_refused_advice(job: &Job, windows: bool, report: &Report, seen: &str) -> 
     if seen.contains("locked with a passphrase") || seen.contains("passphrase stored in Settings") {
         tips.push("This PC's key is locked with a passphrase: store the passphrase in Settings.".into());
     }
+    let file = report.file.as_deref().unwrap_or("authorized_keys");
+    if report.already && report.notes.iter().any(|n| n == "options") {
+        tips.push(format!(
+            "This PC's key is in {file} only with options in front of it, such as from=\"…\" (which lets it in \
+             from some addresses only) or command=\"…\". Check that line on {name}: remove the options, or add \
+             the key again on a line of its own."
+        ));
+    } else if report.already {
+        tips.push(format!(
+            "This PC's key was already in {file}, so home-cc left it as it was. Check that line on {name} for \
+             options in front of the key, such as from=\"…\", that keep this PC out."
+        ));
+    }
     for line in &report.config {
         let lower = line.to_ascii_lowercase();
         let words: Vec<&str> = lower.split_whitespace().collect();
@@ -979,7 +992,7 @@ mod tests {
     }
 
     fn job(login: Login, key: KeyLine) -> Job {
-        Job { login, password_held_back: false, password_typed: false, key, os: Os::Linux, name: "proxmox".into() }
+        Job { login, identity_approved: true, password_typed: false, key, os: Os::Linux, name: "proxmox".into() }
     }
 
     fn login() -> Login {
@@ -1173,8 +1186,21 @@ mod tests {
         assert!(run_linux_script(&scratch.0, &line).added);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("ssh-rsa AAAAB3Nza other@pc\n{}\n", line.line));
 
+        // With options in front it counts as there, and the report says so: from= may keep this PC out.
         std::fs::write(&file, format!("from=\"192.168.68.0/22\" {}\n", line.body)).unwrap();
-        assert!(run_linux_script(&scratch.0, &line).already);
+        let restricted = run_linux_script(&scratch.0, &line);
+        assert!(restricted.already && restricted.notes.contains(&"options".to_string()), "{restricted:?}");
+        // A plain copy as well (spaces in front are no options): nothing to say.
+        std::fs::write(&file, format!("from=\"192.168.68.0/22\" {}\n  {}\n", line.body, line.line)).unwrap();
+        let plain = run_linux_script(&scratch.0, &line);
+        assert!(plain.already && plain.notes.is_empty(), "{plain:?}");
+
+        // A copy the owner commented out doesn't count: the key is added on a line of its own.
+        let disabled = format!("#{}\n  # {}\n", line.line, line.body);
+        std::fs::write(&file, &disabled).unwrap();
+        let report = run_linux_script(&scratch.0, &line);
+        assert!(report.added && !report.already, "{report:?}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{disabled}{}\n", line.line));
     }
 
     #[cfg(unix)]
@@ -1196,6 +1222,8 @@ mod tests {
         assert!(script.contains(&format!("$key='{}'", line.line)));
         assert!(script.contains(r"$env:ProgramData\ssh\administrators_authorized_keys"));
         assert!(script.contains(r#"$env:USERPROFILE\.ssh";$file="$dir\authorized_keys""#));
+        // A copy of the key on a commented-out line doesn't count as there.
+        assert!(script.contains(r"?{$_ -notmatch '^\s*#' -and $_.Contains($body)}"));
         // Administrators are found by SID, and their file is opened to Administrators and SYSTEM only.
         assert!(script.contains("S-1-5-32-544") && script.contains("'*S-1-5-32-544:F' '*S-1-5-18:F'"));
         assert!(script.contains("/inheritance:r"));
@@ -1269,6 +1297,15 @@ mod tests {
         let advice = key_refused_advice(&job(login(), sample_line("x")), false, &tidy, "");
         assert!(!advice.contains("changed by other users") && !advice.contains("somewhere else"), "{advice}");
         assert!(key_refused_advice(&job(login(), sample_line("x")), false, &tidy, "The key file id_ed25519 is locked with a passphrase").contains("store the passphrase in Settings"));
+        assert!(!advice.contains("options"), "{advice}");
+
+        // Already there, but only with options in front: that line is the likely cause.
+        let restricted = parse_report(b"HOMECC:ALREADY\nHOMECC:NOTE options\nHOMECC:FILE /home/reuben/.ssh/authorized_keys\n");
+        let advice = key_refused_advice(&job(login(), sample_line("x")), false, &restricted, "");
+        assert!(advice.contains("in /home/reuben/.ssh/authorized_keys only with options in front of it"), "{advice}");
+        let already = parse_report(b"HOMECC:ALREADY\nHOMECC:FILE /home/reuben/.ssh/authorized_keys\n");
+        let advice = key_refused_advice(&job(login(), sample_line("x")), false, &already, "");
+        assert!(advice.contains("already in /home/reuben/.ssh/authorized_keys") && advice.contains("from="), "{advice}");
     }
 
     #[test]
@@ -1309,6 +1346,7 @@ mod tests {
         use russh::server::{self, Auth, Msg, PublicKeyOffer, VerifiedPublicKey};
         use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet};
         use russh::keys::ssh_key::private::Ed25519Keypair;
+        use std::sync::Arc;
 
         const USER: &str = "reuben";
         const PASSWORD: &str = "correct horse battery";
@@ -1320,6 +1358,11 @@ mod tests {
         }
 
         async fn start(home: PathBuf) -> Server {
+            start_taking(home, &[MethodKind::PublicKey, MethodKind::Password]).await
+        }
+
+        /// A server that offers only these ways to log in.
+        async fn start_taking(home: PathBuf, methods: &[MethodKind]) -> Server {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let server_key = PrivateKey::from(Ed25519Keypair::from_seed(&[1; 32]));
@@ -1327,7 +1370,7 @@ mod tests {
                 algorithm: server_key.algorithm().to_string(),
                 fingerprint: fingerprint(server_key.public_key()),
             };
-            let methods = MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password][..]);
+            let methods = MethodSet::from(methods);
             let config = Arc::new(server::Config {
                 keys: vec![server_key],
                 methods: methods.clone(),
@@ -1471,7 +1514,7 @@ mod tests {
                     key_passphrase: None,
                     password: Some(PASSWORD.into()),
                 },
-                password_held_back: false,
+                identity_approved: true,
                 password_typed: true,
                 key: key.clone(),
                 os: Os::Linux,
@@ -1524,8 +1567,7 @@ mod tests {
             // First contact: the password is held back, as setup_key_login does it.
             let mut job = job_for(&server, &client.0, &key);
             job.login.known_key = None;
-            job.login.password = None;
-            job.password_held_back = true;
+            job.identity_approved = false;
             let remembered = Mutex::new(Vec::new());
             let outcome = run(&job, &|k: &HostKey| remembered.lock().unwrap().push(k.clone())).await.unwrap();
             assert_eq!(
@@ -1534,6 +1576,16 @@ mod tests {
             );
             assert_eq!(*remembered.lock().unwrap(), [server.host_key.clone()], "remembered, to notice a change");
             assert!(server.passwords.lock().unwrap().is_empty(), "no password was sent");
+            assert!(!remote.0.join(".ssh/authorized_keys").exists());
+
+            // The identity remembered on first contact, but not approved yet: still nothing is sent.
+            job.login.known_key = Some(server.host_key.clone());
+            let outcome = run(&job, &never).await.unwrap();
+            assert_eq!(
+                outcome,
+                KeySetupOutcome::Approve { offered_key: OfferedKey::from(&server.host_key), expected_fingerprint: None }
+            );
+            assert!(server.passwords.lock().unwrap().is_empty(), "no password to a remembered identity");
             assert!(!remote.0.join(".ssh/authorized_keys").exists());
 
             // A machine that shows another identity than the stored one: nothing is sent either.
@@ -1547,6 +1599,23 @@ mod tests {
                 }
             );
             assert!(server.passwords.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn no_approval_is_asked_for_when_the_server_takes_no_passwords() {
+            let remote = Scratch::new("remote-keys-only");
+            let client = Scratch::new("client-keys-only");
+            create_key_in(&client.0.join(".ssh"), "jim@main-pc", None).unwrap();
+            let key = parse_key_line(&find_local_key(None, Some(&client.0), &no_passphrase).public_key.unwrap()).unwrap();
+            let server = start_taking(remote.0.clone(), &[MethodKind::PublicKey]).await;
+            for known_key in [None, Some(server.host_key.clone())] {
+                let mut job = job_for(&server, &client.0, &key);
+                job.login.known_key = known_key;
+                job.identity_approved = false;
+                let error = run(&job, &|_: &HostKey| {}).await.unwrap_err();
+                assert!(error.contains("PasswordAuthentication no"), "{error}");
+                assert!(server.passwords.lock().unwrap().is_empty());
+            }
         }
 
         #[tokio::test]
