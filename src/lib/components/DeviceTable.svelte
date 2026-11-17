@@ -88,11 +88,13 @@
 
   /** A rename kept from before the owner looked at another screen, not put back in its field yet. */
   let resumed = rename != null;
+  /** A link to another screen (the one to this screen, shown as the current one, goes nowhere). */
+  const ELSEWHERE = 'a[href]:not([aria-current="page"])';
   /** The last press was on a link: the owner is going to another screen. */
   let towardLink = false;
   $effect(() => {
     if (renaming === null) return;
-    const down = (e: PointerEvent) => (towardLink = e.target instanceof Element && !!e.target.closest("a[href]"));
+    const down = (e: PointerEvent) => (towardLink = e.target instanceof Element && !!e.target.closest(ELSEWHERE));
     window.addEventListener("pointerdown", down, true);
     return () => window.removeEventListener("pointerdown", down, true);
   });
@@ -108,7 +110,7 @@
    *  with this screen (drafts.svelte.ts). */
   function renameBlur(e: FocusEvent, d: Device) {
     const to = e.relatedTarget;
-    if (towardLink || (to instanceof Element && to.closest("a[href]"))) {
+    if (towardLink || (to instanceof Element && to.closest(ELSEWHERE))) {
       towardLink = false;
       return;
     }

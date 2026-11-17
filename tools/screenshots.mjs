@@ -2260,7 +2260,7 @@ async function checkFlows(browser, url) {
       async run(page) {
         const form = page.locator("form");
         const passphrase = form.getByLabel("Passphrase for the new key (optional)");
-        /** Opens Homelab VM's form, and its key login unless it is open already. */
+        /** Opens Homelab VM's form. */
         const openKeys = async () => {
           await page.getByRole("button", { name: "Edit Homelab VM" }).click();
           await form.getByRole("heading", { name: "Edit machine" }).waitFor();
@@ -2380,6 +2380,16 @@ async function checkFlows(browser, url) {
         await devices.getByRole("heading", { name: "Devices", exact: true }).click();
         await devices.getByRole("button", { name: "Monitoring", exact: true }).waitFor();
         if ((await savedName()) !== "Monitoring") throw new Error(`pressing elsewhere saved "${await savedName()}"`);
+        // So does pressing the link to this screen, which goes nowhere.
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).click();
+        await page.getByLabel("New name for Monitoring").fill("Monitoring box");
+        await page.getByRole("link", { name: "Network", exact: true }).click();
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).waitFor();
+        if ((await savedName()) !== "Monitoring box") throw new Error(`pressing the Network link saved "${await savedName()}"`);
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).click();
+        await page.getByLabel("New name for Monitoring box").fill("Monitoring");
+        await page.getByLabel("New name for Monitoring box").press("Enter");
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).waitFor();
       },
     },
     {
