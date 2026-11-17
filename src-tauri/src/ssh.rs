@@ -3,10 +3,13 @@
 //!
 //! [`connect`] checks the server's identity first and only then logs in, with
 //! whatever works: keys held by an SSH agent, key files, then the stored
-//! password. Everything is bounded by time limits, and text from the server is
-//! treated as untrusted. Nothing here needs administrator rights.
+//! password. A key file the owner set up in Settings goes before the agent.
+//! Everything is bounded by time limits, and text from the server is treated
+//! as untrusted. Nothing here needs administrator rights.
 
 use std::borrow::Cow;
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -65,11 +68,16 @@ pub enum SshError {
 const CONNECT_LIMIT: Duration = Duration::from_secs(20);
 /// A machine that is switched off answers with silence. Don't spend the whole limit on it.
 const TCP_LIMIT: Duration = Duration::from_secs(8);
+/// A name can stand for several addresses (often an IPv6 one and an IPv4 one). A silent
+/// address is given up on after this long, so the next one still gets its turn.
+const TCP_EACH: Duration = Duration::from_secs(3);
+/// How long the server gets to open one more channel on a connection that is already up.
+const CHANNEL_LIMIT: Duration = Duration::from_secs(10);
 /// How long an SSH agent gets for one answer. An agent can sit waiting for the owner to
 /// unlock a key; the other ways of logging in should still get their turn.
 const AGENT_LIMIT: Duration = Duration::from_secs(5);
 /// Servers hang up after six failed tries by default. Keys stop at five so that a stored
-/// password still gets its turn.
+/// password still gets its turn. Only keys the server turned down count, as on the server.
 const MAX_KEY_TRIES: usize = 5;
 /// Each of stdout and stderr is cut off here, so a runaway command can't fill the memory.
 const MAX_OUTPUT: usize = 1024 * 1024;
@@ -77,7 +85,7 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_KEY_FILE: u64 = 256 * 1024;
 /// The agent holds the keys the owner uses day to day, so it goes first where one normally
 /// runs. On Windows the agent service is off unless an administrator turned it on, so the
-/// key files go first there.
+/// key files go first there. See [`files_go_first`] for the exception.
 const AGENT_FIRST: bool = cfg!(not(windows));
 
 /// What the command printed and how it ended.
@@ -220,7 +228,7 @@ impl Session {
         stdin: Option<&[u8]>,
         limit: Duration,
     ) -> Result<ExecOutput, ExecError> {
-        let deadline = Instant::now() + limit;
+        let deadline = deadline_after(limit);
         let mut channel = match timeout_at(deadline, self.handle.channel_open_session()).await {
             Ok(Ok(channel)) => channel,
             Ok(Err(e)) => return Err(ExecError::Ssh(self.lost(&e))),
@@ -246,7 +254,16 @@ impl Session {
     /// A fresh channel on this connection, for callers that need more than `exec`
     /// (a terminal asks for a PTY and a shell on it).
     pub async fn open_channel(&self) -> Result<russh::Channel<client::Msg>, SshError> {
-        self.handle.channel_open_session().await.map_err(|e| self.lost(&e))
+        // A server can keep answering keepalives and still never answer this request, so
+        // it needs a limit of its own.
+        match timeout(CHANNEL_LIMIT, self.handle.channel_open_session()).await {
+            Ok(Ok(channel)) => Ok(channel),
+            Ok(Err(e)) => Err(self.lost(&e)),
+            Err(_) => Err(SshError::Other(format!(
+                "{} did not open a new session in time. Close other sessions to it, or try again.",
+                self.host
+            ))),
+        }
     }
 
     /// Log out. Dropping the session also closes the connection, without the goodbye.
@@ -261,6 +278,14 @@ impl Session {
             SshError::Other(format!("{} would not start the command ({e}).", self.host))
         }
     }
+}
+
+/// The moment `limit` from now. A limit too long to count (a caller's way of saying
+/// "no limit") becomes a moment far in the future instead of a crash.
+fn deadline_after(limit: Duration) -> Instant {
+    const FAR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+    let now = Instant::now();
+    now.checked_add(limit).or_else(|| now.checked_add(FAR)).unwrap_or(now)
 }
 
 async fn say_goodbye(handle: &client::Handle<Handler>) {
@@ -332,24 +357,54 @@ async fn open_tcp(host: &str, port: u16) -> Result<TcpStream, SshError> {
             "The name {host} was not found. Check the spelling, or use the machine's IP address."
         ))
     };
-    let attempt = async {
-        let addrs = tokio::net::lookup_host((host, port)).await.map_err(|_| not_found())?;
-        let mut last = None;
-        for addr in addrs {
-            match TcpStream::connect(addr).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => last = Some(e),
-            }
-        }
-        Err(match last {
-            Some(e) => tcp_error(host, port, &e),
-            None => not_found(),
-        })
+    let deadline = Instant::now() + TCP_LIMIT;
+    let addrs: Vec<SocketAddr> = match timeout_at(deadline, tokio::net::lookup_host((host, port))).await {
+        Ok(Ok(addrs)) => addrs.collect(),
+        Ok(Err(_)) => return Err(not_found()),
+        Err(_) => return Err(silent()),
     };
-    let stream = timeout(TCP_LIMIT, attempt).await.unwrap_or_else(|_| Err(silent()))?;
+    let stream = match first_to_answer(&addrs, deadline, TCP_EACH, TcpStream::connect).await {
+        Ok(stream) => stream,
+        Err(Some(e)) => return Err(tcp_error(host, port, &e)),
+        Err(None) => return Err(not_found()),
+    };
     // Terminals send single key presses; don't let the system hold them back to batch them.
     let _ = stream.set_nodelay(true);
     Ok(stream)
+}
+
+/// Try each address in turn until one connects, all of it over by `deadline`. An address
+/// that stays silent is given up on after `each`, so a dead first address doesn't use up
+/// the time a working second one needs; the last address may use whatever time is left.
+/// The error is the last one seen, or None if there was no address to try.
+async fn first_to_answer<T, F, Fut>(
+    addrs: &[SocketAddr],
+    deadline: Instant,
+    each: Duration,
+    connect: F,
+) -> Result<T, Option<std::io::Error>>
+where
+    F: Fn(SocketAddr) -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    let mut last = None;
+    let mut addrs = addrs.iter().peekable();
+    while let Some(addr) = addrs.next() {
+        let now = Instant::now();
+        if last.is_some() && now >= deadline {
+            break;
+        }
+        let until = match (addrs.peek(), now.checked_add(each)) {
+            (Some(_), Some(soon)) => soon.min(deadline),
+            _ => deadline,
+        };
+        match timeout_at(until, connect(*addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => last = Some(e),
+            Err(_) => last = Some(std::io::ErrorKind::TimedOut.into()),
+        }
+    }
+    Err(last)
 }
 
 fn tcp_error(host: &str, port: u16, e: &std::io::Error) -> SshError {
@@ -502,11 +557,15 @@ enum Tried {
     AgentUnreachable,
     /// The agent did not answer in time (it may be showing an unlock window).
     AgentSilent,
+    /// The server accepts a key the agent holds, but the agent would not sign with it.
+    AgentDeclined,
     KeyRefused(String),
     /// The key file needs a passphrase and none is stored.
     KeyLocked(String),
     KeyWrongPassphrase(String),
     KeyUnreadable(String),
+    /// The key file was left out because the server allows only a few tries.
+    KeyNotTried(String),
     PasswordRefused,
     /// A password is stored but the server takes keys only.
     PasswordNotTaken,
@@ -518,11 +577,39 @@ enum Tried {
 
 type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin + 'static>>;
 
+/// A key file read before the login starts, with the name to call it by in messages.
+struct KeyFile {
+    name: String,
+    key: Result<PrivateKey, KeyProblem>,
+}
+
+/// One key as the server tells them apart: its fingerprint, and whether it was offered
+/// as a certificate. A certificate and the plain key under it are two separate offers.
+type KeyId = (String, bool);
+
+/// True if the key files are offered before the agent's keys. They are where no agent
+/// normally runs, and also when the owner chose a key file or stored a passphrase in
+/// Settings: that is the key they mean, and offering it first keeps a desktop agent from
+/// showing its unlock window on every background check.
+fn files_go_first(agent_first: bool, login: &Login) -> bool {
+    let chosen = login.key_path.as_deref().is_some_and(|p| !p.as_os_str().is_empty());
+    let passphrase = login.key_passphrase.as_deref().is_some_and(|p| !p.is_empty());
+    !agent_first || chosen || passphrase
+}
+
+/// True if an agent key may be offered: the tries used so far, plus one kept back for
+/// each key file still waiting, must leave room. Agents can hold many keys, and without
+/// this they would use up every try before the key files had their turn.
+fn agent_may_try(key_tries: usize, files_waiting: usize) -> bool {
+    key_tries.saturating_add(files_waiting) < MAX_KEY_TRIES
+}
+
 /// One login in progress: tries each way in turn on the same connection.
 struct Auth<'a> {
     handle: &'a mut client::Handle<Handler>,
     user: &'a str,
     tried: Vec<Tried>,
+    /// Keys the server has turned down so far.
     key_tries: usize,
     /// What the server said it still accepts, from its latest refusal.
     methods: Option<MethodSet>,
@@ -531,9 +618,13 @@ struct Auth<'a> {
     /// Signature kind for RSA keys, asked for once and only if an RSA key turns up
     /// (asking can cost a second on old servers).
     rsa_hash: Option<Option<HashAlg>>,
-    /// Fingerprints already offered. A key that is both in the agent and on disk is
-    /// offered once, because every refusal counts towards the server's limit.
-    offered: Vec<String>,
+    /// Keys the server turned down. A key that is both in the agent and on disk is not
+    /// offered again, because every refusal counts towards the server's limit. A key the
+    /// agent would not sign with is not in here: the server never turned it down, and
+    /// the same key read from its file may well work.
+    refused_keys: Vec<KeyId>,
+    /// Key files that have not had their turn yet.
+    files: Vec<KeyFile>,
 }
 
 impl<'a> Auth<'a> {
@@ -546,7 +637,8 @@ impl<'a> Auth<'a> {
             methods: None,
             gone: false,
             rsa_hash: None,
-            offered: Vec::new(),
+            refused_keys: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -565,10 +657,14 @@ impl<'a> Auth<'a> {
         if !self.gone && !self.allows(MethodKind::PublicKey) {
             self.tried.push(Tried::KeysNotTaken);
         }
-        let with_keys = if AGENT_FIRST {
-            self.agents().await || self.key_files(login).await
+        if self.may_try_key() {
+            // Read ahead of the agent's turn, so it is known how many tries to keep for them.
+            self.files = load_key_files(login).await;
+        }
+        let with_keys = if files_go_first(AGENT_FIRST, login) {
+            self.key_files().await || self.agents().await
         } else {
-            self.key_files(login).await || self.agents().await
+            self.agents().await || self.key_files().await
         };
         with_keys || self.password(login).await
     }
@@ -579,6 +675,20 @@ impl<'a> Auth<'a> {
 
     fn may_try_key(&self) -> bool {
         self.key_tries < MAX_KEY_TRIES && self.allows(MethodKind::PublicKey)
+    }
+
+    /// Like [`Self::may_try_key`], but keeps a try back for each key file still waiting.
+    fn may_try_agent_key(&self) -> bool {
+        let waiting = self.files.iter().filter(|file| match &file.key {
+            Ok(key) => !self.refused_keys.contains(&(fingerprint(key.public_key()), false)),
+            Err(_) => false,
+        });
+        self.allows(MethodKind::PublicKey) && agent_may_try(self.key_tries, waiting.count())
+    }
+
+    fn key_refused(&mut self, key: KeyId) {
+        self.key_tries += 1;
+        self.refused_keys.push(key);
     }
 
     /// Take in the server's answer to one attempt. True if it let us in.
@@ -639,17 +749,17 @@ impl<'a> Auth<'a> {
         }
         let mut refused = 0;
         let mut silent = false;
+        let mut declined = false;
         for identity in identities {
-            if !self.may_try_key() {
+            if !self.may_try_agent_key() {
                 break;
             }
-            let fingerprint = identity.public_key().fingerprint(HashAlg::Sha256).to_string();
-            if self.offered.contains(&fingerprint) {
+            let certificate = matches!(identity, AgentIdentity::Certificate { .. });
+            let id = (fingerprint(&identity.public_key()), certificate);
+            if self.refused_keys.contains(&id) {
                 continue;
             }
             let hash = if identity.public_key().algorithm().is_rsa() { self.rsa_hash().await } else { None };
-            self.key_tries += 1;
-            self.offered.push(fingerprint);
             let mut signer = BoundedAgent { agent: &mut agent, silent: false };
             let result = match identity {
                 AgentIdentity::PublicKey { key, .. } => {
@@ -666,9 +776,13 @@ impl<'a> Auth<'a> {
                         return true;
                     }
                     refused += 1;
+                    self.key_refused(id);
                 }
-                // The agent would not sign with this key. The connection is still good.
-                Err(AgentAuthError::Key(_)) if !silent => {}
+                // The agent would not sign with this key (it is locked, or the owner said
+                // no). The server asks for the signature only for a key it accepts and
+                // does not count this as a failed try, so the connection is still good
+                // and the same key on disk keeps its turn.
+                Err(AgentAuthError::Key(_)) if !silent => declined = true,
                 // After a timeout the agent's late answer would be mistaken for the next
                 // one, so this agent is not asked again.
                 Err(AgentAuthError::Key(_)) => break,
@@ -684,46 +798,48 @@ impl<'a> Auth<'a> {
         if silent {
             self.tried.push(Tried::AgentSilent);
         }
+        if declined {
+            self.tried.push(Tried::AgentDeclined);
+        }
         false
     }
 
-    async fn key_files(&mut self, login: &Login) -> bool {
-        for (path, name) in key_candidates(login.key_path.as_deref(), home_dir().as_deref()) {
-            if !self.may_try_key() {
+    async fn key_files(&mut self) -> bool {
+        for KeyFile { name, key } in std::mem::take(&mut self.files) {
+            if !self.allows(MethodKind::PublicKey) {
                 break;
             }
-            let passphrase = login.key_passphrase.clone();
-            // Unlocking a key with a passphrase is slow on purpose; keep it off the
-            // threads that serve the screens.
-            let loaded = tokio::task::spawn_blocking(move || load_key(&path, passphrase.as_deref())).await;
-            let key = match loaded {
-                Ok(Ok(key)) => key,
-                Ok(Err(KeyProblem::Locked)) => {
+            let key = match key {
+                Ok(key) => key,
+                Err(KeyProblem::Locked) => {
                     self.tried.push(Tried::KeyLocked(name));
                     continue;
                 }
-                Ok(Err(KeyProblem::WrongPassphrase)) => {
+                Err(KeyProblem::WrongPassphrase) => {
                     self.tried.push(Tried::KeyWrongPassphrase(name));
                     continue;
                 }
-                Ok(Err(KeyProblem::Unreadable)) | Err(_) => {
+                Err(KeyProblem::Unreadable) => {
                     self.tried.push(Tried::KeyUnreadable(name));
                     continue;
                 }
             };
-            let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
-            if self.offered.contains(&fingerprint) {
+            let id = (fingerprint(key.public_key()), false);
+            if self.refused_keys.contains(&id) {
+                continue;
+            }
+            if !self.may_try_key() {
+                self.tried.push(Tried::KeyNotTried(name));
                 continue;
             }
             let hash = if key.algorithm().is_rsa() { self.rsa_hash().await } else { None };
-            self.key_tries += 1;
-            self.offered.push(fingerprint);
             let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
             match self.handle.authenticate_publickey(self.user, key).await {
                 Ok(result) => {
                     if self.accepted(result) {
                         return true;
                     }
+                    self.key_refused(id);
                     self.tried.push(Tried::KeyRefused(name));
                 }
                 Err(_) => {
@@ -865,6 +981,22 @@ async fn open_agents() -> Vec<Option<Agent>> {
     Vec::new()
 }
 
+fn fingerprint(key: &russh::keys::PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256).to_string()
+}
+
+/// Read every key file that could be offered. Unlocking a key with a passphrase is slow
+/// on purpose, so this is kept off the threads that serve the screens.
+async fn load_key_files(login: &Login) -> Vec<KeyFile> {
+    let mut files = Vec::new();
+    for (path, name) in key_candidates(login.key_path.as_deref(), home_dir().as_deref()) {
+        let passphrase = login.key_passphrase.clone();
+        let loaded = tokio::task::spawn_blocking(move || load_key(&path, passphrase.as_deref())).await;
+        files.push(KeyFile { name, key: loaded.unwrap_or(Err(KeyProblem::Unreadable)) });
+    }
+    files
+}
+
 /// The user's home folder: from HOME on Linux and macOS, from the user profile on Windows.
 fn home_dir() -> Option<PathBuf> {
     std::env::home_dir().filter(|p| !p.as_os_str().is_empty())
@@ -900,11 +1032,20 @@ enum KeyProblem {
 }
 
 fn load_key(path: &Path, passphrase: Option<&str>) -> Result<PrivateKey, KeyProblem> {
-    let size = std::fs::metadata(path).map_err(|_| KeyProblem::Unreadable)?.len();
-    if size > MAX_KEY_FILE {
+    use std::io::Read;
+    // Only an ordinary file with something in it can be a key. A pipe or a device (which
+    // say they are empty) could be read for ever, and that would hold a thread for good.
+    let ordinary = |m: std::fs::Metadata| m.is_file() && (1..=MAX_KEY_FILE).contains(&m.len());
+    if !std::fs::metadata(path).is_ok_and(ordinary) {
         return Err(KeyProblem::Unreadable);
     }
-    let text = std::fs::read_to_string(path).map_err(|_| KeyProblem::Unreadable)?;
+    let file = std::fs::File::open(path).map_err(|_| KeyProblem::Unreadable)?;
+    // The size was only what the file claimed a moment ago; never read past the limit.
+    let mut text = String::new();
+    let read = file.take(MAX_KEY_FILE + 1).read_to_string(&mut text).map_err(|_| KeyProblem::Unreadable)?;
+    if read as u64 > MAX_KEY_FILE {
+        return Err(KeyProblem::Unreadable);
+    }
     decode_key(&text, passphrase)
 }
 
@@ -967,6 +1108,10 @@ fn auth_message(
             Tried::KeyUnreadable(name) => notes.push(format!(
                 "The key file {name} could not be read as a private key: check the key file in Settings."
             )),
+            Tried::KeyNotTried(name) => notes.push(format!(
+                "The key file {name} was not tried, because that machine allows only a few attempts: choose \
+                 it as the key file in Settings."
+            )),
             Tried::PasswordNotTaken => notes.push("This machine does not take passwords, only keys.".into()),
             Tried::KeysNotTaken if !password_stored => {
                 notes.push("This machine takes a password only, not keys: store a password for it.".into())
@@ -974,6 +1119,11 @@ fn auth_message(
             Tried::KeysNotTaken => {}
             Tried::AgentSilent => notes.push(
                 "The SSH agent did not answer in time; it may be waiting for you to unlock a key.".into(),
+            ),
+            Tried::AgentDeclined => notes.push(
+                "The SSH agent holds a key that machine accepts but would not use it; the key may be locked. \
+                 Unlock it, or choose its key file in Settings."
+                    .into(),
             ),
             Tried::CutOff => {
                 notes.push("The machine closed the connection before everything could be tried.".into())
@@ -1130,6 +1280,113 @@ mod tests {
     }
 
     #[test]
+    fn only_ordinary_files_of_a_sane_size_are_read_as_keys() {
+        let dir = std::env::temp_dir().join(format!("home-cc-ssh-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(load_key(&dir, None).err(), Some(KeyProblem::Unreadable), "a folder");
+
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(load_key(&empty, None).err(), Some(KeyProblem::Unreadable));
+
+        // Marked as locked, so it would be reported as locked if it were read at all.
+        let mut text = String::from("-----BEGIN ENCRYPTED PRIVATE KEY-----\n");
+        let just_fits = dir.join("fits");
+        text.push_str(&"A".repeat(MAX_KEY_FILE as usize - text.len()));
+        std::fs::write(&just_fits, &text).unwrap();
+        assert_eq!(load_key(&just_fits, None).err(), Some(KeyProblem::Locked));
+        let too_big = dir.join("big");
+        text.push('A');
+        std::fs::write(&too_big, &text).unwrap();
+        assert_eq!(load_key(&too_big, None).err(), Some(KeyProblem::Unreadable));
+
+        // Devices never end; reading one must be refused, not attempted.
+        #[cfg(unix)]
+        for device in ["/dev/zero", "/dev/null"] {
+            assert_eq!(load_key(Path::new(device), None).err(), Some(KeyProblem::Unreadable), "{device}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn key_set_up_in_settings_goes_before_the_agent() {
+        let plain = login();
+        assert!(!files_go_first(true, &plain), "the agent goes first where one normally runs");
+        assert!(files_go_first(false, &plain), "and never first on Windows");
+
+        let mut chosen = login();
+        chosen.key_path = Some("/keys/homelab".into());
+        assert!(files_go_first(true, &chosen));
+        let mut unlocked = login();
+        unlocked.key_passphrase = Some("secret".into());
+        assert!(files_go_first(true, &unlocked));
+
+        // Empty settings mean "not set".
+        let mut blank = login();
+        blank.key_path = Some(PathBuf::new());
+        blank.key_passphrase = Some(String::new());
+        assert!(!files_go_first(true, &blank));
+    }
+
+    #[test]
+    fn agent_keys_leave_a_try_for_each_waiting_key_file() {
+        assert!(agent_may_try(0, 0));
+        assert!(agent_may_try(MAX_KEY_TRIES - 1, 0));
+        assert!(!agent_may_try(MAX_KEY_TRIES, 0), "the password still needs its turn");
+        // Three key files waiting: the agent gets two tries, however many keys it holds.
+        assert!(agent_may_try(1, 3));
+        assert!(!agent_may_try(2, 3));
+        assert!(!agent_may_try(0, MAX_KEY_TRIES));
+        assert!(!agent_may_try(usize::MAX, usize::MAX));
+    }
+
+    #[tokio::test]
+    async fn silent_address_does_not_use_up_the_time_of_the_next() {
+        use std::io::{Error, ErrorKind};
+        let silent: SocketAddr = "[2001:db8::1]:22".parse().unwrap();
+        let refusing: SocketAddr = "192.0.2.1:22".parse().unwrap();
+        let working: SocketAddr = "192.0.2.2:22".parse().unwrap();
+        let connect = move |addr: SocketAddr| async move {
+            if addr == silent {
+                std::future::pending::<()>().await;
+            }
+            if addr == refusing { Err(Error::from(ErrorKind::ConnectionRefused)) } else { Ok(addr) }
+        };
+        let each = Duration::from_millis(40);
+        let soon = || Instant::now() + Duration::from_secs(30);
+
+        let started = Instant::now();
+        let reached = first_to_answer(&[silent, refusing, working], soon(), each, connect).await;
+        assert_eq!(reached.ok(), Some(working));
+        assert!(started.elapsed() < Duration::from_secs(10), "the silent address got {each:?}, not the lot");
+
+        // The last error is the one reported.
+        let kind = |r: Result<SocketAddr, Option<Error>>| r.err().flatten().map(|e| e.kind());
+        let refused = first_to_answer(&[silent, refusing], soon(), each, connect).await;
+        assert_eq!(kind(refused), Some(ErrorKind::ConnectionRefused));
+        let shortly = Instant::now() + each * 3;
+        let quiet = first_to_answer(&[refusing, silent, silent], shortly, each, connect).await;
+        assert_eq!(kind(quiet), Some(ErrorKind::TimedOut));
+        let nothing = first_to_answer(&[], soon(), each, connect).await;
+        assert!(matches!(nothing, Err(None)));
+
+        // A lone address may use all the time there is, as may the last of several.
+        let started = Instant::now();
+        let limit = Duration::from_millis(300);
+        let alone = first_to_answer(&[silent], started + limit, Duration::from_millis(10), connect).await;
+        assert_eq!(kind(alone), Some(ErrorKind::TimedOut));
+        assert!(started.elapsed() >= limit, "gave up after {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn endless_time_limit_is_not_a_crash() {
+        let now = Instant::now();
+        assert!(deadline_after(Duration::MAX) > now + Duration::from_secs(24 * 60 * 60));
+        let short = deadline_after(Duration::from_secs(5));
+        assert!(short >= now + Duration::from_secs(5) && short < now + Duration::from_secs(60));
+    }
+
+    #[test]
     fn locked_key_formats_are_recognised() {
         assert!(looks_locked("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n"));
         assert!(looks_locked(
@@ -1203,6 +1460,9 @@ mod tests {
         );
         let wrong = auth_message("nas", "jim", &[Tried::KeyWrongPassphrase("id_rsa".into())], false, false);
         assert!(wrong.contains("does not open the key file id_rsa"), "{wrong}");
+        let left = [Tried::AgentKeys(5), Tried::KeyNotTried("id_rsa".into())];
+        let left = auth_message("nas", "jim", &left, false, false);
+        assert!(left.contains("The key file id_rsa was not tried"), "{left}");
         let missing = auth_message("nas", "jim", &[Tried::KeyUnreadable("/keys/mine".into())], false, false);
         assert!(missing.contains("/keys/mine could not be read"), "{missing}");
         assert!(!missing.contains("No SSH key was found"), "{missing}");
@@ -1224,6 +1484,12 @@ mod tests {
         assert!(cut.contains("closed the connection before everything could be tried"), "{cut}");
         let silent = auth_message("pc", "jim", &[Tried::AgentSilent], false, false);
         assert!(silent.contains("waiting for you to unlock a key"), "{silent}");
+        let declined = auth_message("pc", "jim", &[Tried::AgentDeclined], false, false);
+        assert_eq!(
+            declined,
+            "Could not log in to pc as jim. The SSH agent holds a key that machine accepts but would not use \
+             it; the key may be locked. Unlock it, or choose its key file in Settings."
+        );
 
         let password_only = auth_message("pc", "jim", &[Tried::KeysNotTaken], false, false);
         assert_eq!(
