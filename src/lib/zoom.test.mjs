@@ -1,7 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addWheel, clampZoom, parseZoom, WHEEL_STEP, zoomIn, zoomKeyAction, zoomOut, ZOOM_STEPS } from "./zoom.ts";
+import { addWheel, clampZoom, parseZoom, WHEEL_STEP, zoomIn, zoomKeyAction, zoomOut, zoomShows, ZOOM_STEPS } from "./zoom.ts";
 
 test("sizes stay whole percentages from 50 to 200", () => {
   assert.equal(clampZoom(100), 100);
@@ -76,4 +76,18 @@ test("small touchpad turns add up to one step", () => {
 test("turning the other way starts again from nothing", () => {
   const r = addWheel(-90, 20);
   assert.deepEqual(r, { total: 20, action: null });
+});
+
+test("a window that has zoomed is told apart from one that was only resized", () => {
+  const before = { ratio: 1.25, width: 1536 };
+  // WebView2: both the pixel ratio and the page width follow the zoom.
+  assert.equal(zoomShows(before, { ratio: 2.5, width: 768 }, 200), true);
+  // A window that only changes the width.
+  assert.equal(zoomShows(before, { ratio: 1.25, width: 1229 }, 125), true);
+  assert.equal(zoomShows({ ratio: 1, width: 1000 }, { ratio: 1, width: 667 }, 150), true);
+  // Not yet zoomed, or only made bigger or smaller.
+  assert.equal(zoomShows(before, before, 200), false);
+  assert.equal(zoomShows(before, { ratio: 1.25, width: 1280 }, 200), false);
+  // Nothing to wait for at the normal size.
+  assert.equal(zoomShows(before, before, 100), true);
 });

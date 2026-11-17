@@ -32,6 +32,23 @@ export function parseZoom(text: string | null | undefined): number {
   return clampZoom(Number(text));
 }
 
+/** What the window looks like from inside the page: its pixel ratio and its width in page pixels. */
+export interface ZoomView {
+  ratio: number;
+  width: number;
+}
+
+/** Whether the window has started drawing at a new size, from how it looked before the change. Zooming to
+ *  `percent` raises the pixel ratio and narrows the page by that much; Windows' WebView2 changes both, other
+ *  windows at least the width. A window that only changed size (being put back where it was) changes
+ *  neither in step, so it doesn't count. */
+export function zoomShows(before: ZoomView, now: ZoomView, percent: number): boolean {
+  const factor = percent / 100;
+  if (factor === 1) return true;
+  if (Math.abs(now.ratio - before.ratio * factor) < 0.01) return true;
+  return Math.abs(now.width * factor - before.width) <= 2 * factor;
+}
+
 export type ZoomAction = "in" | "out" | "reset";
 
 /** The parts of a key press that matter here. */

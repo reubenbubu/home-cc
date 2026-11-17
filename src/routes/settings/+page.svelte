@@ -265,7 +265,7 @@
           <button class="btn" type="button" onclick={() => zoom.act("reset")} disabled={zoom.percent === ZOOM_DEFAULT}
             title="Back to 100% (Ctrl and 0)">Normal size</button>
         </div>
-        {#if zoom.error}<p class="alert" role="alert">Couldn't change the size: {zoom.error}</p>{/if}
+        {#if zoom.problem}<p class="alert" role="alert">{zoom.problem.what}: {zoom.problem.error}</p>{/if}
         <p class="hint">
           Changes straight away, without Save, and is kept for next time. Anywhere in the app you can also hold Ctrl
           and press + or - (0 for 100%), or hold Ctrl and turn the mouse wheel.
