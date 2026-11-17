@@ -1,5 +1,6 @@
-// What the screens work out from the list of this PC's networks. Kept apart
-// from the stores so it can be tested without a browser (net.test.mjs).
+// What the screens work out from the list of this PC's networks, and what the
+// edit form sends for a hardware address. Kept apart from the stores so it can
+// be tested without a browser (net.test.mjs).
 import type { Found, Subnet } from "./api";
 
 /** One range the owner can pick to scan. */
@@ -33,4 +34,20 @@ export function ownAddresses(subnets: Subnet[], found: Found[] = []): Set<string
   for (const n of subnets) if (n.ownIp) own.add(n.ownIp);
   for (const f of found) if (f.isSelf && f.ip) own.add(f.ip);
   return own;
+}
+
+/** Whether a device is the PC home-cc runs on. The back end says so with each status (markedSelf) once
+ *  it has done a round of checks; anySelf is true when it has marked at least one device. Until then,
+ *  straight after a start, the guess from this PC's own addresses stands in. */
+export function isThisPc(host: string, markedSelf: boolean | undefined, anySelf: boolean, own: Set<string>): boolean {
+  if (markedSelf) return true;
+  return !anySelf && own.has(host.trim());
+}
+
+/** What the edit form sends for the hardware address: null to leave the stored one as it is (the box
+ *  wasn't changed), "" to remove it (the box was emptied), or the new text. */
+export function macToSend(stored: string | null, typed: string): string | null {
+  const text = typed.trim();
+  if (text.toLowerCase() === (stored ?? "").trim().toLowerCase()) return null;
+  return text;
 }

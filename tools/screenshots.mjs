@@ -9,7 +9,9 @@
 //
 // Without --url it starts its own dev server on a free port and stops it at
 // the end. Exits with an error if any screen is wider than its window, logs
-// an error, or can't cope with the unusual readings of "?awkward".
+// an error, can't cope with the unusual readings of "?awkward", or if one of
+// the things the owner does on a screen (approving a machine's identity,
+// emptying a hardware address, ...) doesn't end the way it should.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -47,7 +49,28 @@ const SCREENS = [
       await page.getByRole("button", { name: "Scan network" }).waitFor();
     },
   },
-  { name: "machines", path: "/machines", ready: "article" },
+  {
+    name: "machines",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      // The sample data has one machine in each state that waits for the owner; all must be in the picture.
+      await page.getByText("This machine's identity has changed").waitFor();
+      await page.getByText("First connection to Media PC").waitFor();
+      await page.getByText("home-cc has stopped trying this machine").waitFor();
+    },
+  },
+  {
+    // Both approvals half given: the second click is the one that counts.
+    name: "machines-approve",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Approve the new identity" }).click();
+      await page.getByRole("button", { name: "Approve and use the password" }).click();
+      await page.getByRole("button", { name: "Yes, it matches" }).nth(1).waitFor();
+    },
+  },
   {
     name: "machines-edit",
     path: "/machines",
@@ -55,9 +78,23 @@ const SCREENS = [
     async before(page) {
       await page.getByRole("button", { name: "Edit NAS" }).click();
       await page.getByText("A password is stored").waitFor();
+      await page.getByText("Identity home-cc remembers").waitFor();
     },
   },
   { name: "settings", path: "/settings", ready: "form" },
+  // "?noping": this PC isn't allowed to send pings, so no status check works.
+  {
+    name: "overview-check-problem",
+    path: "/?noping",
+    ready: ".card",
+    before: (page) => page.getByText("Status checks aren't working").waitFor(),
+  },
+  {
+    name: "network-check-problem",
+    path: "/network?noping",
+    ready: "table",
+    before: (page) => page.getByText("Status checks aren't working").waitFor(),
+  },
 ];
 
 function parseArgs(argv) {
@@ -195,6 +232,124 @@ async function checkAwkward(browser, url) {
   return problems;
 }
 
+/** Things the owner does that a still picture can't show, tried against the sample back end. Each starts
+ *  from a fresh page, so from fresh sample data. Returns what went wrong. */
+async function checkFlows(browser, url) {
+  const card = (page, name) => page.locator("article", { hasText: name });
+  const flows = [
+    {
+      what: "approving a first connection stores that identity and reads the machine",
+      path: "/machines",
+      async run(page) {
+        const media = card(page, "Media PC");
+        await media.getByText("The password has not been sent").waitFor();
+        await media.getByRole("button", { name: "Approve and use the password" }).click();
+        await media.getByRole("button", { name: "Yes, it matches" }).click();
+        await media.getByText("RAM", { exact: true }).waitFor();
+        await media.getByText("First connection").waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Edit Media PC" }).click();
+        await page.getByText("Identity home-cc remembers").waitFor();
+      },
+    },
+    {
+      what: "an approval overtaken by a newer identity is refused, and the newer one is shown to judge",
+      path: "/machines?awkward",
+      async run(page) {
+        const proxmox = card(page, "Proxmox");
+        const now = proxmox.locator("dd").nth(1);
+        const first = await now.textContent();
+        await proxmox.getByRole("button", { name: "Approve the new identity" }).click();
+        await proxmox.getByRole("button", { name: "Yes, it matches" }).click();
+        await proxmox.getByText("Not approved:").waitFor();
+        await proxmox.getByText("ssh-rsa SHA256:").waitFor();
+        if ((await now.textContent()) === first) throw new Error("the card still shows the identity that was overtaken");
+        await proxmox.getByRole("button", { name: "Approve the new identity" }).click();
+        await proxmox.getByRole("button", { name: "Yes, it matches" }).click();
+        await proxmox.getByText("This machine's identity has changed").waitFor({ state: "detached" });
+        await proxmox.getByText(/^Updated/).waitFor();
+      },
+    },
+    {
+      what: '"Check now" is off while a scan runs, and a check asked for anyway says why it was refused',
+      path: "/network",
+      async run(page) {
+        await page.getByRole("button", { name: "Scan network" }).click();
+        const check = page.getByRole("button", { name: "Check now" });
+        await page.waitForFunction(() => [...document.querySelectorAll("button")].some((b) => b.textContent.trim() === "Check now" && b.disabled));
+        const title = await check.getAttribute("title");
+        if (!/scan is running/i.test(title ?? "")) throw new Error(`the button doesn't say why it is off (title: "${title}")`);
+        // As if pressed from somewhere that didn't know about the scan.
+        await check.evaluate((b) => {
+          b.disabled = false;
+          b.click();
+        });
+        await page.getByText("Not checked: A scan is running").waitFor();
+        await page.getByRole("button", { name: "Stop" }).click();
+        await page.getByRole("button", { name: "Scan network" }).waitFor();
+        // The round of checks that follows the scan makes the refusal old news.
+        await page.getByText("Not checked:").waitFor({ state: "detached" });
+      },
+    },
+    {
+      what: "with pings not allowed, the standing explanation is shown once, also after Check now",
+      path: "/network?noping",
+      async run(page) {
+        await page.getByText("Status checks aren't working").waitFor();
+        await page.getByRole("button", { name: "Check now" }).click();
+        await page.getByRole("button", { name: "Check now" }).waitFor();
+        await page.waitForTimeout(300);
+        if ((await page.getByText("/etc/sysctl.d").count()) !== 1) throw new Error("the explanation is missing or shown twice");
+      },
+    },
+    {
+      what: "the hardware address: emptied is removed, untouched is kept, and a bad address is explained",
+      path: "/machines",
+      async run(page) {
+        const mac = page.getByLabel("Hardware address (optional)");
+        const save = page.getByRole("button", { name: "Save", exact: true });
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        if ((await mac.inputValue()) !== "d8:bb:c1:7a:02:6e") throw new Error("the form didn't show the stored hardware address");
+        await mac.fill("");
+        await page.getByText("Saving removes the hardware address").waitFor();
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        if ((await mac.inputValue()) !== "") throw new Error("the emptied hardware address came back");
+
+        await page.getByRole("button", { name: "Edit Homelab VM" }).click();
+        await page.getByLabel("Notes").fill("changed");
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Edit Homelab VM" }).click();
+        if ((await mac.inputValue()) !== "00:15:5d:44:0a:01") throw new Error("an untouched hardware address was lost");
+
+        await page.getByLabel("Address (IP or hostname)").fill("192.168.1");
+        await page.getByText("this hardware address is forgotten when you save").waitFor();
+        await save.click();
+        await page.locator("form").getByRole("alert").filter({ hasText: "needs four" }).waitFor();
+      },
+    },
+  ];
+  const problems = [];
+  for (const flow of flows) {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    page.setDefaultTimeout(10_000);
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    try {
+      await page.goto(url + flow.path, { waitUntil: "networkidle" });
+      await flow.run(page);
+    } catch (e) {
+      problems.push(`${flow.what}: ${String(e.message ?? e).split("\n")[0]}`);
+    }
+    for (const error of errors) problems.push(`${flow.what}: error in the page: ${error}`);
+    await page.close();
+    console.log(`${problems.some((p) => p.startsWith(flow.what)) ? "FAIL" : "ok  "} ${flow.what}`);
+  }
+  return problems;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.out) {
@@ -260,6 +415,7 @@ async function main() {
     const awkward = await checkAwkward(browser, server.url);
     failures.push(...awkward);
     console.log(`${awkward.length ? "FAIL" : "ok  "} unusual readings (two disks on one folder)`);
+    failures.push(...(await checkFlows(browser, server.url)));
   } finally {
     try {
       await browser?.close();

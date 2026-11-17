@@ -43,7 +43,18 @@
     }
   });
 
+  // A range picked from the list whose network has since gone (the list is read again below and after
+  // every scan) is kept as typed text, so the choice never shows as an empty box.
+  $effect(() => {
+    if (rangeChoice !== "auto" && rangeChoice !== "custom" && !settings.ranges.some((r) => r.cidr === rangeChoice)) {
+      customRange = rangeChoice;
+      rangeChoice = "custom";
+    }
+  });
+
   onMount(() => {
+    // This PC's networks may have changed since the app started.
+    settings.loadSubnets();
     api.hasSecret(secretKeys.sshKeyPassphrase).then(
       (stored) => (hasPassphrase = stored),
       (e) => (secretError = `Couldn't check for a stored passphrase: ${errorText(e)}`),

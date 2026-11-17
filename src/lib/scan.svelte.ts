@@ -1,6 +1,7 @@
 // State of the network scan. Lives outside the screens so a scan started on
 // one screen is still shown, with its result, after moving to another.
 import { api, errorText, type ScanProgress, type ScanResult } from "./api";
+import { settings } from "./settings.svelte";
 
 export const PHASE_TEXT: Record<ScanProgress["phase"], string> = {
   sweep: "Checking every address",
@@ -46,7 +47,10 @@ class ScanStore {
       const running = await api.scanRunning();
       if (this.#own) return;
       this.running = running;
-      if (!running) this.progress = null;
+      if (!running) {
+        this.progress = null;
+        settings.loadSubnets();
+      }
     } catch {
       // The next event asks again.
     }
@@ -69,6 +73,8 @@ class ScanStore {
       this.running = false;
       this.stopping = false;
       this.progress = null;
+      // This PC's networks may have changed since they were last read (see settings.loadSubnets).
+      settings.loadSubnets();
     }
   }
 

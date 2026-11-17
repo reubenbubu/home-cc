@@ -12,6 +12,10 @@ class StatsStore {
   refreshing = new SvelteSet<number>();
   /** Why a refresh the owner asked for could not even be tried, by machine. */
   refreshErrors = new SvelteMap<number, string>();
+  /** Machines whose identity is being stored right now. */
+  trusting = new SvelteSet<number>();
+  /** Why an identity the owner approved was not stored, by machine. */
+  trustErrors = new SvelteMap<number, string>();
   #seq = 0;
 
   async load() {
@@ -37,6 +41,7 @@ class StatsStore {
     if (this.refreshing.has(id)) return;
     this.refreshing.add(id);
     this.refreshErrors.delete(id);
+    this.trustErrors.delete(id);
     try {
       const entry = await api.refreshStats(id);
       // Drop the answer of any reload that started before this one came back.
@@ -49,14 +54,22 @@ class StatsStore {
     }
   }
 
-  /** After the owner has confirmed: forget the stored identity and read again. */
-  async trustAgain(id: number) {
+  /** After the owner has looked at an identity and confirmed it: store exactly that one, then read again.
+   *  The back end refuses if the machine has shown a different identity since; the entry is then
+   *  loaded again so the owner sees the one to judge, with the reason in trustErrors. */
+  async trust(id: number, fingerprint: string) {
+    if (this.trusting.has(id)) return;
+    this.trusting.add(id);
+    this.trustErrors.delete(id);
     this.refreshErrors.delete(id);
     try {
-      await api.forgetHostKey(id);
+      await api.trustHostKey(id, fingerprint);
     } catch (e) {
-      this.refreshErrors.set(id, errorText(e));
+      this.trustErrors.set(id, errorText(e));
+      await this.load();
       return;
+    } finally {
+      this.trusting.delete(id);
     }
     await this.refresh(id);
   }

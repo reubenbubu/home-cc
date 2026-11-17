@@ -16,7 +16,11 @@ class SettingsStore {
   value = $state<Settings>({ ...DEFAULT_SETTINGS });
   subnets = $state<Subnet[]>([]);
   loaded = $state(false);
-  error = $state<string | null>(null);
+  #valueError = $state<string | null>(null);
+  #subnetsError = $state<string | null>(null);
+  /** Why the saved settings or the list of networks couldn't be read. */
+  error = $derived(this.#valueError ?? this.#subnetsError);
+  #subnetsSeq = 0;
   /** The ranges to pick from: one per network, however many adapters are on it. */
   ranges = $derived(scanRanges(this.subnets));
   /** The network a scan uses when no range is set. */
@@ -28,12 +32,25 @@ class SettingsStore {
 
   async load() {
     // Loaded separately so a problem listing networks doesn't hide the saved settings.
-    const [value, subnets] = await Promise.allSettled([api.getSettings(), api.listSubnets()]);
+    const [value] = await Promise.allSettled([api.getSettings(), this.loadSubnets()]);
     if (value.status === "fulfilled") this.value = value.value;
-    if (subnets.status === "fulfilled") this.subnets = subnets.value;
-    const failed = value.status === "rejected" ? value : subnets.status === "rejected" ? subnets : null;
-    this.error = failed ? errorText(failed.reason) : null;
+    this.#valueError = value.status === "rejected" ? errorText(value.reason) : null;
     this.loaded = true;
+  }
+
+  /** This PC's networks can change while the app is open (cable to Wi-Fi, a new address), so they are
+   *  read again when the Settings screen opens and after every scan. Never rejects. */
+  async loadSubnets() {
+    // Reloads can overlap: the newest wins.
+    const seq = ++this.#subnetsSeq;
+    try {
+      const subnets = await api.listSubnets();
+      if (seq !== this.#subnetsSeq) return;
+      this.subnets = subnets;
+      this.#subnetsError = null;
+    } catch (e) {
+      if (seq === this.#subnetsSeq) this.#subnetsError = errorText(e);
+    }
   }
 
   /** Rejects with the back end's message when a value is refused. */

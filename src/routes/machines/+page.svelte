@@ -15,6 +15,7 @@
     type Os,
   } from "$lib/api";
   import { icons } from "$lib/icons";
+  import { macToSend } from "$lib/net";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
@@ -23,6 +24,8 @@
 
   let editing = $state<number | "new" | null>(null);
   let form = $state<DeviceInput>(blank());
+  /** The address and hardware address as they were when the form opened, to tell what was changed. */
+  let stored = $state<{ host: string; mac: string | null }>({ host: "", mac: null });
   let formError = $state<string | null>(null);
   let listError = $state<string | null>(null);
   let saving = $state(false);
@@ -39,6 +42,7 @@
 
   async function open(id: number | "new", input: DeviceInput) {
     form = input;
+    stored = { host: input.host, mac: input.mac || null };
     formError = null;
     password = "";
     hasPassword = false;
@@ -89,18 +93,38 @@
     saving = true;
     formError = null;
     try {
-      const input = { ...form, sshPort: Number(form.sshPort) || 22 };
-      const saved = editing === "new" ? await devices.add(input) : typeof editing === "number" ? await devices.update(editing, input) : null;
-      if (!saved) return;
-      if (password) {
-        try {
-          await api.setSecret(secretKeys.sshPassword(saved.id), password);
-        } catch (err) {
-          // The machine itself is saved: keep the form open on it so the password can be tried again.
-          editing = saved.id;
-          formError = `Saved, but the password couldn't be stored: ${errorText(err)}`;
-          return;
+      // The hardware address: nothing when the box wasn't touched (kept), "" when it was emptied (removed).
+      const input = { ...form, sshPort: Number(form.sshPort) || 22, mac: macToSend(stored.mac, form.mac ?? "") };
+      let saved: Device;
+      if (typeof editing === "number") {
+        // A new password goes in first. Saving the machine makes home-cc try its login again straight
+        // away, and that try must not knock once more with the old password.
+        if (password) {
+          try {
+            await api.setSecret(secretKeys.sshPassword(editing), password);
+          } catch (err) {
+            formError = `Nothing was saved, because the password couldn't be stored: ${errorText(err)}`;
+            return;
+          }
+          hasPassword = true;
         }
+        saved = await devices.update(editing, input);
+      } else if (editing === "new") {
+        saved = await devices.add(input);
+        if (password) {
+          try {
+            await api.setSecret(secretKeys.sshPassword(saved.id), password);
+          } catch (err) {
+            // The machine itself is saved: keep the form open on it so the password can be tried again.
+            editing = saved.id;
+            stored = { host: saved.host, mac: saved.mac };
+            form.mac = saved.mac ?? "";
+            formError = `Saved, but the password couldn't be stored: ${errorText(err)}`;
+            return;
+          }
+        }
+      } else {
+        return;
       }
       editing = null;
       password = "";
@@ -132,6 +156,16 @@
       listError = `Couldn't remove "${d.name}": ${errorText(err)}`;
     }
   }
+
+  /** The SSH identity stored for the machine in the form, for the owner to compare with the machine's own. */
+  const pinned = $derived(typeof editing === "number" ? (stats.get(editing)?.pinnedFingerprint ?? null) : null);
+  /** The address was changed and the hardware address left alone: the back end then forgets that one too. */
+  const macGoes = $derived(
+    typeof editing === "number" &&
+      stored.mac !== null &&
+      form.host.trim() !== stored.host.trim() &&
+      macToSend(stored.mac, form.mac ?? "") === null,
+  );
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const oses = Object.entries(OS_LABELS) as [Os, string][];
@@ -231,6 +265,14 @@
       <label>Hardware address (optional)
         <input class="mono" bind:value={form.mac} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false" />
       </label>
+      {#if macGoes}
+        <p class="hint under">
+          The address has changed, so this hardware address is forgotten when you save: it belongs to whatever was at
+          the old address. The next scan fills in the right one.
+        </p>
+      {:else if typeof editing === "number" && stored.mac !== null && !(form.mac ?? "").trim()}
+        <p class="hint under">Saving removes the hardware address. The next scan that finds this machine fills it in again.</p>
+      {/if}
       <div class="row">
         <label>SSH user <input class="mono" bind:value={form.sshUser} placeholder="jim" autocomplete="off" spellcheck="false" /></label>
         <label>SSH port <input class="mono" type="number" min="1" max="65535" bind:value={form.sshPort} /></label>
@@ -257,6 +299,12 @@
         ones in your .ssh folder), then the ssh-agent, then this password. The password is kept in your system's keychain
         and is never shown again.
       </p>
+      {#if pinned}
+        <div class="pinned">
+          <span class="hint">Identity home-cc remembers for this machine</span>
+          <span class="mono print" title="home-cc only logs in to a machine that shows this identity. Changing the address or the SSH port forgets it.">{pinned}</span>
+        </div>
+      {/if}
       {#if form.os === "windows"}
         <p class="hint">
           Windows: turn on OpenSSH Server in Windows settings first. For an administrator account the key goes in
@@ -346,5 +394,10 @@
   .stored :global(svg) { color: var(--ok); }
   .stored-actions { display: flex; gap: 0.4rem; }
   .hint { margin: 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
+  /* A note about the field right above it. */
+  .hint.under { margin-top: -0.55rem; }
+  .pinned { display: flex; flex-direction: column; gap: 0.15rem; }
+  /* Small enough for the whole fingerprint to stay on one line in the side-by-side form. */
+  .print { color: var(--text-soft); font-size: 0.8rem; overflow-wrap: anywhere; user-select: text; }
   .path { color: var(--text-soft); font-size: 0.92em; overflow-wrap: anywhere; }
 </style>
