@@ -20,6 +20,11 @@ pub const MOST_PINGS: usize = 64;
 const PING_GRACE: Duration = Duration::from_secs(3);
 
 pub trait Lan: Send + Sync + 'static {
+    /// Whether this PC lets the app send pings at all. Sends nothing.
+    fn allowed(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// One ping. It must come back soon after `timeout` whatever happens:
     /// scans and status rounds wait for every ping they start.
     fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> impl Future<Output = io::Result<PingOutcome>> + Send;
@@ -37,6 +42,10 @@ pub struct OsLan;
 static PING_SLOTS: Semaphore = Semaphore::const_new(MOST_PINGS);
 
 impl Lan for OsLan {
+    fn allowed(&self) -> io::Result<()> {
+        ping::allowed()
+    }
+
     async fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> io::Result<PingOutcome> {
         in_slot(&PING_SLOTS, timeout + PING_GRACE, ping::ping_once(ip, timeout)).await
     }
@@ -265,6 +274,10 @@ pub mod fake {
     }
 
     impl Lan for FakeLan {
+        fn allowed(&self) -> io::Result<()> {
+            if self.broken { Err(io::Error::from(io::ErrorKind::PermissionDenied)) } else { Ok(()) }
+        }
+
         async fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> io::Result<PingOutcome> {
             self.pinged.lock().unwrap().push(ip);
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;

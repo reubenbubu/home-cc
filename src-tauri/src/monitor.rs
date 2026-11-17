@@ -157,10 +157,10 @@ impl Monitor {
             .list()?
             .into_iter()
             .filter(|d| d.kind != DeviceKind::Ignore)
-            .map(|d| Target { device_id: d.id, host: d.host })
+            .map(|d| Target { device_id: d.id, host: d.host, mac: d.mac })
             .collect();
         if !targets.is_empty() {
-            let results = net::check(targets).await;
+            let results = net::check(targets).await?;
             app.state::<Inventory>().record_pings(&results, now())?;
         }
         app.emit(EVENT_STATUS, ()).ok();

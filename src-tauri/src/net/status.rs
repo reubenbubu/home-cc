@@ -4,6 +4,10 @@
 //! firewall on, say); for those the neighbour table is the witness. A device
 //! that has answered ping before is not given that second way, so turning it
 //! off shows as down in the same round.
+//!
+//! Two inventory entries can hold the same address with different hardware
+//! addresses: the address was handed on from one device to another. Only one
+//! of them is there, and the neighbour table says which.
 
 use super::Target;
 use super::lan::{Lan, MOST_PINGS, Pinger};
@@ -83,12 +87,40 @@ impl NameMemory {
     }
 }
 
-/// The app's own memory of host names, until it closes.
-pub static NAMES: LazyLock<Arc<Mutex<NameMemory>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(NameMemory::new(NAME_KEEP))));
+/// What the rounds keep from one to the next.
+#[derive(Debug)]
+pub struct Kept {
+    pub names: Arc<Mutex<NameMemory>>,
+    /// Devices that have answered a ping, by inventory id.
+    pub answers_ping: Mutex<BTreeSet<i64>>,
+    /// Devices whose host was this PC itself in the latest round.
+    own_devices: Mutex<BTreeSet<i64>>,
+}
 
-/// Devices that have answered a ping since the app started, by inventory id.
-pub static ANSWERS_PING: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
+impl Kept {
+    /// `name_keep` is how long a name's last address is still used.
+    pub fn new(name_keep: Duration) -> Self {
+        Self {
+            names: Arc::new(Mutex::new(NameMemory::new(name_keep))),
+            answers_ping: Mutex::new(BTreeSet::new()),
+            own_devices: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// A round has worked out where its targets are: the ones that are this
+    /// PC take the place of the ones from the round before.
+    pub fn note_own(&self, probes: &[Probe]) {
+        let own = probes.iter().filter(|p| p.place == Place::Own).map(|p| p.device_id);
+        *lock(&self.own_devices) = own.collect();
+    }
+
+    pub fn own_devices(&self) -> BTreeSet<i64> {
+        lock(&self.own_devices).clone()
+    }
+}
+
+/// The app's own memory, until it closes.
+pub static KEPT: LazyLock<Kept> = LazyLock::new(|| Kept::new(NAME_KEEP));
 
 /// Where a target's host turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +136,20 @@ pub enum Place {
 pub struct Probe {
     pub device_id: i64,
     pub place: Place,
+    /// The hardware address the inventory holds for the device, if any.
+    pub mac: Option<[u8; 6]>,
+}
+
+/// A hardware address as the inventory stores it ("8c:90:2d:a0:0e:02"), or
+/// written with dashes, dots or nothing in between.
+fn mac_bytes(text: &str) -> Option<[u8; 6]> {
+    let mut digits = text.trim().chars().filter(|c| !matches!(c, ':' | '-' | '.'));
+    let mut mac = [0u8; 6];
+    for byte in &mut mac {
+        let (high, low) = (digits.next()?.to_digit(16)?, digits.next()?.to_digit(16)?);
+        *byte = u8::try_from(high * 16 + low).ok()?;
+    }
+    digits.next().is_none().then_some(mac)
 }
 
 fn place(ip: Ipv4Addr, own: &HashSet<Ipv4Addr>) -> Place {
@@ -178,7 +224,12 @@ where
         Ok(ip) => place(ip, own),
         Err(_) => remembered.address(host).map_or(Place::Nowhere, |ip| place(ip, own)),
     };
-    targets.iter().map(|t| Probe { device_id: t.device_id, place: locate(t.host.trim()) }).collect()
+    let probe = |t: &Target| Probe {
+        device_id: t.device_id,
+        place: locate(t.host.trim()),
+        mac: t.mac.as_deref().and_then(mac_bytes),
+    };
+    targets.iter().map(probe).collect()
 }
 
 /// What one round learned about one address.
@@ -213,12 +264,34 @@ fn state_of(table: &[Neighbour], ip: Ipv4Addr) -> Option<NeighState> {
     best
 }
 
+/// The hardware addresses the table has for an address, from its freshest
+/// entries only: with two adapters an old entry can sit next to a new one.
+/// A fixed entry counts here, as the least fresh: it says nothing about
+/// whether the device is there, but it does say which device would answer.
+fn holders(table: &[Neighbour], ip: Ipv4Addr) -> BTreeSet<[u8; 6]> {
+    let freshness = |state| match state {
+        NeighState::Reachable => 0,
+        NeighState::Unconfirmed => 1,
+        NeighState::Permanent => 2,
+    };
+    let entries = || table.iter().filter(|n| n.ip == ip && is_device_mac(&n.mac));
+    let Some(freshest) = entries().map(|n| freshness(n.state)).min() else { return BTreeSet::new() };
+    entries().filter(|n| freshness(n.state) == freshest).map(|n| n.mac).collect()
+}
+
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// One round over resolved targets. `started` is when the round began, name
 /// lookups included; the limits in `pace` count from there.
+///
+/// Where devices with different stored hardware addresses share an address
+/// and something is there, the neighbour table decides which of them it is:
+/// if it holds the hardware address of one, the others with a different one
+/// are down. Devices without a stored hardware address are judged as ever,
+/// and so is everyone at an address the table has no entry for, or only an
+/// entry for a device that is none of them.
 pub async fn check_round<L: Lan>(
     lan: Arc<L>,
     probes: &[Probe],
@@ -283,10 +356,12 @@ pub async fn check_round<L: Lan>(
     pinger.run(&again, pace.ping_timeout, |_| Instant::now() < window_ends, finished).await;
 
     // Still nothing: ask the neighbour table, for devices allowed that way.
+    // `after` is the latest copy of the table taken after the pings.
+    let mut after: Option<Vec<Neighbour>> = None;
     let quiet: Vec<Ipv4Addr> =
         ips.iter().filter(|ip| may_use_table.contains(ip) && !seen.contains_key(ip)).copied().collect();
     if !quiet.is_empty() {
-        let table = lan.neighbours().await;
+        let mut table = lan.neighbours().await;
         let mut unsure = Vec::new();
         for ip in quiet {
             if state_of(&before, ip) == Some(NeighState::Reachable) {
@@ -303,11 +378,38 @@ pub async fn check_round<L: Lan>(
         }
         if let Some(decided) = unsure.iter().map(|(_, at)| *at).max() {
             tokio::time::sleep_until(decided.min(started + pace.longest)).await;
-            let table = lan.neighbours().await;
+            table = lan.neighbours().await;
             for (ip, _) in unsure {
                 if state_of(&table, ip) == Some(NeighState::Reachable) {
                     seen.entry(ip).or_default().neighbour = true;
                 }
+            }
+        }
+        after = Some(table);
+    }
+
+    // An address handed on from one device to another: the inventory has
+    // both there, with different hardware addresses, and something answers.
+    // The one whose hardware address the table holds is the one that is there.
+    let mut stored: BTreeMap<Ipv4Addr, BTreeSet<[u8; 6]>> = BTreeMap::new();
+    for probe in probes {
+        if let (Place::At(ip), Some(mac)) = (probe.place, probe.mac) {
+            stored.entry(ip).or_default().insert(mac);
+        }
+    }
+    stored.retain(|ip, macs| macs.len() > 1 && seen.contains_key(ip));
+    let mut there: BTreeMap<Ipv4Addr, BTreeSet<[u8; 6]>> = BTreeMap::new();
+    if !stored.is_empty() {
+        let table = match after {
+            Some(table) => table,
+            None => lan.neighbours().await,
+        };
+        for (ip, macs) in stored {
+            let holders = holders(&table, ip);
+            // No entry (the address is behind a router, say) or only one for
+            // a device the inventory doesn't have there: nothing to go by.
+            if !holders.is_disjoint(&macs) {
+                there.insert(ip, holders);
             }
         }
     }
@@ -318,9 +420,11 @@ pub async fn check_round<L: Lan>(
         let (up, rtt_ms) = match probe.place {
             Place::Own => (true, None),
             Place::Nowhere => (false, None),
-            Place::At(ip) => {
-                verdict(seen.get(&ip).copied().unwrap_or_default(), known.contains(&probe.device_id))
-            }
+            Place::At(ip) => match (probe.mac, there.get(&ip)) {
+                // What is at its address is another device.
+                (Some(mac), Some(holders)) if !holders.contains(&mac) => (false, None),
+                _ => verdict(seen.get(&ip).copied().unwrap_or_default(), known.contains(&probe.device_id)),
+            },
         };
         if rtt_ms.is_some() {
             answered_now.push(probe.device_id);
@@ -348,8 +452,18 @@ mod tests {
         longest: Duration::from_millis(300),
     };
 
+    /// A device the inventory has no hardware address for.
+    fn probe(device_id: i64, place: Place) -> Probe {
+        Probe { device_id, place, mac: None }
+    }
+
     fn at(device_id: i64, addr: &str) -> Probe {
-        Probe { device_id, place: Place::At(ip(addr)) }
+        probe(device_id, Place::At(ip(addr)))
+    }
+
+    /// A device stored with the hardware address `fake::Device::new(last_mac_byte)` has.
+    fn stored(device_id: i64, addr: &str, last_mac_byte: u8) -> Probe {
+        Probe { mac: Some([2, 0, 0, 0, 0, last_mac_byte]), ..at(device_id, addr) }
     }
 
     fn up(device_id: i64, rtt_ms: f64) -> Check {
@@ -421,8 +535,8 @@ mod tests {
             at(3, "10.0.0.3"),
             at(4, "10.0.0.4"),
             at(5, "10.0.0.5"),
-            Probe { device_id: 6, place: Place::Own },
-            Probe { device_id: 7, place: Place::Nowhere },
+            probe(6, Place::Own),
+            probe(7, Place::Nowhere),
             // The same address under a second inventory entry.
             at(8, "10.0.0.1"),
             at(9, "10.0.0.6"),
@@ -545,11 +659,7 @@ mod tests {
             "224.0.0.251",
             "nas.lan",
         ];
-        let targets: Vec<Target> = hosts
-            .iter()
-            .enumerate()
-            .map(|(n, host)| Target { device_id: n as i64, host: host.to_string() })
-            .collect();
+        let targets = named(&hosts);
         let started = std::time::Instant::now();
         let probes = resolve(&targets, &own, lookup, Duration::from_millis(100), &memory(300_000)).await;
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -584,7 +694,8 @@ mod tests {
     }
 
     fn named(hosts: &[&str]) -> Vec<Target> {
-        let target = |(n, host): (usize, &&str)| Target { device_id: n as i64, host: host.to_string() };
+        let target =
+            |(n, host): (usize, &&str)| Target { device_id: n as i64, host: host.to_string(), mac: None };
         hosts.iter().enumerate().map(target).collect()
     }
 
@@ -645,7 +756,7 @@ mod tests {
         let service = NameService::answering(60);
         let (memory, own, targets) = (memory(400), HashSet::new(), named(&["nas.local"]));
         let round = || resolve(&targets, &own, service.lookup(), Duration::from_millis(40), &memory);
-        let at = |addr: &str| [Probe { device_id: 0, place: Place::At(ip(addr)) }];
+        let at = |addr: &str| [at(0, addr)];
 
         assert_eq!(round().await, at("192.168.68.60"));
         // The name service turns slow (and the device moves): the round does
@@ -668,7 +779,7 @@ mod tests {
         service.slowness.store(5_000, Ordering::SeqCst);
         assert_eq!(round().await, at("192.168.68.61"));
         tokio::time::sleep(Duration::from_millis(450)).await;
-        assert_eq!(round().await, [Probe { device_id: 0, place: Place::Nowhere }]);
+        assert_eq!(round().await, [probe(0, Place::Nowhere)]);
     }
 
     #[tokio::test]
@@ -676,9 +787,159 @@ mod tests {
         let service = NameService::answering(60);
         let (memory, own, targets) = (memory(300_000), HashSet::new(), named(&["nas.local"]));
         let round = || resolve(&targets, &own, service.lookup(), Duration::from_millis(40), &memory);
-        assert_eq!(round().await, [Probe { device_id: 0, place: Place::At(ip("192.168.68.60")) }]);
+        assert_eq!(round().await, [at(0, "192.168.68.60")]);
         service.answer.store(0, Ordering::SeqCst);
-        assert_eq!(round().await, [Probe { device_id: 0, place: Place::Nowhere }]);
+        assert_eq!(round().await, [probe(0, Place::Nowhere)]);
+    }
+
+    #[test]
+    fn stored_hardware_addresses_are_read_however_they_are_written() {
+        let mac = Some([0x8c, 0x90, 0x2d, 0xa0, 0x0e, 0x02]);
+        for text in ["8c:90:2d:a0:0e:02", " 8C-90-2D-A0-0E-02 ", "8c90.2da0.0e02", "8c902da00e02"] {
+            assert_eq!(mac_bytes(text), mac, "{text}");
+        }
+        for text in ["", "8c:90:2d:a0:0e", "8c:90:2d:a0:0e:02:11", "8c:90:2d:a0:0e:0g", "not an address"] {
+            assert_eq!(mac_bytes(text), None, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_carries_the_stored_hardware_address() {
+        let target = |device_id, mac: Option<&str>| Target {
+            device_id,
+            host: "192.168.68.101".into(),
+            mac: mac.map(Into::into),
+        };
+        let targets = [target(1, Some("02:00:00:00:00:0a")), target(2, None), target(3, Some("nonsense"))];
+        let lookup = |_name: String| async { None };
+        let probes = resolve(&targets, &HashSet::new(), lookup, Duration::from_millis(100), &memory(1)).await;
+        assert_eq!(
+            probes,
+            [stored(1, "192.168.68.101", 0x0a), at(2, "192.168.68.101"), at(3, "192.168.68.101")]
+        );
+    }
+
+    #[test]
+    fn the_freshest_entries_say_who_holds_an_address() {
+        let entry = |addr: &str, last, state| Neighbour { ip: ip(addr), mac: [2, 0, 0, 0, 0, last], state };
+        let table = [
+            // A new entry on one adapter, an old one on the other.
+            entry("10.0.0.1", 1, Unconfirmed),
+            entry("10.0.0.1", 2, Reachable),
+            // Two adapters that are equally sure of different devices.
+            entry("10.0.0.2", 1, Reachable),
+            entry("10.0.0.2", 2, Reachable),
+            entry("10.0.0.3", 3, Permanent),
+            Neighbour { ip: ip("10.0.0.4"), mac: [0xff; 6], state: Reachable },
+        ];
+        let macs = |last: &[u8]| last.iter().map(|l| [2, 0, 0, 0, 0, *l]).collect::<BTreeSet<_>>();
+        assert_eq!(holders(&table, ip("10.0.0.1")), macs(&[2]));
+        assert_eq!(holders(&table, ip("10.0.0.2")), macs(&[1, 2]));
+        assert_eq!(holders(&table, ip("10.0.0.3")), macs(&[3]));
+        assert_eq!(holders(&table, ip("10.0.0.4")), macs(&[]));
+        assert_eq!(holders(&table, ip("10.0.0.5")), macs(&[]));
+    }
+
+    #[tokio::test]
+    async fn an_address_handed_on_to_another_device_shows_only_that_one_as_up() {
+        // A guest's phone (1) had 10.0.0.1 and left; a laptop (2) has it now.
+        let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3).state(Reachable))]);
+        let memory = Mutex::new(BTreeSet::new());
+        let probes = [stored(1, "10.0.0.1", 1), stored(2, "10.0.0.1", 2)];
+        assert_eq!(round(&lan, &probes, &memory).await, [down(1), up(2, 3.0)]);
+        // The phone is not taken for a device that answers ping.
+        assert_eq!(*memory.lock().unwrap(), BTreeSet::from([2]));
+        // Read once before the pings (neither had answered one yet) and once after.
+        assert_eq!((lan.pings_to("10.0.0.1"), lan.table_reads.load(Ordering::SeqCst)), (1, 2));
+
+        // Both known to answer ping: the table is read for this alone, once.
+        let memory = Mutex::new(BTreeSet::from([1, 2]));
+        assert_eq!(round(&lan, &probes, &memory).await, [down(1), up(2, 3.0)]);
+        assert_eq!(lan.table_reads.load(Ordering::SeqCst), 3);
+
+        // The order of the two makes no difference, an entry of the kind
+        // "remembered" is as good, and a third entry there that has no stored
+        // hardware address is left as it was.
+        lan.set_state("10.0.0.1", Some(Unconfirmed));
+        let probes = [stored(2, "10.0.0.1", 2), at(3, "10.0.0.1"), stored(1, "10.0.0.1", 1)];
+        assert_eq!(round(&lan, &probes, &memory).await, [up(2, 3.0), up(3, 3.0), down(1)]);
+    }
+
+    #[tokio::test]
+    async fn a_shared_address_is_left_alone_when_the_table_cannot_tell() {
+        let both_up = [up(1, 3.0), up(2, 3.0)];
+        let probes = [stored(1, "10.0.0.1", 1), stored(2, "10.0.0.1", 2)];
+        let memory = || Mutex::new(BTreeSet::from([1, 2]));
+
+        // No entry for the address, as for one behind a router.
+        let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3))]);
+        assert_eq!(round(&lan, &probes, &memory()).await, both_up);
+        assert_eq!(lan.table_reads.load(Ordering::SeqCst), 1);
+
+        // An entry for a device that is neither of the two.
+        let lan = FakeLan::with(vec![("10.0.0.1", Device::new(9).answers(3).state(Reachable))]);
+        assert_eq!(round(&lan, &probes, &memory()).await, both_up);
+
+        // An entry that is not one device's own hardware address.
+        let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3))]);
+        let everyone = Neighbour { ip: ip("10.0.0.1"), mac: [0xff; 6], state: Reachable };
+        lan.other_adapter.lock().unwrap().push(everyone);
+        assert_eq!(round(&lan, &probes, &memory()).await, both_up);
+
+        // Two adapters that are equally sure of one each.
+        let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3).state(Reachable))]);
+        let other = Neighbour { ip: ip("10.0.0.1"), mac: [2, 0, 0, 0, 0, 1], state: Reachable };
+        lan.other_adapter.lock().unwrap().push(other.clone());
+        assert_eq!(round(&lan, &probes, &memory()).await, both_up);
+        // An old entry on the second adapter gives way to the fresh one on the first.
+        *lan.other_adapter.lock().unwrap() = vec![Neighbour { state: Unconfirmed, ..other }];
+        assert_eq!(round(&lan, &probes, &memory()).await, [down(1), up(2, 3.0)]);
+    }
+
+    #[tokio::test]
+    async fn devices_that_do_not_disagree_about_an_address_are_not_looked_up() {
+        let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3).state(Reachable))]);
+        let memory = Mutex::new(BTreeSet::from([1, 2, 3]));
+        // The same hardware address twice (an entry added by hand next to a
+        // scanned one), and entries with none: nothing contradicts anything,
+        // even though the table holds a different one than the first two have.
+        let same = [stored(1, "10.0.0.1", 1), stored(2, "10.0.0.1", 1)];
+        assert_eq!(round(&lan, &same, &memory).await, [up(1, 3.0), up(2, 3.0)]);
+        let one_missing = [stored(1, "10.0.0.1", 1), at(2, "10.0.0.1")];
+        assert_eq!(round(&lan, &one_missing, &memory).await, [up(1, 3.0), up(2, 3.0)]);
+        let both_missing = [at(1, "10.0.0.1"), at(2, "10.0.0.1")];
+        assert_eq!(round(&lan, &both_missing, &memory).await, [up(1, 3.0), up(2, 3.0)]);
+        // Different hardware addresses at different addresses are no conflict either.
+        let apart = [stored(1, "10.0.0.1", 1), stored(3, "10.0.0.2", 3)];
+        assert_eq!(round(&lan, &apart, &memory).await, [up(1, 3.0), down(3)]);
+        // The table was never needed.
+        assert_eq!(lan.table_reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_conflict_rule_also_holds_for_devices_that_never_answer_ping() {
+        // A firewalled PC (2) took over the address of a device (1) that left.
+        let lan = FakeLan::with(vec![
+            ("10.0.0.1", Device::new(2).state(Reachable)),
+            // Remembered from earlier; the system asks again and it answers.
+            ("10.0.0.2", Device::new(4).state(Unconfirmed).later(2, 2, Some(Reachable))),
+            // Nothing there any more: nobody is up, so nothing needs deciding.
+            ("10.0.0.3", Device::new(6)),
+        ]);
+        let memory = Mutex::new(BTreeSet::new());
+        let probes = [
+            stored(1, "10.0.0.1", 1),
+            stored(2, "10.0.0.1", 2),
+            stored(3, "10.0.0.2", 3),
+            stored(4, "10.0.0.2", 4),
+            stored(5, "10.0.0.3", 5),
+            stored(6, "10.0.0.3", 6),
+        ];
+        let checks = round(&lan, &probes, &memory).await;
+        assert_eq!(checks, [down(1), up_silent(2), down(3), up_silent(4), down(5), down(6)]);
+        // Before the pings, after them and after the settle time: the last
+        // copy serves the conflicts too, no extra one is taken.
+        assert_eq!(lan.table_reads.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

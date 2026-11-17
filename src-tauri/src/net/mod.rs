@@ -17,10 +17,11 @@ use crate::error::{Error, Result};
 use crate::history::Check;
 use crate::inventory::Found;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A local network the app could scan.
@@ -71,11 +72,22 @@ pub struct ScanOutcome {
     pub found: Vec<Found>,
 }
 
-/// One device to check: its inventory id and its IP address or host name.
+/// One device to check: its inventory id, its IP address or host name, and
+/// the hardware address the inventory holds for it, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub device_id: i64,
     pub host: String,
+    /// As the inventory stores it: "8c:90:2d:a0:0e:02".
+    pub mac: Option<String>,
+}
+
+/// Where a device added by name is right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Located {
+    At(Ipv4Addr),
+    /// It is this PC itself.
+    Own,
 }
 
 /// One device as a scan finds it, before its maker and name are looked up.
@@ -218,30 +230,128 @@ fn decorate(raw: RawFound, names: &HashMap<Ipv4Addr, String>) -> Found {
 /// up if it answers ping (with a retry, so Wi-Fi devices don't flap) or, for
 /// devices that never answer ping, if the neighbour table shows it is there.
 /// A host name that doesn't resolve counts as down; one whose lookup is slow
-/// is checked at the address it had in the last few minutes. Never fails as
-/// a whole.
+/// is checked at the address it had in the last few minutes.
+///
+/// It fails as a whole in one case only: this PC is not allowed to send
+/// pings at all (some Linux setups). Nothing is checked then, and the error
+/// is a message for the owner that says what to do about it. Store no
+/// results for such a round: they would all read "down". No targets is not
+/// an error, whatever the PC allows: the answer is an empty list.
 ///
 /// A round takes a moment when everything answers, about 4 seconds when
 /// something is down, and 12 at the most (a few more only if the system
 /// loses track of a ping, which is then given up on). It remembers (until
 /// the app closes) which devices have answered ping: for those a missing
 /// reply means down at once, without asking the neighbour table. This PC's
-/// own addresses are never pinged and always up. Must run inside the tokio
-/// runtime.
-pub async fn check(targets: Vec<Target>) -> Vec<Check> {
+/// own addresses are never pinged and always up; `own_devices` lists them.
+///
+/// Known limit: a device that never answers ping (a Windows PC whose
+/// firewall drops it, say) is judged from the neighbour table alone, and
+/// the system can go on calling it reachable there for most of a minute
+/// after it is switched off. Such a device can still be reported as up in
+/// the first round after it went off, and is down from the round after
+/// that: within two timer periods rather than one. Devices that answer ping
+/// are down in the first round.
+///
+/// Two targets at one address with different hardware addresses (the
+/// address was handed on to another device): if the neighbour table holds
+/// the hardware address of one of them, the others with a different one are
+/// down. Where the table has no entry for the address, or one that matches
+/// none of them, all are judged by what answers there, as are targets
+/// without a hardware address.
+///
+/// Must run inside the tokio runtime.
+pub async fn check(targets: Vec<Target>) -> Result<Vec<Check>> {
+    check_on(Arc::new(lan::OsLan), targets, own_ips(), status::os_lookup, &status::REAL, &status::KEPT).await
+}
+
+/// The devices whose host turned out to be this PC itself (one of its own
+/// addresses, or a name for one) in the most recent round of `check`,
+/// replaced by each round. Empty before the first round, and left as it was
+/// by a round that failed.
+pub fn own_devices() -> BTreeSet<i64> {
+    status::KEPT.own_devices()
+}
+
+/// Where the devices that were added by name are right now, so a scan can
+/// tell that an address it found belongs to one of them. Only targets whose
+/// host is a name are looked at, not ones with an IP address. A name that
+/// doesn't resolve is left out; a name for this PC itself, or one that leads
+/// to one of its own addresses, gives `Own`.
+///
+/// The names are looked up as `check` does it and share its memory: all at
+/// once, for 3 seconds at the most, and a name that is slow to answer is
+/// taken to be where it was in the last few minutes. Must run inside the
+/// tokio runtime.
+pub async fn locate(targets: Vec<Target>) -> Vec<(i64, Located)> {
+    locate_on(targets, own_ips(), status::os_lookup, status::NAME_WAIT, &status::KEPT.names).await
+}
+
+/// Every IPv4 address this PC has right now.
+async fn own_ips() -> HashSet<Ipv4Addr> {
+    // Listing the adapters can block for a moment on Windows.
+    let interfaces = tokio::task::spawn_blocking(netdev::get_interfaces).await.unwrap_or_default();
+    ifaces::own_ips(&interfaces)
+}
+
+/// `check` on any network, with any name lookup and memory. `own` is only
+/// waited for when there is something to check and pings are allowed.
+async fn check_on<L, F, Fut>(
+    lan: Arc<L>,
+    targets: Vec<Target>,
+    own: impl Future<Output = HashSet<Ipv4Addr>>,
+    lookup: F,
+    pace: &status::Pace,
+    kept: &status::Kept,
+) -> Result<Vec<Check>>
+where
+    L: lan::Lan,
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<Ipv4Addr>> + Send + 'static,
+{
     if targets.is_empty() {
-        return Vec::new();
+        kept.note_own(&[]);
+        return Ok(Vec::new());
     }
     let started = tokio::time::Instant::now();
-    let interfaces = tokio::task::spawn_blocking(netdev::get_interfaces).await.unwrap_or_default();
-    let own = ifaces::own_ips(&interfaces);
-    let probes =
-        status::resolve(&targets, &own, status::os_lookup, status::NAME_WAIT, &status::NAMES).await;
-    status::check_round(Arc::new(lan::OsLan), &probes, &status::REAL, &status::ANSWERS_PING, started).await
+    lan.allowed().map_err(|e| Error::Network(ping::not_allowed_message(&e)))?;
+    let own = own.await;
+    let probes = status::resolve(&targets, &own, lookup, status::NAME_WAIT, &kept.names).await;
+    kept.note_own(&probes);
+    Ok(status::check_round(lan, &probes, pace, &kept.answers_ping, started).await)
+}
+
+/// `locate` with any name lookup and memory.
+async fn locate_on<F, Fut>(
+    targets: Vec<Target>,
+    own: impl Future<Output = HashSet<Ipv4Addr>>,
+    lookup: F,
+    wait: Duration,
+    names: &Arc<Mutex<status::NameMemory>>,
+) -> Vec<(i64, Located)>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<Ipv4Addr>> + Send + 'static,
+{
+    let is_address = |t: &Target| t.host.trim().parse::<IpAddr>().is_ok();
+    let named: Vec<Target> = targets.into_iter().filter(|t| !is_address(t)).collect();
+    if named.is_empty() {
+        return Vec::new();
+    }
+    let own = own.await;
+    let probes = status::resolve(&named, &own, lookup, wait, names).await;
+    let located = |probe: &status::Probe| match probe.place {
+        status::Place::At(ip) => Some((probe.device_id, Located::At(ip))),
+        status::Place::Own => Some((probe.device_id, Located::Own)),
+        status::Place::Nowhere => None,
+    };
+    probes.iter().filter_map(located).collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::lan::fake::{Device, FakeLan, ip};
+    use super::neigh::NeighState::Reachable;
     use super::*;
 
     fn is_send<T: Send>(_: &T) {}
@@ -253,6 +363,7 @@ mod tests {
         is_send(&scan("", |_| {}, Arc::new(AtomicBool::new(false))));
         is_send(&scan_raw("", &|_| {}, &AtomicBool::new(false)));
         is_send(&check(Vec::new()));
+        is_send(&locate(Vec::new()));
     }
 
     #[test]
@@ -284,8 +395,220 @@ mod tests {
         assert!(scan_of("8.8.8.0/24").await.contains("Only home network ranges"));
     }
 
+    /// The real steps, speeded up.
+    const FAST: status::Pace = status::Pace {
+        in_flight: 64,
+        ping_timeout: Duration::from_millis(50),
+        ping_window: Duration::from_millis(225),
+        settle: Duration::from_millis(210),
+        longest: Duration::from_millis(300),
+    };
+
+    const THIS_PC: &str = "192.168.68.78";
+
+    fn target(device_id: i64, host: &str, mac: Option<&str>) -> Target {
+        Target { device_id, host: host.into(), mac: mac.map(Into::into) }
+    }
+
+    fn kept() -> status::Kept {
+        status::Kept::new(Duration::from_secs(300))
+    }
+
+    async fn own() -> HashSet<Ipv4Addr> {
+        [ip(THIS_PC)].into()
+    }
+
+    /// A name service that knows a NAS, two names for this PC, and one name
+    /// it never finishes with.
+    async fn lookup(name: String) -> Option<Ipv4Addr> {
+        match name.as_str() {
+            "nas.lan" => Some(ip("192.168.68.60")),
+            "this-pc" => Some(ip(THIS_PC)),
+            "localhost" => Some(Ipv4Addr::LOCALHOST),
+            "slow.lan" => std::future::pending().await,
+            _ => None,
+        }
+    }
+
+    async fn round(lan: &Arc<FakeLan>, targets: Vec<Target>, kept: &status::Kept) -> Result<Vec<Check>> {
+        check_on(lan.clone(), targets, own(), lookup, &FAST, kept).await
+    }
+
+    fn up(device_id: i64, rtt_ms: Option<f64>) -> Check {
+        Check { device_id, up: true, rtt_ms }
+    }
+
+    fn down(device_id: i64) -> Check {
+        Check { device_id, up: false, rtt_ms: None }
+    }
+
     #[tokio::test]
-    async fn an_empty_round_of_checks_is_empty() {
-        assert!(check(Vec::new()).await.is_empty());
+    async fn a_pc_that_may_not_ping_gets_an_error_and_no_round() {
+        let (lan, kept) = (FakeLan::broken(), kept());
+        let targets = vec![target(1, "192.168.68.60", None), target(2, THIS_PC, None)];
+        let message = match round(&lan, targets, &kept).await {
+            Err(Error::Network(message)) => message,
+            other => panic!("{other:?}"),
+        };
+        // What is wrong and what to do, with the fix that lasts; nothing about scanning.
+        assert!(message.contains("does not let apps send pings"), "{message}");
+        assert!(message.contains("/etc/sysctl.d/"), "{message}");
+        assert!(!message.to_lowercase().contains("scan"), "{message}");
+        // Nothing was sent, looked up or remembered.
+        assert!(lan.pinged.lock().unwrap().is_empty());
+        assert_eq!(lan.table_reads.load(Ordering::SeqCst), 0);
+        assert!(kept.own_devices().is_empty() && kept.answers_ping.lock().unwrap().is_empty());
+
+        // Nothing to check is fine on any PC.
+        assert_eq!(round(&lan, Vec::new(), &kept).await.ok(), Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn a_round_on_a_pc_that_may_ping_gives_one_result_per_target() {
+        let lan = FakeLan::with(vec![("192.168.68.60", Device::new(1).answers(2).state(Reachable))]);
+        let targets = vec![
+            target(1, "nas.lan", None),
+            target(2, "192.168.68.60", None),
+            target(3, "192.168.68.61", None),
+            target(4, "gone.lan", None),
+        ];
+        let checks = round(&lan, targets, &kept()).await.unwrap();
+        assert_eq!(checks, [up(1, Some(2.0)), up(2, Some(2.0)), down(3), down(4)]);
+    }
+
+    #[tokio::test]
+    async fn own_devices_are_the_ones_of_the_latest_round() {
+        let lan = FakeLan::with(vec![("192.168.68.60", Device::new(1).answers(2).state(Reachable))]);
+        let kept = kept();
+        assert!(kept.own_devices().is_empty());
+
+        // This PC by address, by name, and by the name every computer has for itself.
+        let targets = vec![
+            target(1, THIS_PC, None),
+            target(2, "nas.lan", None),
+            target(3, "this-pc", None),
+            target(4, "localhost", None),
+            target(5, "127.0.0.1", None),
+            target(6, "gone.lan", None),
+        ];
+        let checks = round(&lan, targets, &kept).await.unwrap();
+        let expected = [up(1, None), up(2, Some(2.0)), up(3, None), up(4, None), up(5, None), down(6)];
+        assert_eq!(checks, expected);
+        assert_eq!(kept.own_devices(), BTreeSet::from([1, 3, 4, 5]));
+        // This PC is never pinged.
+        assert_eq!(*lan.pinged.lock().unwrap(), [ip("192.168.68.60")]);
+
+        // The next round replaces the list, it does not add to it.
+        round(&lan, vec![target(2, "nas.lan", None), target(3, "this-pc", None)], &kept).await.unwrap();
+        assert_eq!(kept.own_devices(), BTreeSet::from([3]));
+        // A round that can't run leaves it as it was...
+        assert!(round(&FakeLan::broken(), vec![target(2, "nas.lan", None)], &kept).await.is_err());
+        assert_eq!(kept.own_devices(), BTreeSet::from([3]));
+        // ...and one with nothing to check empties it.
+        round(&lan, Vec::new(), &kept).await.unwrap();
+        assert!(kept.own_devices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_address_handed_on_shows_only_the_device_that_has_it_now() {
+        // The table holds the hardware address `Device::new(2)` has.
+        let lan = FakeLan::with(vec![("192.168.68.60", Device::new(2).answers(3).state(Reachable))]);
+        let kept = kept();
+        // A phone that left, the laptop that has its address now (once by
+        // name, written the way Windows shows it), and an entry without one.
+        let targets = vec![
+            target(1, "192.168.68.60", Some("02:00:00:00:00:01")),
+            target(2, "nas.lan", Some("02-00-00-00-00-02")),
+            target(3, "192.168.68.60", None),
+        ];
+        let checks = round(&lan, targets, &kept).await.unwrap();
+        assert_eq!(checks, [down(1), up(2, Some(3.0)), up(3, Some(3.0))]);
+        // The phone is not remembered as a device that answers ping.
+        assert_eq!(*kept.answers_ping.lock().unwrap(), BTreeSet::from([2, 3]));
+    }
+
+    #[tokio::test]
+    async fn locate_finds_where_named_devices_are() {
+        let names = kept().names;
+        let targets = vec![
+            target(1, "nas.lan", None),
+            target(2, "gone.lan", None),
+            // Addresses are not names: nothing to find out.
+            target(3, "192.168.68.20", None),
+            target(4, "this-pc", None),
+            target(5, " localhost ", None),
+            target(6, THIS_PC, None),
+            target(7, "fe80::1", None),
+            // A mistyped address is not asked about either.
+            target(8, "192.168.68", None),
+            target(9, "slow.lan", None),
+            // Whether the inventory has a hardware address makes no difference here.
+            target(10, "nas.lan", Some("02:00:00:00:00:01")),
+        ];
+        let wait = Duration::from_millis(100);
+        let started = std::time::Instant::now();
+        let located = locate_on(targets, own(), lookup, wait, &names).await;
+        let nas = Located::At(ip("192.168.68.60"));
+        assert_eq!(located, [(1, nas), (4, Located::Own), (5, Located::Own), (10, nas)]);
+        // The name that never answers was not waited for beyond the limit.
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn locate_shares_what_the_status_rounds_remember() {
+        let lan = FakeLan::with(vec![("192.168.68.60", Device::new(1).answers(2))]);
+        let kept = kept();
+        round(&lan, vec![target(1, "nas.lan", None)], &kept).await.unwrap();
+        // The name service has gone quiet; the address of a moment ago is used.
+        let quiet = |_name: String| std::future::pending::<Option<Ipv4Addr>>();
+        let located =
+            locate_on(vec![target(1, "nas.lan", None)], own(), quiet, Duration::from_millis(50), &kept.names)
+                .await;
+        assert_eq!(located, [(1, Located::At(ip("192.168.68.60")))]);
+    }
+
+    #[tokio::test]
+    async fn locate_asks_nothing_when_no_device_has_a_name() {
+        let asked = AtomicBool::new(false);
+        let own = async {
+            asked.store(true, Ordering::SeqCst);
+            HashSet::new()
+        };
+        let lookup = |_name: String| {
+            asked.store(true, Ordering::SeqCst);
+            async { None }
+        };
+        let targets = vec![target(1, "192.168.68.20", None), target(2, "::1", None)];
+        assert!(locate_on(targets, own, lookup, Duration::from_millis(50), &kept().names).await.is_empty());
+        // Neither this PC's adapters nor the name service.
+        assert!(!asked.load(Ordering::SeqCst));
+    }
+
+    /// The real thing, as far as it goes without sending anything onto the
+    /// network. One test, because the two halves share the app's memory.
+    #[tokio::test]
+    async fn the_real_check_and_locate_know_this_pc() {
+        // Nothing to check is never an error.
+        assert_eq!(check(Vec::new()).await.ok(), Some(Vec::new()));
+        assert!(own_devices().is_empty());
+
+        match check(vec![target(7, "127.0.0.1", None), target(8, "localhost", None)]).await {
+            // This PC is up without a ping, and known as this PC.
+            Ok(checks) => {
+                assert_eq!(checks, [up(7, None), up(8, None)]);
+                assert_eq!(own_devices(), BTreeSet::from([7, 8]));
+            }
+            // A PC (or build container) that forbids pings says so instead.
+            Err(Error::Network(message)) => {
+                assert!(message.contains("/etc/sysctl.d/"), "{message}");
+                assert!(own_devices().is_empty());
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+        assert_eq!(check(Vec::new()).await.ok(), Some(Vec::new()));
+        assert!(own_devices().is_empty());
+
+        let located = locate(vec![target(1, "localhost", None), target(2, "127.0.0.1", None)]).await;
+        assert_eq!(located, [(1, Located::Own)]);
     }
 }

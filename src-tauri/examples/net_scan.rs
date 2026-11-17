@@ -6,6 +6,10 @@
 //!   net_scan --subnets          only list the networks this PC is on
 //!   net_scan --check HOST...    only run a status round on these addresses or names
 //!
+//! A HOST can be given the hardware address the inventory would hold for it,
+//! as in 192.168.68.20=8c:90:2d:a0:0e:02. Two hosts at one address with
+//! different hardware addresses show which of them the round takes to be there.
+//!
 //! Extra switches:
 //!   --full            also look up makers and names, as the app's own scan does
 //!   --no-check        skip the status round after a scan
@@ -13,9 +17,9 @@
 //!   --cancel-after N  stop the scan after N seconds, to see what a cancelled scan returns
 
 use home_cc_lib::history::Check;
-use home_cc_lib::net::{self, RawFound, ScanPhase, ScanProgress, Target};
+use home_cc_lib::net::{self, Located, RawFound, ScanPhase, ScanProgress, Target};
 use netdev::ipnet::Ipv4Net;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -234,30 +238,58 @@ fn hosts_to_check(range: &str, found: &[RawFound]) -> Vec<String> {
     hosts
 }
 
+/// Each host is "HOST" or "HOST=HARDWARE-ADDRESS".
 async fn check_round(hosts: &[String]) {
-    let targets: Vec<Target> = hosts
-        .iter()
-        .enumerate()
-        .map(|(n, host)| Target { device_id: n as i64, host: host.clone() })
-        .collect();
+    let target = |(n, host): (usize, &String)| {
+        let (host, mac) = match host.split_once('=') {
+            Some((host, mac)) => (host, Some(mac.to_string())),
+            None => (host.as_str(), None),
+        };
+        Target { device_id: n as i64, host: host.to_string(), mac }
+    };
+    let targets: Vec<Target> = hosts.iter().enumerate().map(target).collect();
     println!("\nStatus round for {} hosts ...", targets.len());
     let started = Instant::now();
-    let checks = net::check(targets).await;
+    let checks = match net::check(targets.clone()).await {
+        Ok(checks) => checks,
+        Err(e) => {
+            println!("The status round could not run: {e}");
+            return;
+        }
+    };
     let took = started.elapsed();
+    let own = net::own_devices();
     for (n, host) in hosts.iter().enumerate() {
-        let line = match checks.iter().find(|c| c.device_id == n as i64) {
+        let id = n as i64;
+        let line = match checks.iter().find(|c| c.device_id == id) {
+            Some(Check { up: true, .. }) if own.contains(&id) => "up, this PC".into(),
             Some(Check { up: true, rtt_ms: Some(ms), .. }) => format!("up, {ms:.2} ms"),
             Some(Check { up: true, rtt_ms: None, .. }) => "up, no ping reply".into(),
             Some(Check { up: false, .. }) => "down".into(),
             None => "NO RESULT (a bug: every host must get one)".into(),
         };
-        println!("  {host:<24} {line}");
+        println!("  {host:<40} {line}");
     }
     let up = checks.iter().filter(|c| c.up).count();
     println!(
-        "Round took {:.2} s: {} results, {up} up, {} down",
+        "Round took {:.2} s: {} results, {up} up, {} down, {} this PC",
         took.as_secs_f64(),
         checks.len(),
-        checks.len() - up
+        checks.len() - up,
+        own.len()
     );
+
+    // What a scan would be told about the hosts that are names.
+    let started = Instant::now();
+    let located = net::locate(targets.clone()).await;
+    let names = targets.iter().filter(|t| t.host.parse::<IpAddr>().is_err()).count();
+    let took = started.elapsed().as_secs_f64();
+    println!("Looking up the {names} names among them took {took:.2} s; {} lead somewhere", located.len());
+    for (id, place) in located {
+        let host = targets.iter().find(|t| t.device_id == id).map_or("?", |t| t.host.as_str());
+        match place {
+            Located::At(ip) => println!("  {host:<40} is at {ip}"),
+            Located::Own => println!("  {host:<40} is this PC"),
+        }
+    }
 }

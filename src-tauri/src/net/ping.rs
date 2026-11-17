@@ -65,13 +65,39 @@ pub fn allowed() -> io::Result<()> {
     Ok(())
 }
 
-/// What to tell the owner when `allowed` fails.
+/// What to tell the owner when `allowed` fails, for a scan and a status
+/// check alike: what is wrong, and the one thing to do about it. The setting
+/// goes into a file so that it is still there after a restart; `sysctl -w`
+/// alone would be lost.
 pub fn not_allowed_message(error: &io::Error) -> String {
     if error.kind() == io::ErrorKind::PermissionDenied {
-        "This computer does not let apps send pings. To allow it, run this once in a terminal and scan \
-         again: sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\""
+        "This computer does not let apps send pings, so home-cc can't tell which devices are on. To allow \
+         it, now and after every restart, run this once in a terminal: \
+         echo \"net.ipv4.ping_group_range = 0 2147483647\" | sudo tee /etc/sysctl.d/99-ping.conf \
+         && sudo sysctl -p /etc/sysctl.d/99-ping.conf"
             .into()
     } else {
         format!("Pings can't be sent from this computer ({error}).")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_message_says_what_to_do_and_how_to_make_it_last() {
+        let message = not_allowed_message(&io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(message.starts_with("This computer does not let apps send pings"), "{message}");
+        assert!(message.contains("net.ipv4.ping_group_range = 0 2147483647"), "{message}");
+        // In a file, so a restart doesn't undo it.
+        assert!(message.contains("/etc/sysctl.d/"), "{message}");
+        // The same text serves the status check, where "scan again" would be wrong.
+        assert!(!message.to_lowercase().contains("scan"), "{message}");
+        // Nothing a non-specialist would have to look up.
+        assert!(!message.contains("ICMP") && !message.contains("errno"), "{message}");
+
+        let other = not_allowed_message(&io::Error::other("no buffer space"));
+        assert_eq!(other, "Pings can't be sent from this computer (no buffer space).");
     }
 }
