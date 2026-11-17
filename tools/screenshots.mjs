@@ -1,6 +1,6 @@
 // Saves a screenshot of every screen at each of the owner's monitor sizes,
 // using the sample back end (src/lib/mock), and checks that nothing scrolls
-// sideways. Needs Playwright with Chromium, installed globally or locally.
+// sideways (or the page itself grows taller than the window). Needs Playwright with Chromium, installed globally or locally.
 //
 //   node tools/screenshots.mjs <output folder> [--url http://127.0.0.1:1420]
 //        [--only overview,settings] [--sizes 1920x1080,1280x720@1.5] [--zoom 200]
@@ -504,6 +504,12 @@ function inspect() {
   const overflow = [];
   const doc = document.documentElement;
   if (doc.scrollWidth > window.innerWidth) overflow.push(`the page is ${doc.scrollWidth}px wide in a ${window.innerWidth}px window`);
+  // Only the screen, the sidebar and panels scroll: a page taller than the window is a second scrollbar on
+  // the right. app.css clips the page so the owner never sees one; measured without that, so the cause shows.
+  const keep = [doc.style.overflow, document.body.style.overflow];
+  doc.style.overflow = document.body.style.overflow = "visible";
+  if (doc.scrollHeight > window.innerHeight) overflow.push(`the page is ${doc.scrollHeight}px tall in a ${window.innerHeight}px window (a second scrollbar)`);
+  [doc.style.overflow, document.body.style.overflow] = keep;
   const cut = [];
   for (const el of document.querySelectorAll("body *")) {
     if (el.scrollWidth <= el.clientWidth + 1 || el.clientWidth === 0) continue;

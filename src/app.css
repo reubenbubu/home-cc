@@ -42,6 +42,11 @@ html, body {
   /* rem-based sizes follow the OS display scaling (100%, 125%, 150%). */
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
+  /* The app fills the window and its parts scroll on their own (the screen, the sidebar, side panels):
+     the page itself never does, so a pixel too many somewhere can't add a second scrollbar. "clip" also
+     stops focus or scrollIntoView from shifting the page; "hidden" is for engines without it. */
+  overflow: hidden;
+  overflow: clip;
 }
 
 a { color: var(--accent); }

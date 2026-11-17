@@ -21,7 +21,8 @@
 {/if}
 
 <style>
-  .live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* Pinned to the top corner: left where it falls, below the app, it made the page 1px taller than the window. */
+  .live { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .note {
     position: fixed;
     transform: translate(-50%, calc(-100% - 0.5rem));

@@ -128,6 +128,10 @@
   /* --page-zoom is only set in a browser with the sample data, where zoom.svelte.ts scales the page, which
      also scales vh. In the app the window itself zooms and this is plain 100vh. */
   .shell { display: flex; height: calc(100vh / var(--page-zoom, 1)); }
+  /* Positioned, so the hidden screen-reader text in them (.sr-only and the like, absolutely positioned)
+     stays inside the part that scrolls. Without it, that text far down a long screen made the whole page
+     taller than the window: a second scrollbar on the right, mostly seen when zoomed in. */
+  .shell, .sidebar, .content { position: relative; }
   .shell.zooming { visibility: hidden; }
 
   .sidebar {
