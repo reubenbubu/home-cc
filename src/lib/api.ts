@@ -185,6 +185,9 @@ export interface MachineStatsEntry {
    *  knocking with a wrong password. It tries again when the machine or a secret is edited, or on
    *  refreshStats. */
   paused: boolean;
+  /** True for this PC (the one home-cc runs on): read here, without SSH and without an SSH user. None of
+   *  the SSH states (newHost, hostKeyChanged, auth, paused) ever apply to it. */
+  local: boolean;
 }
 
 /** Keychain entry names used with setSecret / hasSecret / deleteSecret. */

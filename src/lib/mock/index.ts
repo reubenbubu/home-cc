@@ -145,7 +145,8 @@ export function installMock() {
     dev("Office Deco", "192.168.68.52", "mesh", "other", "wired", { mac: "3c:52:a1:10:2f:5d", vendor: tpLink, hostname: "deco-BE85" }),
     dev("Bedroom Deco", "192.168.68.53", "mesh", "other", "wifi", { mac: "3c:52:a1:10:30:12", vendor: tpLink, hostname: "deco-BE85" }),
     dev("Garage Deco", "192.168.68.54", "mesh", "other", "recovered", { mac: "3c:52:a1:10:31:c4", vendor: tpLink, hostname: "deco-BE85" }),
-    dev("Main PC", "192.168.68.60", "pc", "windows", "self", { sshUser: "sam", mac: "a0:36:bc:5e:11:90", vendor: "ASUSTek Computer Inc.", hostname: "DESKTOP-MAIN", notes: "home-cc runs here" }),
+    // home-cc runs here, so its stats are read without SSH: no SSH user.
+    dev("Main PC", "192.168.68.60", "pc", "windows", "self", { mac: "a0:36:bc:5e:11:90", vendor: "ASUSTek Computer Inc.", hostname: "DESKTOP-MAIN", notes: "home-cc runs here" }),
     dev("NAS", "192.168.68.10", "server", "windows", "noPing", { sshUser: "admin", mac: "d8:bb:c1:7a:02:6e", vendor: "Micro-Star INTL Co., Ltd.", hostname: "NAS" }),
     dev("Homelab VM", "192.168.68.21", "vm", "linux", "wired", { sshUser: "sam", mac: "00:15:5d:44:0a:01", vendor: "Microsoft Corporation", hostname: "homelab" }),
     dev("Dev VM", "192.168.68.22", "vm", "linux", "wired", { sshUser: "sam", mac: "00:15:5d:44:0a:02", vendor: "Microsoft Corporation", hostname: "dev" }),
@@ -248,26 +249,27 @@ export function installMock() {
   });
   const goodStats = new Map<number, MachineStats>([
     [idOf("Main PC"), {
-      osName: "Windows 11",
+      osName: "Microsoft Windows 11 Pro",
       uptimeSecs: 2 * DAY + 5 * 3600,
-      cpuPct: null,
+      cpuPct: 12,
       load1: null,
       cpuCount: 16,
       memTotalKb: kb(31.9),
       memUsedKb: kb(14.6),
       disks: [disk("C:", "", 930.5, 512.2), disk("D:", "", 1862.9, 1204.7)],
-      reduced: true,
+      reduced: false,
     }],
+    // Its SSH account isn't an administrator there, so the readings are limited.
     [idOf("NAS"), {
-      osName: "Microsoft Windows 11 Pro",
+      osName: "Windows 11",
       uptimeSecs: 21 * DAY + 7 * 3600,
-      cpuPct: 18,
+      cpuPct: null,
       load1: null,
       cpuCount: 12,
       memTotalKb: kb(63.9),
       memUsedKb: kb(41.3),
       disks: [disk("C:", "System", 465.1, 201.4), disk("D:", "Media", 14901.2, 13872.6), disk("E:", "Backups", 7450.6, 4310.9)],
-      reduced: false,
+      reduced: true,
     }],
     [idOf("Homelab VM"), linux("Ubuntu 24.04.1 LTS", {
       cpuPct: 23,
@@ -367,7 +369,12 @@ export function installMock() {
     expectedFingerprint: null,
     pinnedFingerprint: null,
     paused: false,
+    local: false,
   });
+  /** The PC home-cc runs on: read here without SSH, with or without an SSH user. */
+  const isLocal = (d: MockDevice) => d.pattern === "self" && d.kind !== "ignore";
+  /** Machines with stats: those with an SSH user, and this PC. */
+  const readsStats = (d: MockDevice) => d.kind !== "ignore" && (!!d.sshUser || isLocal(d));
   /** An entry as the screens get it: the stored identity is looked up at that moment. */
   const publicEntry = (e: MachineStatsEntry): MachineStatsEntry => ({ ...e, pinnedFingerprint: pinned.get(e.deviceId)?.fingerprint ?? null });
   const entry = (
@@ -388,7 +395,7 @@ export function installMock() {
       if (d.access === "password") approved.add(d.id);
     }
   }
-  entry("Main PC", 21);
+  entry("Main PC", 21, null, null, { local: true });
   entry("NAS", 20);
   entry("Homelab VM", 19);
   // Never read yet.
@@ -431,7 +438,10 @@ export function installMock() {
     const key = serverKey(d);
     const needsPassword = d.access === "password";
     let next: MachineStatsEntry;
-    if (d.pattern === "gone" && prev?.errorKind === "unreachable") {
+    if (isLocal(d) && stats) {
+      // Read here: no identity, login or pause, and CPU from the full Windows query.
+      next = { ...blankEntry(d.id), local: true, stats: { ...stats, uptimeSecs: stats.uptimeSecs == null ? null : stats.uptimeSecs + (nowSecs() - start) }, collectedAt: nowSecs() };
+    } else if (d.pattern === "gone" && prev?.errorKind === "unreachable") {
       next = prev;
     } else if (!stats || d.pattern === "gone") {
       next = failed("unreachable", `Couldn't reach ${d.host}: nothing answered on port ${d.sshPort}. Is SSH turned on there?`);
@@ -465,7 +475,7 @@ export function installMock() {
     const again = devices.filter((d) => entries.get(d.id)?.paused && (only == null || d.id === only));
     if (again.length === 0) return;
     setTimeout(() => {
-      for (const d of again) if (d.sshUser && entries.has(d.id)) readStats(d);
+      for (const d of again) if (readsStats(d) && entries.has(d.id)) readStats(d);
       emit("stats-changed");
     }, 600);
   }
@@ -565,7 +575,7 @@ export function installMock() {
         const e = entries.get(d.id);
         const waiting = e?.stats == null && e?.error == null;
         // After a failed login a machine is left alone until the owner does something about it.
-        if (d.sshUser && d.kind !== "ignore" && !waiting && !e?.paused) readStats(d);
+        if (readsStats(d) && !waiting && !e?.paused) readStats(d);
       }
       emit("stats-changed");
     }, settings.statsIntervalSecs * 1000);
@@ -626,7 +636,7 @@ export function installMock() {
         lastSeen: null,
       });
       devices.push(d);
-      if (d.sshUser) entries.set(d.id, blankEntry(d.id));
+      if (readsStats(d)) entries.set(d.id, blankEntry(d.id));
       return publicDevice(d);
     },
     update_device: ({ id, input }: { id: number; input: DeviceInput }) => {
@@ -662,7 +672,7 @@ export function installMock() {
         reviewed: true,
       });
       const e = entries.get(d.id);
-      if (!d.sshUser) entries.delete(d.id);
+      if (!readsStats(d)) entries.delete(d.id);
       else if (!e) entries.set(d.id, blankEntry(d.id));
       // An edit ends a pause.
       else if (e.paused) entries.set(d.id, { ...e, paused: false });
@@ -717,13 +727,13 @@ export function installMock() {
 
     machine_stats: () =>
       devices
-        .filter((d) => d.sshUser && d.kind !== "ignore")
+        .filter(readsStats)
         .map((d) => entries.get(d.id))
         .filter((e) => e != null)
         .map(publicEntry),
     refresh_stats: async ({ deviceId }: { deviceId: number }) => {
       const d = find(deviceId);
-      if (!d.sshUser) throw "This machine has no SSH user yet";
+      if (!d.sshUser && !isLocal(d)) throw "Add an SSH user to this machine first";
       // The try starts now, with the identity stored at this moment, and takes a while.
       const known = pinned.get(d.id) ?? null;
       await sleep(1100);

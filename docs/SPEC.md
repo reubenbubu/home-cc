@@ -129,6 +129,10 @@ can take one more timer period to show as down.
   when they were last seen. Most have no SSH, so they have no stats and the app
   doesn't ask for an SSH user; one that does have SSH (a NAS box, say) gets
   stats like any other machine.
+- The PC home-cc runs on needs no SSH: its stats are read directly, with the
+  same script and the same numbers an SSH reading would give, and without
+  showing a window. If its system is still "Other", the app fills in Windows
+  or Linux.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.

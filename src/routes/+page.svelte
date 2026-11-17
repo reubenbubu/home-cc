@@ -60,7 +60,8 @@
         down.push({ key: `down-${d.id}`, text: `${d.name} is down (last seen ${relTime(seen, clock.now)})`, href });
       }
       const entry = stats.get(d.id);
-      if (!d.sshUser || !entry) continue;
+      // This PC is read without SSH, so it is looked at without an SSH user too.
+      if ((!d.sshUser && !stats.local(d)) || !entry) continue;
       if (entry.errorKind === "hostKeyChanged") {
         warn.push({ key: `key-${d.id}`, text: `${d.name}: its identity has changed and needs your approval`, href });
       } else if (entry.errorKind === "newHost") {
@@ -153,6 +154,8 @@
             {@const st = entry?.stats}
             {@const disk = st ? fullestDisk(st) : null}
             {@const ram = share(st?.memUsedKb, st?.memTotalKb)}
+            <!-- This PC is read here, without SSH: it needs no SSH user. -->
+            {@const local = stats.local(m)}
             <!-- An appliance's system is mostly not known ("Other"), and then not worth its place. -->
             {@const system = m.kind === "appliance" && m.os === "other" ? [] : [OS_LABELS[m.os]]}
             <article class="panel card">
@@ -165,10 +168,10 @@
               </div>
               <div class="muted small ellipsis"><span class="mono">{m.host}</span> · {[...system, KIND_LABELS[m.kind]].join(" · ")}</div>
               <Sparkline history={status.get(m)?.history ?? []} />
-              {#if !m.sshUser && m.kind === "appliance"}
+              {#if !m.sshUser && !local && m.kind === "appliance"}
                 <!-- Most appliances have no SSH, so there are no stats to ask for: just when it was last there. -->
                 <div class="muted small">Last seen {relTime(status.get(m)?.lastSeen ?? m.lastSeen, clock.now)}</div>
-              {:else if !m.sshUser}
+              {:else if !m.sshUser && !local}
                 <a class="small quiet-link" href="/machines?edit={m.id}">Add an SSH user to see stats</a>
               {:else if entry?.error}
                 <a class="small note" href="/machines" title={entry.error}>
@@ -176,7 +179,7 @@
                   {(entry.errorKind && NOTE[entry.errorKind]) || NOTE.other}
                 </a>
               {:else if st}
-                <div class="minis">
+                <div class="minis" title={local ? "Read on this PC, without SSH" : undefined}>
                   {#if st.cpuPct == null && st.load1 != null}
                     <MiniMeter label="Load" value={null} text={st.load1.toFixed(2)} />
                   {:else}

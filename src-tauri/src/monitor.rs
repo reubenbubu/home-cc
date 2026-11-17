@@ -4,12 +4,13 @@
 
 use crate::error::{Error, Result};
 use crate::inventory::{Device, DeviceKind, Found, Inventory, now};
+use crate::localstats;
 use crate::net::{self, Located, ScanProgress, Target};
 use crate::secrets;
 use crate::ssh::{HostKey, Login, SshError};
 use crate::stats::{self, CpuTicks, MachineStats};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -71,6 +72,9 @@ pub struct MachineStatsEntry {
     /// True when the app has stopped trying by itself, so it doesn't keep
     /// knocking on a machine that turns it away.
     pub paused: bool,
+    /// True for this PC, read here without SSH (localstats.rs). The SSH-only
+    /// states (an identity to approve, a failed login, a pause) never apply.
+    pub local: bool,
 }
 
 impl MachineStatsEntry {
@@ -85,6 +89,7 @@ impl MachineStatsEntry {
             expected_fingerprint: None,
             pinned_fingerprint: None,
             paused: false,
+            local: false,
         }
     }
 }
@@ -150,6 +155,12 @@ impl Drop for ScanGuard<'_> {
 /// checks, which every tracked device gets.
 fn wants_stats(d: &Device) -> bool {
     d.kind != DeviceKind::Ignore && d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty())
+}
+
+/// Machines the app reads stats from: those with an SSH user, and this PC
+/// (`this_pc`, from `localstats::this_pc_ids`), which needs none.
+fn reads_stats(d: &Device, this_pc: &BTreeSet<i64>) -> bool {
+    wants_stats(d) || this_pc.contains(&d.id)
 }
 
 fn error_kind(e: &SshError) -> StatsErrorKind {
@@ -297,14 +308,22 @@ impl Monitor {
         self.scanning.load(Ordering::SeqCst)
     }
 
-    /// One entry per machine with an SSH user, read or not.
+    /// One entry per machine with an SSH user, and one for this PC, read or
+    /// not. Blocks for a moment (see `localstats::this_pc_ids`).
     pub fn stats_entries(&self, inv: &Inventory) -> Result<Vec<MachineStatsEntry>> {
-        let machines: Vec<Device> = inv.list()?.into_iter().filter(wants_stats).collect();
+        let list = inv.list()?;
+        let this_pc = localstats::this_pc_ids(&list);
+        let machines: Vec<Device> = list.into_iter().filter(|d| reads_stats(d, &this_pc)).collect();
         let mut entries = Vec::with_capacity(machines.len());
         for d in &machines {
-            let known = self.stats.lock().unwrap().get(&d.id).map(|s| s.entry.clone());
-            let mut entry = known.unwrap_or_else(|| MachineStatsEntry::empty(d.id));
-            entry.pinned_fingerprint = inv.host_key(d.id)?.map(|k| k.fingerprint);
+            let local = this_pc.contains(&d.id);
+            // What was read the other way (over SSH before the device turned
+            // out to be this PC, or the other way round) is not shown as this.
+            let known = self.stats.lock().unwrap().get(&d.id).map(|s| s.entry.clone()).filter(|e| e.local == local);
+            let mut entry = known.unwrap_or_else(|| MachineStatsEntry { local, ..MachineStatsEntry::empty(d.id) });
+            if !local {
+                entry.pinned_fingerprint = inv.host_key(d.id)?.map(|k| k.fingerprint);
+            }
             entries.push(entry);
         }
         Ok(entries)
@@ -350,19 +369,32 @@ impl Monitor {
     }
 
     async fn stats_round(&self, app: &AppHandle) {
-        let machines: Vec<Device> = match app.state::<Inventory>().list() {
-            Ok(list) => list.into_iter().filter(wants_stats).collect(),
+        let list = match app.state::<Inventory>().list() {
+            Ok(list) => list,
             Err(e) => {
                 crate::diag::note(format!("stats round failed: {e}"));
                 return;
             }
         };
+        // Worked out each round: this PC may have a new address by now, and
+        // there may be no device for it at all.
+        let this_pc = localstats::this_pc_ids_now(list.clone()).await;
+        match localstats::fill_in_os(&app.state::<Inventory>(), &this_pc) {
+            Ok(true) => {
+                app.emit(EVENT_STATUS, ()).ok();
+            }
+            Ok(false) => {}
+            Err(e) => crate::diag::note(format!("could not fill in this PC's system: {e}")),
+        }
+        let machines: Vec<Device> = list.into_iter().filter(|d| reads_stats(d, &this_pc)).collect();
         // Drop machines that were removed or no longer have an SSH user.
         self.stats.lock().unwrap().retain(|id, _| machines.iter().any(|d| d.id == *id));
         self.reading.lock().unwrap().retain(|id, _| machines.iter().any(|d| d.id == *id));
         let due: Vec<i64> = {
             let known = self.stats.lock().unwrap();
-            machines.iter().map(|d| d.id).filter(|id| !known.get(id).is_some_and(|s| s.entry.paused)).collect()
+            // This PC is never paused: a pause left from SSH no longer applies.
+            let paused = |id: &i64| !this_pc.contains(id) && known.get(id).is_some_and(|s| s.entry.paused);
+            machines.iter().map(|d| d.id).filter(|id| !paused(id)).collect()
         };
         if due.is_empty() {
             return;
@@ -390,12 +422,25 @@ impl Monitor {
         // Look the machine up only now: it may have been edited or removed
         // while this reading waited its turn.
         let device = match app.state::<Inventory>().get(device_id) {
-            Ok(d) if wants_stats(&d) => d,
+            Ok(d) if d.kind != DeviceKind::Ignore => d,
             _ => {
                 self.forget(device_id);
                 return MachineStatsEntry::empty(device_id);
             }
         };
+        // This PC is read here, without SSH, even when it has an SSH user too:
+        // no login is needed, and the numbers are the same.
+        if localstats::is_this_pc_now(&device).await {
+            return self.read_local(app, device).await;
+        }
+        if !wants_stats(&device) {
+            self.forget(device_id);
+            return MachineStatsEntry::empty(device_id);
+        }
+        // Counters from a local reading don't belong with an SSH one.
+        if self.stats.lock().unwrap().get(&device_id).is_some_and(|s| s.entry.local) {
+            self.forget(device_id);
+        }
         let prev_ticks = self.stats.lock().unwrap().get(&device_id).and_then(|s| s.ticks);
         let login = login_for(app, &device).await;
         // A machine reached for the first time has its identity remembered
@@ -482,6 +527,46 @@ impl Monitor {
                     }
                     _ => {}
                 }
+            }
+        }
+        entry.clone()
+    }
+
+    /// Read this PC's stats here, without SSH, and remember the outcome. The
+    /// caller holds this machine's turn (see `read_stats`).
+    async fn read_local(&self, app: &AppHandle, device: Device) -> MachineStatsEntry {
+        let device_id = device.id;
+        let prev_ticks =
+            self.stats.lock().unwrap().get(&device_id).filter(|s| s.entry.local).and_then(|s| s.ticks);
+        let outcome = localstats::collect(prev_ticks).await;
+        // Pointed somewhere else while this ran: the edit already started a
+        // fresh reading, and this one is about the old place.
+        if !app.state::<Inventory>().get(device_id).is_ok_and(|d| d.host == device.host) {
+            return self.stats.lock().unwrap().get(&device_id).map(|s| s.entry.clone())
+                .unwrap_or_else(|| MachineStatsEntry::empty(device_id));
+        }
+        let mut known = self.stats.lock().unwrap();
+        let fresh =
+            || StatsState { entry: MachineStatsEntry { local: true, ..MachineStatsEntry::empty(device_id) }, ticks: None };
+        let state = known.entry(device_id).or_insert_with(fresh);
+        if !state.entry.local {
+            // Whatever SSH left (an identity to approve, a pause) is gone.
+            *state = fresh();
+        }
+        let entry = &mut state.entry;
+        match outcome {
+            Ok((stats, ticks)) => {
+                state.ticks = ticks;
+                entry.stats = Some(stats);
+                entry.collected_at = Some(now());
+                entry.error = None;
+                entry.error_kind = None;
+            }
+            Err(message) => {
+                // The last good reading stays on screen next to the error.
+                state.ticks = None;
+                entry.error = Some(message);
+                entry.error_kind = Some(StatsErrorKind::Other);
             }
         }
         entry.clone()
@@ -608,5 +693,23 @@ mod tests {
         assert!(wants_stats(&device(DeviceKind::Pc, Some("sam"))));
         assert!(!wants_stats(&device(DeviceKind::Pc, None)));
         assert!(!wants_stats(&device(DeviceKind::Ignore, Some("sam"))));
+    }
+
+    #[test]
+    fn this_pc_is_read_without_an_ssh_user() {
+        let this_pc = BTreeSet::from([1]);
+        assert!(reads_stats(&device(DeviceKind::Other, None), &this_pc), "this PC, no SSH user");
+        assert!(reads_stats(&device(DeviceKind::Pc, Some("sam")), &this_pc), "this PC with an SSH user too");
+        assert!(!reads_stats(&device(DeviceKind::Pc, None), &BTreeSet::new()), "not this PC, no SSH user");
+        assert!(!reads_stats(&device(DeviceKind::Pc, None), &BTreeSet::from([2])), "this PC is another device");
+        assert!(reads_stats(&device(DeviceKind::Pc, Some("sam")), &BTreeSet::new()));
+    }
+
+    #[test]
+    fn entries_say_whether_they_were_read_here() {
+        let json = serde_json::to_value(MachineStatsEntry { local: true, ..MachineStatsEntry::empty(4) }).unwrap();
+        assert_eq!(json["local"], true);
+        assert_eq!(json["deviceId"], 4);
+        assert_eq!(serde_json::to_value(MachineStatsEntry::empty(4)).unwrap()["local"], false);
     }
 }

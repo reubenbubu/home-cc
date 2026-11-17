@@ -30,8 +30,10 @@
   const trustError = $derived(stats.trustErrors.get(device.id) ?? null);
   const ram = $derived(share(st?.memUsedKb, st?.memTotalKb));
   const ramWarn = $derived(ram != null && ram > settings.value.ramWarnPct);
+  /** This PC: read here without SSH, so no SSH user, login or identity is involved. */
+  const local = $derived(stats.local(device));
   /** An appliance with no SSH: up or down is all there is to show, and nothing is missing. */
-  const statusOnly = $derived(device.kind === "appliance" && !device.sshUser);
+  const statusOnly = $derived(device.kind === "appliance" && !device.sshUser && !local);
 
   /** What a problem on this card hands to an agent, besides the message. */
   function machineProblem(area: ProblemInfo["area"], what: string, error: string): ProblemInfo {
@@ -45,7 +47,8 @@
         "Retrying by itself": entry?.error ? !entry.paused : null,
         "OS the machine reported": st?.osName,
         "Last good reading": entry?.collectedAt ? relTime(entry.collectedAt, clock.now) : "none yet",
-        "Identity stored for it": entry ? !!entry.pinnedFingerprint : null,
+        "Identity stored for it": entry && !local ? !!entry.pinnedFingerprint : null,
+        "Read on this PC without SSH": local,
       },
     };
   }
@@ -98,12 +101,12 @@
     {/if}
     {#if s && !s.up}<span class="down small">down</span>{/if}
     <span class="tools">
-      {#if device.sshUser}
+      {#if device.sshUser || local}
         <button
           class="icon-btn"
           class:spin={refreshing}
           aria-label="Read stats for {device.name} now"
-          title="Read stats now"
+          title={local ? "Read this PC's stats now" : "Read stats now"}
           disabled={refreshing || trusting}
           onclick={() => stats.refresh(device.id)}
         >
@@ -126,7 +129,7 @@
     <Problem
       problem={machineProblem("stats", `Reading stats from "${device.name}" on request`, refreshError)}
       message="Couldn't read stats: {refreshError}"
-      extra={passwordDetails}
+      extra={local ? undefined : passwordDetails}
     />
   {/if}
   <!-- Not inside the approval block: after a refusal the machine may have nothing left to approve. -->
@@ -143,7 +146,7 @@
         {s ? `${s.up ? "Up" : "Down"}, last seen ${relTime(s.lastSeen ?? device.lastSeen, clock.now)}` : "Waiting for the first check…"}
       </p>
     </div>
-  {:else if !device.sshUser}
+  {:else if !device.sshUser && !local}
     <div class="state">
       <p class="muted">Add an SSH user to see stats.</p>
       <button class="btn small" onclick={() => onedit(device)}>Add SSH user</button>
@@ -176,6 +179,8 @@
       {@render howToCheck(offered, "the identity above")}
       {@render approve(offered, "Approve and use the password")}
     </div>
+  {:else if entry?.error && local}
+    <Problem problem={machineProblem("stats", `Reading this PC's own stats ("${device.name}"), without SSH`, entry.error)} />
   {:else if entry?.error}
     <Problem
       problem={machineProblem("stats", `Reading stats from "${device.name}" over SSH`, entry.error)}
@@ -193,7 +198,7 @@
     </div>
   {/if}
 
-  {#if device.sshUser && st}
+  {#if (device.sshUser || local) && st}
     <div class="meter-grid" class:stale={!!entry?.error}>
       {#if st.cpuPct != null}
         <Meter label="CPU" value={st.cpuPct} detail={st.cpuCount ? `${st.cpuCount} cores` : ""} />
@@ -234,7 +239,10 @@
       {/each}
     </div>
     <footer class="muted small">
-      <span>{entry?.error ? "Last good reading" : "Updated"} {relTime(entry?.collectedAt, clock.now)}</span>
+      <span>
+        {entry?.error ? "Last good reading" : "Updated"} {relTime(entry?.collectedAt, clock.now)}
+        {#if local}<span title="home-cc runs on this PC, so it reads the stats here, without SSH"> · read locally</span>{/if}
+      </span>
       {#if st.reduced}
         <span title="Sign in with an administrator account on that PC to get every value">
           Limited readings: this Windows account can't see everything.
