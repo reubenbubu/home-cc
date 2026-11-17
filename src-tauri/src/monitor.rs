@@ -527,6 +527,16 @@ async fn named_devices(app: &AppHandle, found: &[Found]) -> Result<HashMap<Strin
     Ok(named)
 }
 
+// --- For other modules that log in to machines (Docker) ---
+
+/// The login to use for a machine, with the same identity and password rules as the
+/// stats, and whether the stored password was held back because the owner hasn't
+/// approved the machine's identity yet.
+pub(crate) async fn prepared_login(app: &AppHandle, device: &Device) -> Result<(Login, bool)> {
+    let prepared = login_for(app, device).await?;
+    Ok((prepared.login, prepared.password_held_back))
+}
+
 /// A login ready to try, and whether the stored password was left out of it.
 struct Prepared {
     login: Login,
