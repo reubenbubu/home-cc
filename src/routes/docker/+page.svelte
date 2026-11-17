@@ -79,9 +79,9 @@
 
   // The side panel follows the host tab. Cleanup and updates are about a whole host, so they move to the new
   // one (updates as the whole host's, a stack being of the old host); a log or a compose file belongs to the
-  // host it came from, so it closes (a log stops following; unsaved compose edits stay kept for when its Files
-  // is opened again). The hosts list is about every host and stays. The old host's cleanup or update ticks
-  // go, as when the panel is put away.
+  // host it came from, so it closes (a log stops following and lets its search go; unsaved compose edits stay
+  // kept for when its Files is opened again). The hosts list is about every host and stays. The old host's
+  // cleanup or update ticks go, as when the panel is put away.
   $effect(() => {
     const id = docker.selected;
     untrack(() => {

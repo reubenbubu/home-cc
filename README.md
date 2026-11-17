@@ -79,6 +79,13 @@ Windows machine.
   another screen is shown (in memory only, as it can hold a password). A form
   fills itself from its draft first, shows "Unsaved changes" with Discard, and
   clears the draft when it is saved, cancelled or closed. New forms do the same.
+  A panel is closed however it is put away: its Close, the button that opened
+  it pressed again, or another panel in its place (`draftsDroppedWith` for the
+  Docker side panels; unsaved compose file text is the exception, kept until
+  the files panel's own Close). A field that saves when it is left (a name on the
+  Network screen) keeps what was typed, unsaved, when it is left for a link to
+  another screen, and comes back with the caret after it. The screenshot
+  tool's "Drafts:" flows check each form this way.
   Choices that are about this PC's screen rather than the machines are kept in
   the window's own storage, never in the back end: the order of the Machines
   cards and collapsed groups (`src/lib/order.svelte.ts`) and the machines

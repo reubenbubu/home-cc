@@ -2423,6 +2423,50 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "Drafts: a log search and length stay after looking at another screen, and closing the log in any way lets them go",
+      path: "/docker",
+      async run(page) {
+        const logsOf = (name) => page.getByRole("button", { name: `Logs of ${name}` });
+        const search = page.getByLabel("Search the log");
+        const length = page.getByLabel("How much of the log to show");
+        const typeSearch = async () => {
+          await page.locator(".line").nth(10).waitFor();
+          await search.fill("ERR");
+          await page.getByText(/lines hold “ERR”/).waitFor();
+        };
+        const fresh = async (how) => {
+          await expectValue(search, "", `the log search after ${how}`);
+          await expectValue(length, "200", `how much of the log to show after ${how}`);
+        };
+        await logsOf("media-jellyfin-1").click();
+        await typeSearch();
+        await length.selectOption("1000");
+        await awayAndBack(page, "Machines", "Docker");
+        await page.getByRole("region", { name: "Log of media-jellyfin-1" }).waitFor();
+        await expectValue(search, "ERR", "the log search");
+        await expectValue(length, "1000", "how much of the log to show");
+        await page.getByText(/lines hold “ERR”/).waitFor();
+        // Its own Close: opened again, the log starts from the usual length, with no search.
+        await page.getByRole("button", { name: "Close the log" }).click();
+        await logsOf("media-jellyfin-1").click();
+        await fresh("Close");
+        // The container's Logs button pressed again puts the log away as surely.
+        await typeSearch();
+        await logsOf("media-jellyfin-1").click();
+        await search.waitFor({ state: "detached" });
+        await logsOf("media-jellyfin-1").click();
+        await fresh("the container's Logs button put it away");
+        // So does another container's log taking its place.
+        await typeSearch();
+        await logsOf("media-sonarr-1").click();
+        await page.getByRole("region", { name: "Log of media-sonarr-1" }).waitFor();
+        await fresh("opening another container's log");
+        await logsOf("media-jellyfin-1").click();
+        await page.getByRole("region", { name: "Log of media-jellyfin-1" }).waitFor();
+        await fresh("another container's log took its place");
+      },
+    },
+    {
       what: "Drafts: a snapshot being written stays after looking at another screen, and Close lets it go",
       path: "/proxmox",
       async run(page) {
@@ -2475,6 +2519,49 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "Drafts: key login left open with a passphrase typed for a new key stays after looking at another screen, and Cancel or Save lets it go",
+      path: "/machines?nokey",
+      async run(page) {
+        const form = page.locator("form");
+        const passphrase = form.getByLabel("Passphrase for the new key (optional)");
+        /** Opens Homelab VM's form. */
+        const openKeys = async () => {
+          await page.getByRole("button", { name: "Edit Homelab VM" }).click();
+          await form.getByRole("heading", { name: "Edit machine" }).waitFor();
+          await expectValue(form.getByLabel("Name", { exact: true }), "Homelab VM", "the machine being edited");
+        };
+        const closedThenEmpty = async (how) => {
+          await openKeys();
+          if (!(await form.getByRole("button", { name: "Show key login" }).count())) throw new Error(`key login was open again after ${how}`);
+          await form.getByRole("button", { name: "Show key login" }).click();
+          await form.getByText("This PC has no SSH key yet").waitFor();
+          await expectValue(passphrase, "", `the passphrase after ${how}`);
+        };
+        await openKeys();
+        await form.getByRole("button", { name: "Show key login" }).click();
+        await form.getByText("This PC has no SSH key yet").waitFor();
+        await passphrase.fill("typed-key-passphrase");
+        await awayAndBack(page, "Network", "Machines");
+        await form.getByRole("heading", { name: "Edit machine" }).waitFor();
+        await form.getByText("This PC has no SSH key yet").waitFor();
+        if ((await form.getByRole("button", { name: "Hide", exact: true }).getAttribute("aria-expanded")) !== "true") {
+          throw new Error("key login isn't shown as open after another screen");
+        }
+        await expectValue(passphrase, "typed-key-passphrase", "the passphrase for the new key");
+        // Cancel: the form doesn't come back, and opened again, key login is closed with nothing typed.
+        await form.getByRole("button", { name: "Cancel", exact: true }).click();
+        await awayAndBack(page, "Network", "Machines");
+        if (await form.count()) throw new Error("the form opened again after Cancel");
+        await closedThenEmpty("Cancel");
+        // Save: the same.
+        await passphrase.fill("typed-key-passphrase");
+        await form.getByRole("button", { name: "Save", exact: true }).click();
+        await form.waitFor({ state: "detached" });
+        await awayAndBack(page, "Network", "Machines");
+        await closedThenEmpty("Save");
+      },
+    },
+    {
       what: "Drafts: a group rename half typed stays after looking at another screen, and Cancel lets it go",
       path: "/machines",
       async run(page) {
@@ -2508,6 +2595,65 @@ async function checkFlows(browser, url) {
         await page.getByRole("button", { name: "Save", exact: true }).click();
         await form.waitFor({ state: "detached" });
         await group(page, "Proxmox lab").locator("article", { hasText: "Printer" }).waitFor();
+      },
+    },
+    {
+      what: "Drafts: a Network rename not finished stays, unsaved, after looking at another screen, and Escape, Enter or pressing elsewhere lets it go",
+      path: "/network",
+      async run(page) {
+        const devices = panelOf(page, "Devices");
+        const field = page.getByLabel("New name for Monitoring");
+        const savedName = async () =>
+          page.evaluate(async () => (await window.__TAURI_INTERNALS__.invoke("list_devices")).find((d) => d.id === window.__renamed)?.name);
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).click();
+        await page.evaluate(async () => {
+          window.__renamed = (await window.__TAURI_INTERNALS__.invoke("list_devices")).find((d) => d.name === "Monitoring").id;
+        });
+        await field.press("End");
+        await field.pressSequentially(" bo");
+        await awayAndBack(page, "Machines", "Network");
+        await expectValue(field, "Monitoring bo", "the name being typed");
+        if ((await savedName()) !== "Monitoring") throw new Error(`leaving the screen saved the half-typed name "${await savedName()}"`);
+        // Back in it, typing goes on after what was typed (not over it).
+        const where = await field.evaluate((el) => ({ focused: document.activeElement === el, start: el.selectionStart, end: el.selectionEnd, length: el.value.length }));
+        if (!where.focused || where.start !== where.length || where.end !== where.length) {
+          throw new Error(`the rename came back ${where.focused ? "" : "without focus, "}with ${where.start}–${where.end} of ${where.length} selected, not the caret at its end`);
+        }
+        await field.pressSequentially("x");
+        await expectValue(field, "Monitoring box", "the name typed on after another screen");
+        // Escape gives it up: the name is as saved, and the rename doesn't come back.
+        await field.press("Escape");
+        await field.waitFor({ state: "detached" });
+        await awayAndBack(page, "Machines", "Network");
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).waitFor();
+        if (await field.count()) throw new Error("the rename opened again after Escape");
+        if ((await savedName()) !== "Monitoring") throw new Error("Escape saved the name");
+        // Enter saves it, and the rename doesn't come back either.
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).click();
+        await field.press("End");
+        await field.pressSequentially(" box");
+        await field.press("Enter");
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).waitFor();
+        await awayAndBack(page, "Machines", "Network");
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).waitFor();
+        if (await page.getByLabel(/^New name for /).count()) throw new Error("a rename opened again after Enter saved it");
+        if ((await savedName()) !== "Monitoring box") throw new Error(`Enter saved "${await savedName()}"`);
+        // Pressing anywhere on the screen that isn't a link still saves it, as before.
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).click();
+        await page.getByLabel("New name for Monitoring box").fill("Monitoring");
+        await devices.getByRole("heading", { name: "Devices", exact: true }).click();
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).waitFor();
+        if ((await savedName()) !== "Monitoring") throw new Error(`pressing elsewhere saved "${await savedName()}"`);
+        // So does pressing the link to this screen, which goes nowhere.
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).click();
+        await page.getByLabel("New name for Monitoring").fill("Monitoring box");
+        await page.getByRole("link", { name: "Network", exact: true }).click();
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).waitFor();
+        if ((await savedName()) !== "Monitoring box") throw new Error(`pressing the Network link saved "${await savedName()}"`);
+        await devices.getByRole("button", { name: "Monitoring box", exact: true }).click();
+        await page.getByLabel("New name for Monitoring box").fill("Monitoring");
+        await page.getByLabel("New name for Monitoring box").press("Enter");
+        await devices.getByRole("button", { name: "Monitoring", exact: true }).waitFor();
       },
     },
     {
