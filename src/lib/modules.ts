@@ -7,6 +7,8 @@ export interface Module {
   href: string;
   /** SVG path data for a 24x24 stroke icon. */
   icon: string;
+  /** Shown at the bottom of the sidebar, apart from the main screens. */
+  footer?: boolean;
 }
 
 export const modules: Module[] = [
@@ -16,4 +18,5 @@ export const modules: Module[] = [
   { id: "docker", label: "Docker", href: "/docker", icon: "M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8" },
   { id: "proxmox", label: "Proxmox", href: "/proxmox", icon: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01" },
   { id: "terminals", label: "Terminals", href: "/terminals", icon: "M4 17l6-5-6-5M12 19h8" },
+  { id: "settings", label: "Settings", href: "/settings", icon: "M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4M16 4v4M8 10v4M14 16v4", footer: true },
 ];

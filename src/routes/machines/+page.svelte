@@ -1,27 +1,88 @@
 <script lang="ts">
+  import { tick, untrack } from "svelte";
   import { page } from "$app/state";
-  import { devices } from "$lib/devices.svelte";
-  import { errorText, KIND_LABELS, OS_LABELS, type Device, type DeviceInput, type DeviceKind, type Os } from "$lib/api";
+  import { devices, isMachine } from "$lib/devices.svelte";
+  import { stats } from "$lib/stats.svelte";
+  import {
+    api,
+    errorText,
+    KIND_LABELS,
+    OS_LABELS,
+    secretKeys,
+    type Device,
+    type DeviceInput,
+    type DeviceKind,
+    type Os,
+  } from "$lib/api";
+  import { icons } from "$lib/icons";
+  import ConfirmButton from "$lib/components/ConfirmButton.svelte";
+  import Icon from "$lib/components/Icon.svelte";
+  import MachineCard from "$lib/components/MachineCard.svelte";
 
-  const blank = (): DeviceInput => ({ name: "", host: "", kind: "vm", os: "linux", sshUser: "", sshPort: 22, notes: "" });
+  const blank = (): DeviceInput => ({ name: "", host: "", kind: "vm", os: "linux", sshUser: "", sshPort: 22, notes: "", mac: "" });
 
-  let editing = $state<number | "new" | null>(page.url.searchParams.has("add") ? "new" : null);
+  let editing = $state<number | "new" | null>(null);
   let form = $state<DeviceInput>(blank());
   let formError = $state<string | null>(null);
+  let listError = $state<string | null>(null);
   let saving = $state(false);
-  let confirmRemove = $state<number | null>(null);
+  /** Typed into the form; goes to the keychain on save and is never read back. */
+  let password = $state("");
+  let hasPassword = $state(false);
+  let showAll = $state(false);
+  let formEl = $state<HTMLFormElement>();
+
+  const byName = (a: Device, b: Device) => a.name.localeCompare(b.name, undefined, { numeric: true });
+  const machines = $derived(devices.list.filter((d) => d.kind !== "ignore" && isMachine(d)).sort(byName));
+  const rest = $derived(devices.list.filter((d) => d.kind === "ignore" || !isMachine(d)).sort(byName));
+  const rows = $derived(showAll ? [...machines, ...rest] : machines);
+
+  async function open(id: number | "new", input: DeviceInput) {
+    form = input;
+    formError = null;
+    password = "";
+    hasPassword = false;
+    editing = id;
+    if (typeof id === "number") {
+      api.hasSecret(secretKeys.sshPassword(id)).then(
+        (stored) => {
+          if (editing === id) hasPassword = stored;
+        },
+        (e) => {
+          if (editing === id) formError = `Couldn't check for a stored password: ${errorText(e)}`;
+        },
+      );
+    }
+    // Below 1500px the form sits above the cards, which may be scrolled out of view.
+    await tick();
+    formEl?.scrollIntoView({ block: "nearest" });
+  }
 
   function startAdd() {
-    form = blank();
-    formError = null;
-    editing = "new";
+    open("new", blank());
   }
 
   function startEdit(d: Device) {
-    form = { name: d.name, host: d.host, kind: d.kind, os: d.os, sshUser: d.sshUser ?? "", sshPort: d.sshPort, notes: d.notes };
-    formError = null;
-    editing = d.id;
+    open(d.id, { name: d.name, host: d.host, kind: d.kind, os: d.os, sshUser: d.sshUser ?? "", sshPort: d.sshPort, notes: d.notes, mac: d.mac ?? "" });
   }
+
+  // Links from other screens: /machines?add=1 and /machines?edit=<id>.
+  let handled: string | null = null;
+  $effect(() => {
+    const query = page.url.search;
+    if (query === handled) return;
+    const params = page.url.searchParams;
+    if (params.has("add")) {
+      handled = query;
+      untrack(startAdd);
+    } else if (params.has("edit")) {
+      const d = devices.byId.get(Number(params.get("edit")));
+      if (d) untrack(() => startEdit(d));
+      if (d || devices.loaded) handled = query;
+    } else {
+      handled = query;
+    }
+  });
 
   async function save(e: SubmitEvent) {
     e.preventDefault();
@@ -29,9 +90,23 @@
     formError = null;
     try {
       const input = { ...form, sshPort: Number(form.sshPort) || 22 };
-      if (editing === "new") await devices.add(input);
-      else if (typeof editing === "number") await devices.update(editing, input);
+      const saved = editing === "new" ? await devices.add(input) : typeof editing === "number" ? await devices.update(editing, input) : null;
+      if (!saved) return;
+      if (password) {
+        try {
+          await api.setSecret(secretKeys.sshPassword(saved.id), password);
+        } catch (err) {
+          // The machine itself is saved: keep the form open on it so the password can be tried again.
+          editing = saved.id;
+          formError = `Saved, but the password couldn't be stored: ${errorText(err)}`;
+          return;
+        }
+      }
       editing = null;
+      password = "";
+      // Show the effect of a new user or password straight away instead of after the next timer.
+      stats.load();
+      if (saved.sshUser && saved.kind !== "ignore") stats.refresh(saved.id);
     } catch (err) {
       formError = errorText(err);
     } finally {
@@ -39,60 +114,105 @@
     }
   }
 
-  async function remove(id: number) {
+  async function removePassword(id: number) {
     try {
-      await devices.remove(id);
+      await api.deleteSecret(secretKeys.sshPassword(id));
+      hasPassword = false;
     } catch (err) {
-      formError = errorText(err);
+      formError = `Couldn't remove the password: ${errorText(err)}`;
     }
-    confirmRemove = null;
-    if (editing === id) editing = null;
+  }
+
+  async function remove(d: Device) {
+    listError = null;
+    try {
+      await devices.remove(d.id);
+      if (editing === d.id) editing = null;
+    } catch (err) {
+      listError = `Couldn't remove "${d.name}": ${errorText(err)}`;
+    }
   }
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const oses = Object.entries(OS_LABELS) as [Os, string][];
 </script>
 
-<header class="head">
+<header class="page-head">
   <h1>Machines</h1>
   <button class="btn primary" onclick={startAdd}>Add machine</button>
 </header>
 
 <div class="layout" class:with-form={editing !== null}>
-  <section class="panel table-wrap">
-    {#if devices.loaded && devices.list.length === 0}
-      <p class="muted">Nothing here yet. Use "Add machine" to add your first one.</p>
-    {:else}
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Address</th><th>Type</th><th>System</th><th>SSH</th><th><span class="sr-only">Actions</span></th></tr>
-        </thead>
-        <tbody>
-          {#each devices.list as d (d.id)}
-            <tr class:selected={editing === d.id}>
-              <td class="name">{d.name}</td>
-              <td class="mono muted">{d.host}</td>
-              <td>{KIND_LABELS[d.kind]}</td>
-              <td>{OS_LABELS[d.os]}</td>
-              <td class="mono muted">{d.sshUser ? `${d.sshUser} · port ${d.sshPort}` : "–"}</td>
-              <td><div class="row-actions">
-                <button class="btn small" onclick={() => startEdit(d)}>Edit</button>
-                {#if confirmRemove === d.id}
-                  <button class="btn small danger" onclick={() => remove(d.id)}>Confirm remove</button>
-                  <button class="btn small" onclick={() => (confirmRemove = null)}>Cancel</button>
-                {:else}
-                  <button class="btn small" onclick={() => (confirmRemove = d.id)}>Remove</button>
-                {/if}
-              </div></td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+  <div class="main">
+    {#if machines.length > 0}
+      <section class="cards" aria-label="Machine stats">
+        {#each machines as m (m.id)}
+          <!-- A reading this card can't draw must not take the other machines down with it. -->
+          <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
+            <MachineCard device={m} onedit={startEdit} />
+            {#snippet failed(_error, reset)}
+              <article class="panel broken" role="alert">
+                <h3 class="ellipsis" title={m.name}>{m.name}</h3>
+                <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
+                <div class="form-actions">
+                  <button class="btn small" onclick={reset}>Try again</button>
+                  <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
+                </div>
+              </article>
+            {/snippet}
+          </svelte:boundary>
+        {/each}
+      </section>
     {/if}
-  </section>
+
+    <section class="panel table-wrap">
+      <div class="table-head">
+        <h2 class="section-title">All machines</h2>
+        {#if rest.length > 0}
+          <label class="check"><input type="checkbox" bind:checked={showAll} /> Show other devices too ({rest.length})</label>
+        {/if}
+      </div>
+      {#if listError}<p class="alert" role="alert">{listError}</p>{/if}
+      {#if devices.loaded && rows.length === 0}
+        <p class="muted pad">Nothing here yet. Use "Add machine" to add your first one, or scan the network and set a device's type to PC, Server or VM.</p>
+      {:else}
+        <div class="box">
+          <table>
+            <thead>
+              <tr>
+                <th class="c-name">Name</th>
+                <th class="c-ip">Address</th>
+                <th class="c-type">Type</th>
+                <th class="c-os">System</th>
+                <th class="c-ssh">SSH</th>
+                <th class="c-notes">Notes</th>
+                <th class="c-actions"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each rows as d (d.id)}
+                <tr class:selected={editing === d.id}>
+                  <td class="c-name name" title={d.name}>{d.name}</td>
+                  <td class="c-ip mono muted" title={d.host}>{d.host}</td>
+                  <td class="c-type">{KIND_LABELS[d.kind]}</td>
+                  <td class="c-os">{OS_LABELS[d.os]}</td>
+                  <td class="c-ssh mono muted">{d.sshUser ? `${d.sshUser} · port ${d.sshPort}` : "–"}</td>
+                  <td class="c-notes muted" title={d.notes}>{d.notes}</td>
+                  <td class="c-actions"><div class="row-actions">
+                    <button class="btn small" onclick={() => startEdit(d)}>Edit</button>
+                    <ConfirmButton label="Remove" confirmLabel="Confirm remove" onconfirm={() => remove(d)} />
+                  </div></td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+  </div>
 
   {#if editing !== null}
-    <form class="panel form" onsubmit={save}>
+    <form class="panel form" onsubmit={save} bind:this={formEl}>
       <h2 class="section-title">{editing === "new" ? "Add machine" : "Edit machine"}</h2>
       <label>Name <input bind:value={form.name} placeholder="Homelab VM" required /></label>
       <label>Address (IP or hostname) <input class="mono" bind:value={form.host} placeholder="192.168.68.21" required /></label>
@@ -108,12 +228,43 @@
           </select>
         </label>
       </div>
+      <label>Hardware address (optional)
+        <input class="mono" bind:value={form.mac} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false" />
+      </label>
       <div class="row">
-        <label>SSH user <input class="mono" bind:value={form.sshUser} placeholder="jim" /></label>
+        <label>SSH user <input class="mono" bind:value={form.sshUser} placeholder="jim" autocomplete="off" spellcheck="false" /></label>
         <label>SSH port <input class="mono" type="number" min="1" max="65535" bind:value={form.sshPort} /></label>
       </div>
+      <label>SSH password (optional)
+        <input
+          type="password"
+          bind:value={password}
+          autocomplete="new-password"
+          placeholder={hasPassword ? "Type a new one to replace it" : "Only if you don't use a key"}
+        />
+      </label>
+      {#if hasPassword && typeof editing === "number"}
+        {@const id = editing}
+        <div class="stored">
+          <span><Icon path={icons.check} size={14} /> A password is stored.</span>
+          <span class="stored-actions">
+            <ConfirmButton label="Remove" confirmLabel="Remove password" onconfirm={() => removePassword(id)} />
+          </span>
+        </div>
+      {/if}
+      <p class="hint">
+        To read stats, home-cc logs in with your key file (the one chosen in <a href="/settings">Settings</a>, or the usual
+        ones in your .ssh folder), then the ssh-agent, then this password. The password is kept in your system's keychain
+        and is never shown again.
+      </p>
+      {#if form.os === "windows"}
+        <p class="hint">
+          Windows: turn on OpenSSH Server in Windows settings first. For an administrator account the key goes in
+          <span class="mono path">C:\ProgramData\ssh\administrators_authorized_keys</span>, not in the user's own .ssh folder.
+        </p>
+      {/if}
       <label>Notes <input bind:value={form.notes} /></label>
-      {#if formError}<p class="error" role="alert">{formError}</p>{/if}
+      {#if formError}<p class="alert" role="alert">{formError}</p>{/if}
       <div class="form-actions">
         <button class="btn primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
         <button class="btn" type="button" onclick={() => (editing = null)}>Cancel</button>
@@ -123,26 +274,77 @@
 </div>
 
 <style>
-  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
-  h1 { margin: 0; font-size: 1.55rem; font-weight: 600; }
-
-  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); align-items: start; }
+  .layout { display: flex; flex-direction: column; gap: var(--gap); }
+  .main { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+  /* In one column the form goes first, so opening it is never off screen. */
+  .form { order: -1; }
   @media (min-width: 1500px) {
-    .layout.with-form { grid-template-columns: minmax(0, 1fr) 26rem; }
+    .layout.with-form { display: grid; grid-template-columns: minmax(0, 1fr) 27rem; align-items: start; }
+    .form { order: 0; position: sticky; top: 0; }
   }
 
-  .table-wrap { overflow-x: auto; padding: 0.4rem 0.6rem; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 0.85rem; padding: 0.7rem 0.6rem; border-bottom: 1px solid var(--border); }
-  td { padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  /* Spec section 6: 2 to 3 cards across at 1080p, 3 to 4 at 1440p, 5 to 6 on the ultrawide.
+     Counted from the room the cards really have, so it still holds with the form open. */
+  .main { container-type: inline-size; }
+  .cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
+  @container (min-width: 62rem) {
+    .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @container (min-width: 100rem) {
+    .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @container (min-width: 140rem) {
+    .cards { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+  @container (min-width: 190rem) {
+    .cards { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  }
+  @container (min-width: 230rem) {
+    .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  }
+
+  .broken { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; border-color: var(--bad); }
+  .broken h3 { margin: 0; font-size: 1.08rem; font-weight: 600; }
+  .broken p { margin: 0; line-height: 1.5; }
+
+  .table-wrap { padding: 0.9rem 0.7rem 0.5rem; }
+  .table-head { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem 1rem; flex-wrap: wrap; padding: 0 0.55rem 0.35rem; }
+  .table-head .section-title { margin: 0; }
+  .check { flex-direction: row; align-items: center; gap: 0.5rem; color: var(--muted); cursor: pointer; }
+  .check input { width: 1.15rem; min-height: 0; height: 1.15rem; padding: 0; accent-color: var(--accent); }
+  .pad { margin: 0; padding: 0.3rem 0.55rem 0.6rem; line-height: 1.5; }
+  .table-wrap .alert { margin: 0 0.55rem 0.5rem; }
+
+  .box { container-type: inline-size; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td { padding: 0.3rem 0.55rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+  th { font-weight: 500; color: var(--muted); font-size: 0.85rem; padding-block: 0.55rem; border-bottom: 1px solid var(--border); }
+  td { height: 2.9rem; border-bottom: 1px solid var(--border); }
   tr:last-child td { border-bottom: 0; }
   tr.selected td { background: var(--panel-raised); }
+  td.mono { font-size: 0.92rem; }
   .name { font-weight: 600; }
+  .c-ip { width: 10rem; }
+  .c-type { width: 7.5rem; }
+  .c-os { width: 8rem; }
+  .c-ssh { width: 12rem; }
+  .c-actions { width: 19.5rem; }
+  td.c-actions { overflow: visible; }
   .row-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  @container (max-width: 72rem) {
+    .c-notes { display: none; }
+  }
+  @container (max-width: 56rem) {
+    .c-os { display: none; }
+  }
 
   .form { display: flex; flex-direction: column; gap: 0.9rem; }
   .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
   .form-actions { display: flex; gap: 0.6rem; }
-  .error { margin: 0; color: var(--bad); }
-  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .stored { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-top: -0.4rem; color: var(--text-soft); }
+  .stored > span:first-child { display: flex; align-items: center; gap: 0.4rem; }
+  .stored :global(svg) { color: var(--ok); }
+  .stored-actions { display: flex; gap: 0.4rem; }
+  .hint { margin: 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
+  .path { color: var(--text-soft); font-size: 0.92em; overflow-wrap: anywhere; }
 </style>

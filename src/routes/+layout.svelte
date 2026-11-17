@@ -2,15 +2,38 @@
   import "../app.css";
   import { page } from "$app/state";
   import { onMount } from "svelte";
+  import { errorText } from "$lib/api";
   import { modules } from "$lib/modules";
   import { devices } from "$lib/devices.svelte";
+  import { live, startLive } from "$lib/live.svelte";
+  import { settings } from "$lib/settings.svelte";
+  import { stats } from "$lib/stats.svelte";
+  import { status } from "$lib/status.svelte";
   import Icon from "$lib/components/Icon.svelte";
 
   let { children } = $props();
 
-  onMount(() => {
-    devices.load();
-  });
+  // One load of everything, then the stores follow the back end's events.
+  onMount(() => startLive());
+
+  /** True in a browser with the sample back end instead of the real one. */
+  const sample = "__HOME_CC_MOCK__" in window;
+
+  /** Loading problems, shown on every screen so stale numbers are never taken for live ones. */
+  const problems = $derived(
+    [
+      devices.error && `Couldn't load devices: ${devices.error}`,
+      status.error && `Couldn't load device status: ${status.error}`,
+      stats.error && `Couldn't load machine stats: ${stats.error}`,
+      settings.error && `Couldn't load settings: ${settings.error}`,
+      live.error && `Live updates aren't working, so this screen may be out of date: ${live.error}`,
+    ].filter((p): p is string => !!p),
+  );
+
+  /** A screen that fails while drawing is replaced by a message; the cause goes to the log for a bug report. */
+  function screenFailed(error: unknown) {
+    console.error("A screen could not be shown:", error);
+  }
 
   function isActive(href: string) {
     return href === "/" ? page.url.pathname === "/" : page.url.pathname.startsWith(href);
@@ -27,6 +50,7 @@
       <a
         href={m.href}
         class="nav-item"
+        class:footer={m.footer}
         class:active={isActive(m.href)}
         aria-current={isActive(m.href) ? "page" : undefined}
         title={m.label}
@@ -35,9 +59,27 @@
         <span class="nav-label">{m.label}</span>
       </a>
     {/each}
+    {#if sample}<div class="sample" title="Not connected to the app: this is made-up sample data">Sample<span class="nav-label">&nbsp;data</span></div>{/if}
   </nav>
   <main class="content">
-    {@render children()}
+    {#each problems as problem}
+      <p class="alert load-problem" role="alert">{problem}</p>
+    {/each}
+    <!-- Without this, one value a screen can't draw would leave it blank or stuck, with nothing said.
+         A new boundary for each screen, so moving to another screen always works. -->
+    {#key page.route.id}
+      <svelte:boundary onerror={screenFailed}>
+        {@render children()}
+        {#snippet failed(error, reset)}
+          <section class="panel broken" role="alert">
+            <h1>This screen couldn't be shown</h1>
+            <p>Something home-cc was given isn't in a form this screen can show. The other screens still work.</p>
+            <p class="muted small">If it keeps happening, report it with this detail: <span class="mono">{errorText(error)}</span></p>
+            <div><button class="btn" onclick={reset}>Try again</button></div>
+          </section>
+        {/snippet}
+      </svelte:boundary>
+    {/key}
   </main>
 </div>
 
@@ -64,6 +106,7 @@
     align-items: center;
     gap: 0.75rem;
     min-height: 2.75rem;
+    flex: none;
     padding: 0 0.75rem;
     border-radius: var(--radius-sm);
     color: #9ba6b2;
@@ -73,6 +116,19 @@
   .nav-item:hover { background: var(--panel); color: var(--text); }
   .nav-item.active { background: var(--panel-raised); color: var(--text); }
   .nav-item.active :global(svg) { color: var(--accent); }
+  .nav-item.footer { margin-top: auto; }
+
+  .sample {
+    margin-top: 0.5rem;
+    padding: 0.3rem 0.4rem;
+    border: 1px dashed var(--warn);
+    border-radius: var(--radius-sm);
+    color: var(--warn);
+    font-size: 0.85rem;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+  }
 
   .content {
     flex: 1;
@@ -80,6 +136,10 @@
     overflow-y: auto;
     padding: 1.5rem 1.85rem;
   }
+  .load-problem { margin-bottom: var(--gap); }
+  .broken { display: flex; flex-direction: column; gap: 0.75rem; max-width: 46rem; border-color: var(--bad); }
+  .broken h1 { margin: 0; font-size: 1.3rem; font-weight: 600; }
+  .broken p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
 
   /* Narrow windows (for example half of a 1080p screen): icons only. */
   @media (max-width: 1180px) {
