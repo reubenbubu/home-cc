@@ -3,12 +3,13 @@
   // making one if there is none, and "Set up key login", which adds the key to the machine like ssh-copy-id and
   // then checks that a login with the key alone works. A password is only sent to a machine whose identity the
   // owner approved; if it isn't approved yet the identity is shown here first, as on the machine cards.
-  import { tick, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { api, errorText, secretKeys, type Device, type HostKey, type KeySetupOutcome, type LocalKey, type Os } from "$lib/api";
   import { identityCommand, identityText } from "$lib/hostkey";
   import { icons } from "$lib/icons";
   import { manualSteps, passwordSource, setupBlocker, whatHappens, type Typed } from "$lib/keysetup";
-  import { keySetupAsk } from "$lib/keysetup.svelte";
+  import { keySetupAsk, keySetupDraft } from "$lib/keysetup.svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import { copyText, deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
   import ConfirmButton from "./ConfirmButton.svelte";
@@ -36,12 +37,22 @@
     onpasswordremoved: () => void;
   } = $props();
 
-  let open = $state(false);
+  // Open or not, and a passphrase typed for a new key, come back after another screen was shown (in this
+  // window's memory only, see drafts.svelte.ts). The machine form clears this when it is saved or cancelled.
+  type KeySetupForm = { open: boolean; passphrase: string };
+  const draftKey = untrack(() => keySetupDraft(device?.id ?? "new"));
+  const draft = drafts.get<KeySetupForm>(draftKey);
+  let open = $state(draft?.open ?? false);
   let el = $state<HTMLElement>();
   let local = $state<LocalKey | null>(null);
   let loading = $state(false);
   let loadError = $state<ProblemInfo | null>(null);
-  let passphrase = $state("");
+  let passphrase = $state(draft?.passphrase ?? "");
+  $effect(() => drafts.keep<KeySetupForm>(draftKey, { open, passphrase }, { open: false, passphrase: "" }));
+  // Open when the screen was left: its key is read again.
+  onMount(() => {
+    if (open && !local && !loading) void loadKey();
+  });
   let creating = $state(false);
   let createError = $state<ProblemInfo | null>(null);
   let working = $state(false);

@@ -323,6 +323,26 @@ async function openTerminalTab(page, label) {
 }
 
 /** Waits until the terminal shown has this text on it. */
+/** Goes to another screen with the sidebar, waits until it is shown, and comes back. */
+async function awayAndBack(page, away, back) {
+  await page.getByRole("link", { name: away, exact: true }).click();
+  await page.getByRole("heading", { level: 1, name: away, exact: true }).waitFor();
+  await page.getByRole("link", { name: back, exact: true }).click();
+  await page.getByRole("heading", { level: 1, name: back, exact: true }).waitFor();
+}
+
+/** Waits for a form field to hold the value (it may be filled a moment after the screen shows). */
+async function expectValue(field, want, what) {
+  const until = Date.now() + 5000;
+  let got;
+  for (;;) {
+    got = (await field.count()) ? await field.inputValue() : "(not on screen)";
+    if (got === want) return;
+    if (Date.now() > until) throw new Error(`${what} was "${got.slice(0, 80)}", not "${want.slice(0, 80)}"`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 async function terminalShows(page, text) {
   await page.waitForFunction(
     (t) => document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-rows')?.textContent.includes(t),
@@ -1264,6 +1284,175 @@ async function checkFlows(browser, url) {
       },
     },
     // --- end Proxmox ---
+    // --- What was typed stays while another screen is shown (drafts.svelte.ts) ---
+    {
+      what: "Drafts: a Proxmox token ID and secret typed in stay after looking at Terminals, and saving lets them go",
+      path: "/proxmox?pvenotoken",
+      async run(page) {
+        const SECRET = "11111111-2222-3333-4444-555555555555";
+        const setup = page.locator("form.setup");
+        await setup.getByText("How to make a token").waitFor();
+        await setup.getByLabel("Token ID").fill("root@pam!homecc");
+        await setup.getByLabel("Secret").fill(SECRET);
+        await setup.getByLabel("API port").fill("8007");
+        await awayAndBack(page, "Terminals", "Proxmox");
+        await setup.getByText("How to make a token").waitFor();
+        await expectValue(setup.getByLabel("Token ID"), "root@pam!homecc", "the token ID");
+        await expectValue(setup.getByLabel("Secret"), SECRET, "the secret");
+        await expectValue(setup.getByLabel("API port"), "8007", "the API port");
+        await setup.getByText("Unsaved changes").waitFor();
+        // Discard puts back what is saved; typed again and saved, the draft is gone.
+        await setup.getByRole("button", { name: "Discard" }).click();
+        await expectValue(setup.getByLabel("Token ID"), "", "the token ID after Discard");
+        await expectValue(setup.getByLabel("Secret"), "", "the secret after Discard");
+        await setup.getByLabel("Token ID").fill("root@pam!homecc");
+        await setup.getByLabel("Secret").fill(SECRET);
+        await page.evaluate(recordCalls);
+        await setup.getByRole("button", { name: "Save", exact: true }).click();
+        await page.waitForFunction(() => window.__calls.includes("proxmox_save_settings") && window.__calls.includes("set_secret"));
+        // With a token that works the form goes away by itself; opened again, it shows only what is saved.
+        await setup.waitFor({ state: "detached" });
+        await awayAndBack(page, "Terminals", "Proxmox");
+        await page.getByRole("button", { name: "Connection settings" }).click();
+        await expectValue(setup.getByLabel("Token ID"), "root@pam!homecc", "the saved token ID");
+        await expectValue(setup.getByLabel("Secret"), "", "the secret after saving");
+        if (await setup.getByText("Unsaved changes").count()) throw new Error("a saved token still shows as unsaved");
+      },
+    },
+    {
+      what: "Drafts: unsaved changes to a compose file stay after looking at another screen, also when the file changed on the host",
+      path: "/docker",
+      async run(page) {
+        await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Files" }).click();
+        const box = page.locator("textarea");
+        await box.waitFor();
+        const first = await box.inputValue();
+        const typed = first.replace("10.10", "10.11");
+        if (typed === first) throw new Error("the sample compose file has changed: nothing to edit");
+        await box.fill(typed);
+        await awayAndBack(page, "Machines", "Docker");
+        await expectValue(box, typed, "the compose file");
+        await page.getByText("Unsaved changes, kept from before.").waitFor();
+
+        // Changed on the host while the owner is on another screen: their text stays, and the screen says so.
+        await page.getByRole("link", { name: "Machines", exact: true }).click();
+        await page.locator("article").first().waitFor();
+        await page.evaluate(async () => {
+          const invoke = window.__TAURI_INTERNALS__.invoke;
+          const id = (await invoke("list_devices")).find((d) => d.name === "Homelab VM").id;
+          const args = { deviceId: id, stack: "media", path: "/srv/media/compose.yml" };
+          const now = await invoke("docker_read_file", args);
+          await invoke("docker_save_file", { ...args, original: now, text: `${now}# changed on the host\n` });
+        });
+        await page.getByRole("link", { name: "Docker", exact: true }).click();
+        await page.getByText("was changed on Homelab VM while you were on another screen").waitFor();
+        await expectValue(box, typed, "the compose file after it changed on the host");
+        // Saving then works, and replaces that change with the owner's text.
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page.getByRole("button", { name: "Yes, save to Homelab VM" }).click();
+        await page.getByText(/The old version is at/).waitFor();
+        // Closed, the panel lets the draft go: opened again, it shows the file as saved, with nothing unsaved.
+        await page.getByRole("button", { name: "Close the files" }).click();
+        await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Files" }).click();
+        await expectValue(box, typed, "the compose file as saved");
+        if (!(await page.getByRole("button", { name: "Undo changes" }).isDisabled())) throw new Error("a saved file still shows changes");
+      },
+    },
+    {
+      what: "Drafts: cleanup ticks stay after looking at another screen, and putting the cleanup away from the toolbar lets them go",
+      path: "/docker",
+      async run(page) {
+        const toolbar = page.getByRole("button", { name: "Clean up…" });
+        await toolbar.click();
+        const named = page.getByRole("checkbox", { name: /nextcloud_db/ });
+        const image = page.getByRole("checkbox", { name: /postgres:14/ });
+        await named.waitFor();
+        if (await named.isChecked()) throw new Error("a named volume was ticked to begin with");
+        if (!(await image.isChecked())) throw new Error("an unused image wasn't ticked to begin with");
+        await named.check();
+        await image.uncheck();
+        await awayAndBack(page, "Machines", "Docker");
+        await named.waitFor();
+        if (!(await named.isChecked())) throw new Error("the named volume ticked before lost its tick");
+        if (await image.isChecked()) throw new Error("the image unticked before was ticked again");
+        // Put away with the toolbar button, not its own Close: opened again, it starts from the usual ticks.
+        await toolbar.click();
+        await named.waitFor({ state: "detached" });
+        await toolbar.click();
+        await named.waitFor();
+        if (await named.isChecked()) throw new Error("a named volume ticked earlier came back ticked after the cleanup was put away");
+        if (!(await image.isChecked())) throw new Error("the image didn't get its usual tick after the cleanup was put away");
+      },
+    },
+    {
+      what: "Drafts: a snapshot being written stays after looking at another screen, and Close lets it go",
+      path: "/proxmox",
+      async run(page) {
+        await page.getByRole("button", { name: "Manage homeassistant" }).click();
+        const panel = page.getByRole("complementary");
+        await panel.getByText("after_setup", { exact: true }).waitFor();
+        const name = panel.getByLabel("Name");
+        await name.fill("before_update");
+        await panel.getByLabel("Note (optional)").fill("typed, not taken");
+        await panel.getByLabel(/Include RAM/).check();
+        await awayAndBack(page, "Terminals", "Proxmox");
+        await panel.getByRole("heading", { name: "homeassistant" }).waitFor();
+        await expectValue(name, "before_update", "the snapshot name");
+        await expectValue(panel.getByLabel("Note (optional)"), "typed, not taken", "the snapshot note");
+        if (!(await panel.getByLabel(/Include RAM/).isChecked())) throw new Error("Include RAM lost its tick");
+        await panel.getByRole("button", { name: "Close", exact: true }).click();
+        await page.getByRole("button", { name: "Manage homeassistant" }).click();
+        await panel.getByRole("heading", { name: "homeassistant" }).waitFor();
+        const fresh = await name.inputValue();
+        if (!/^snap_\d{8}_\d{4}$/.test(fresh)) throw new Error(`the name after Close was "${fresh}", not a suggested one`);
+        await expectValue(panel.getByLabel("Note (optional)"), "", "the snapshot note after Close");
+        if (await panel.getByLabel(/Include RAM/).isChecked()) throw new Error("Include RAM kept its tick after Close");
+      },
+    },
+    {
+      what: "Drafts: the Machines edit form as typed stays after looking at another screen, and Cancel lets it go",
+      path: "/machines",
+      async run(page) {
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        const form = page.locator("form");
+        await form.getByText("A password is stored").waitFor();
+        const notes = form.getByLabel("Notes");
+        const saved = await notes.inputValue();
+        await notes.fill("typed, not saved");
+        await form.getByLabel("SSH user").fill("someone-else");
+        await form.getByLabel("SSH password (optional)").fill("typed-password");
+        await awayAndBack(page, "Network", "Machines");
+        await form.getByRole("heading", { name: "Edit machine" }).waitFor();
+        await expectValue(form.getByLabel("Name", { exact: true }), "NAS", "the machine being edited");
+        await expectValue(notes, "typed, not saved", "the notes");
+        await expectValue(form.getByLabel("SSH user"), "someone-else", "the SSH user");
+        await expectValue(form.getByLabel("SSH password (optional)"), "typed-password", "the typed password");
+        await form.getByText("Unsaved changes").waitFor();
+        await form.getByRole("button", { name: "Cancel", exact: true }).click();
+        await awayAndBack(page, "Network", "Machines");
+        if (await page.locator("form").count()) throw new Error("the form opened again after Cancel");
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        await expectValue(notes, saved, "the notes after Cancel");
+        await expectValue(form.getByLabel("SSH password (optional)"), "", "the password after Cancel");
+      },
+    },
+    {
+      what: "Drafts: unsaved Settings stay after looking at another screen, and Discard puts back what is saved",
+      path: "/settings",
+      async run(page) {
+        const ping = page.getByLabel("How often to check that every device is there");
+        await ping.waitFor();
+        const saved = await ping.inputValue();
+        await ping.fill("45");
+        await page.getByLabel("Passphrase for the key file").fill("typed-passphrase");
+        await awayAndBack(page, "Overview", "Settings");
+        await expectValue(ping, "45", "the ping interval");
+        await expectValue(page.getByLabel("Passphrase for the key file"), "typed-passphrase", "the passphrase");
+        await page.getByRole("button", { name: "Discard" }).click();
+        await expectValue(ping, saved, "the ping interval after Discard");
+        await expectValue(page.getByLabel("Passphrase for the key file"), "", "the passphrase after Discard");
+      },
+    },
   ];
   const problems = [];
   for (const flow of flows) {

@@ -1,12 +1,13 @@
 <script lang="ts">
   // Cleanup with a preview: everything that could go, ticked or not, with the space it takes. Nothing is removed
   // until the owner confirms, and only what is ticked. Named volumes start unticked: they may hold a stack's data.
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import { errorText, type Device } from "$lib/api";
   import { dockerApi, type CleanupItem, type CleanupPick, type CleanupPreview, type CleanupResult, type DockerHost } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { defaultPick, isUnnamedVolume, pickTotals } from "$lib/docker/logic";
+  import { cleanupDraftKey, defaultPick, isUnnamedVolume, offeredKeys, pickTotals, restorePick, type PickDraft } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import { bytes, count } from "$lib/format";
   import ConfirmButton from "../ConfirmButton.svelte";
@@ -25,12 +26,25 @@
   const totals = $derived(preview ? pickTotals(preview, pick) : { count: 0, bytes: 0 });
   const name = $derived(device?.name ?? "this host");
 
+  // What the owner ticked or unticked stays while another screen is shown (drafts.svelte.ts), until the
+  // cleanup runs or the panel is closed, here or by the Docker screen (draftsDroppedWith).
+  const draftKey = untrack(() => cleanupDraftKey(host.deviceId));
+  $effect(() => {
+    if (preview) drafts.keep<PickDraft>(draftKey, { pick, offered: offeredKeys(preview) }, { pick: defaultPick(preview), offered: offeredKeys(preview) });
+  });
+
+  function close() {
+    drafts.clear(draftKey);
+    onclose();
+  }
+
   async function load() {
     loading = true;
     error = null;
     try {
       preview = await dockerApi.cleanupPreview(host.deviceId);
-      pick = defaultPick(preview);
+      const draft = drafts.get<PickDraft>(draftKey);
+      pick = draft ? restorePick(draft, preview) : defaultPick(preview);
     } catch (e) {
       error = errorText(e);
     } finally {
@@ -44,6 +58,7 @@
     result = null;
     try {
       result = await dockerApi.cleanup(host.deviceId, $state.snapshot(pick));
+      drafts.clear(draftKey);
     } catch (e) {
       error = errorText(e);
     } finally {
@@ -116,7 +131,7 @@
 <section class="panel cleanup" aria-label="Clean up Docker on {name}">
   <header>
     <h2>Clean up {name}</h2>
-    <button class="icon-btn" aria-label="Close the cleanup" title="Close" onclick={onclose}><Icon path={dockerIcons.close} size={16} /></button>
+    <button class="icon-btn" aria-label="Close the cleanup" title="Close" onclick={close}><Icon path={dockerIcons.close} size={16} /></button>
   </header>
   <p class="muted small">
     What Docker keeps that nothing uses. Untick anything you want to keep; nothing is removed until you confirm. Docker

@@ -74,6 +74,11 @@ Windows machine.
   shown with `Address.svelte`, which adds the hostname it resolves to as a
   field of its own (in a table, a "Hostname" column), so the owner can tell
   which machine it is. New screens do the same.
+  A screen is drawn afresh each time it is opened, so anything typed into a
+  form, and which panel was open, is kept in `src/lib/drafts.svelte.ts` while
+  another screen is shown (in memory only, as it can hold a password). A form
+  fills itself from its draft first, shows "Unsaved changes" with Discard, and
+  clears the draft when it is saved, cancelled or closed. New forms do the same.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
     `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH

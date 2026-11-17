@@ -8,6 +8,7 @@
   import { icons } from "$lib/icons";
   import { guestKey } from "$lib/proxmox";
   import { proxmox } from "$lib/proxmox.svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
   import Address from "../Address.svelte";
@@ -41,10 +42,15 @@
    *  and this says why. Without a token ID the form says enough by itself. */
   const missingSecret = $derived(kind === "noToken" && !!proxmox.settings.get(device.id)?.tokenId);
 
-  let setupOpen = $state(false);
+  // What is open here comes back after another screen was shown (drafts.svelte.ts).
+  const setupKey = untrack(() => `proxmox-setup-open:${device.id}`);
+  const guestPanelKey = untrack(() => `proxmox-guest:${device.id}`);
+  let setupOpen = $state(drafts.get<boolean>(setupKey) ?? false);
   const showSetup = $derived(setupOpen || kind === "noToken");
+  $effect(() => drafts.remember(setupKey, setupOpen));
 
-  let selectedKey = $state<string | null>(null);
+  let selectedKey = $state<string | null>(drafts.get<string>(guestPanelKey) ?? null);
+  $effect(() => drafts.remember(guestPanelKey, selectedKey));
   const selected = $derived(
     selectedKey && good ? (good.overview.guests.find((g) => guestKey(g) === selectedKey) ?? null) : null,
   );

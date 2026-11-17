@@ -4,6 +4,7 @@
   import { tick } from "svelte";
   import type { Action } from "svelte/action";
   import { devices } from "$lib/devices.svelte";
+  import { drafts } from "$lib/drafts.svelte";
   import { commandShown } from "$lib/docker/logic";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
@@ -14,7 +15,9 @@
   const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, undefined, { numeric: true });
   /** Machines home-cc can log in to: they have an SSH user. */
   const reachable = $derived(devices.list.filter((d) => d.kind !== "ignore" && d.sshUser?.trim()).sort(byName));
-  let chosen = $state<number | null>(null);
+  // The machine picked stays picked after another screen was shown.
+  let chosen = $state<number | null>(drafts.get<number>("terminals-picker") ?? null);
+  $effect(() => drafts.remember("terminals-picker", chosen));
   const picked = $derived(reachable.find((d) => d.id === chosen) ?? reachable[0] ?? null);
 
   function openChosen() {
