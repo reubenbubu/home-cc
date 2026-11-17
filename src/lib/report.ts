@@ -19,7 +19,9 @@ export type Area =
   | "screen"
   | "keys"
   // Terminals
-  | "terminal";
+  | "terminal"
+  // Docker (spec 5.5)
+  | "docker";
 
 /** Source files to start from for each area. Paths are from the root of the repository. */
 export const AREA_FILES: Record<Area, string[]> = {
@@ -82,6 +84,14 @@ export const AREA_FILES: Record<Area, string[]> = {
   screen: [
     "the screen named under App, in src/routes/ (its +page.svelte) and the components it uses in src/lib/components/",
     "src/lib/api.ts (the shapes the back end sends)",
+  ],
+  // --- Docker (spec 5.5) ---
+  docker: [
+    "src-tauri/src/docker/mod.rs (connections to Docker hosts and every action)",
+    "src-tauri/src/docker/scripts.rs (what is run on the host) and src-tauri/src/docker/parse.rs (how docker's output is read)",
+    "src-tauri/src/docker/logs.rs (following a log) and src-tauri/src/docker/store.rs (Docker hosts and stacks remembered)",
+    "src-tauri/src/ssh.rs and src-tauri/src/monitor.rs (prepared_login: logging in)",
+    "src/routes/docker/+page.svelte, src/lib/docker/ and src/lib/components/docker/ (the screen)",
   ],
 };
 

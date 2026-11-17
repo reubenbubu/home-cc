@@ -208,6 +208,51 @@ const SCREENS = [
     ready: "table",
     before: (page) => page.getByText("Status checks aren't working").waitFor(),
   },
+  // --- Docker (spec 5.5) ---
+  {
+    name: "docker",
+    path: "/docker",
+    ready: "article",
+    // CPU and memory are read after the list; the picture should have them.
+    before: (page) => page.getByText("612 MB").waitFor(),
+  },
+  {
+    name: "docker-logs",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Logs of media-jellyfin-1" }).click();
+      await page.locator(".line").nth(10).waitFor();
+      await page.getByLabel("Search the log").fill("playback");
+    },
+  },
+  {
+    name: "docker-cleanup",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Clean up…" }).click();
+      await page.getByText("Unused volumes").waitFor();
+    },
+  },
+  {
+    name: "docker-files",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Files" }).click();
+      await page.locator("textarea").waitFor();
+    },
+  },
+  {
+    name: "docker-hosts",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Docker hosts…" }).click();
+      await page.getByText("isn't allowed to use it").first().waitFor();
+    },
+  },
 ];
 
 /** On the Terminals screen: open a tab on the machine with this label in the list. */
@@ -850,6 +895,68 @@ async function checkFlows(browser, url) {
         await page.getByRole("button", { name: "Reconnect" }).click();
         await problem.waitFor({ state: "detached" });
         await terminalShows(page, "Try ls");
+      },
+    },
+    // --- Docker (spec 5.5) ---
+    {
+      what: "Docker: a container is restarted, its log followed and searched, and closing the log stops following it",
+      path: "/docker",
+      async run(page) {
+        await page.evaluate(recordCalls);
+        await page.getByRole("button", { name: "Restart media-sonarr-1" }).click();
+        await page.getByText("Restarting…").waitFor();
+        await page.getByText("Restarting…").waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Logs of media-jellyfin-1" }).click();
+        await page.locator(".line").nth(10).waitFor();
+        await page.getByLabel("Search the log").fill("ERR");
+        await page.getByText(/lines hold “ERR”/).waitFor();
+        const texts = await page.locator(".line .text").allTextContents();
+        if (!texts.length || texts.some((t) => !t.toLowerCase().includes("err"))) throw new Error("the search shows lines without the text");
+        await page.getByRole("button", { name: "Close the log" }).click();
+        await page.waitForFunction(() => window.__calls.includes("docker_logs_stop"));
+      },
+    },
+    {
+      what: "Docker: stopping and removing a container ask first, in its row",
+      path: "/docker",
+      async run(page) {
+        await page.evaluate(recordCalls);
+        await page.getByRole("button", { name: "Stop media-radarr-1" }).click();
+        await page.getByText("Stop radarr?").waitFor();
+        if (await page.evaluate(() => window.__calls.includes("docker_container_action"))) throw new Error("it stopped without asking");
+        await page.getByRole("button", { name: "Yes, stop" }).click();
+        await page.getByRole("button", { name: "Start media-radarr-1" }).waitFor();
+        await page.getByRole("button", { name: "Remove old-backup" }).click();
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
+        await page.getByRole("button", { name: "Remove old-backup" }).waitFor();
+      },
+    },
+    {
+      what: "Docker: a cleanup shows what it would remove, leaves named volumes unticked, and removes only after a yes",
+      path: "/docker",
+      async run(page) {
+        await page.getByRole("button", { name: "Clean up…" }).click();
+        await page.getByText("Unused volumes").waitFor();
+        if (await page.getByRole("checkbox", { name: /nextcloud_db/ }).isChecked()) throw new Error("a named volume was ticked");
+        const remove = page.getByRole("button", { name: /^Remove \d+ things/ });
+        await remove.click();
+        await page.getByRole("button", { name: "Yes, remove them from Homelab VM" }).click();
+        await page.getByText(/^Removed \d+ things?, freeing about/).waitFor();
+        await page.getByText("postgres:14: Error response from daemon").waitFor();
+      },
+    },
+    {
+      what: "Docker: a compose file is saved after a confirm, says where the old one went, and offers to start the stack",
+      path: "/docker",
+      async run(page) {
+        await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Files" }).click();
+        const box = page.locator("textarea");
+        await box.waitFor();
+        await box.fill((await box.inputValue()).replace("10.10", "10.11"));
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page.getByRole("button", { name: "Yes, save to Homelab VM" }).click();
+        await page.getByText(/The old version is at \/srv\/media\/compose\.yml\.\d{8}-\d{6}\.bak/).waitFor();
+        await page.getByRole("button", { name: "Start the stack with it" }).waitFor();
       },
     },
   ];

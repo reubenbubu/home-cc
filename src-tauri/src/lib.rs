@@ -1,5 +1,7 @@
 mod commands;
 mod diag;
+// Docker (spec 5.5): containers and compose stacks over SSH.
+mod docker;
 // Public so the small diagnostic programs in examples/ can use them.
 pub mod error;
 pub mod history;
@@ -29,11 +31,16 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let inventory = Inventory::open(&dir.join("home-cc.db"))?;
+            // Docker (spec 5.5): its tables live in the same file.
+            docker::init(&inventory)?;
             app.manage(inventory);
             app.manage(Monitor::default());
             app.manage(keysetup::KeySetup::default());
             app.manage(terminal::Terminals::default());
             Monitor::start(app.handle());
+            // Docker (spec 5.5).
+            app.manage(docker::Docker::default());
+            docker::Docker::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -73,6 +80,24 @@ pub fn run() {
             commands::terminal_close_all,
             commands::clipboard_read_text,
             commands::clipboard_write_text,
+            // --- Docker (spec 5.5) ---
+            docker::commands::docker_hosts,
+            docker::commands::docker_probe,
+            docker::commands::docker_set_host_mode,
+            docker::commands::docker_overview,
+            docker::commands::docker_stats,
+            docker::commands::docker_container_action,
+            docker::commands::docker_stack_action,
+            docker::commands::docker_forget_stack,
+            docker::commands::docker_stack_files,
+            docker::commands::docker_read_file,
+            docker::commands::docker_save_file,
+            docker::commands::docker_cleanup_preview,
+            docker::commands::docker_cleanup,
+            docker::commands::docker_logs_start,
+            docker::commands::docker_logs_stop,
+            docker::commands::docker_save_log,
+            // --- end of Docker ---
         ])
         .build(tauri::generate_context!())
         .expect("error while running home-cc")

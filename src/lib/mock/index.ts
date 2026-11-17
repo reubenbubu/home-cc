@@ -24,6 +24,7 @@ import type {
   Subnet,
 } from "../api";
 import { terminalCommands } from "./terminal";
+import { dockerMock } from "./docker";
 
 /** How a sample device behaves when it is checked. */
 type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
@@ -929,6 +930,8 @@ export function installMock() {
               : null;
       return { name: d.name, user: d.sshUser, hostname: d.hostname?.toLowerCase() ?? "machine", os: d.os, problem };
     }),
+    // --- Docker (spec 5.5), see docker.ts ---
+    ...dockerMock({ devices: () => devices, idOf }),
   };
 
   mockIPC(
