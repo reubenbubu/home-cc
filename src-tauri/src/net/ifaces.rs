@@ -244,13 +244,13 @@ pub fn parse_range(text: &str) -> Result<Option<Ipv4Net>, String> {
     }
     let Ok(net) = text.parse::<Ipv4Net>() else {
         let shown: String = text.chars().filter(|c| !c.is_control()).take(40).collect();
-        return Err(format!("\"{shown}\" is not a network range. It should look like 192.168.68.0/22."));
+        return Err(format!("\"{shown}\" is not a network range. It should look like 192.168.1.0/24."));
     };
     let net = net.trunc();
     if net.prefix_len() < BIGGEST_PREFIX {
         return Err(format!(
             "That range is too big to scan. Use a number from {BIGGEST_PREFIX} to 32 after the slash, \
-             such as 192.168.68.0/22."
+             such as 192.168.1.0/24."
         ));
     }
     // With a /20 or smaller, a private first address means all of it is private.
