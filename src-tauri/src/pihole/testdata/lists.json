@@ -1,0 +1,9 @@
+{
+  "lists": [
+    { "address": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "type": "block", "comment": "Migrated from /etc/pihole/adlists.list", "groups": [0], "enabled": true, "id": 1, "date_added": 1700000000, "date_modified": 1700000000, "date_updated": 1763190000, "number": 81543, "invalid_domains": 0, "abp_entries": 0, "status": 2 },
+    { "address": "https://v.firebog.net/hosts/Easyprivacy.txt", "type": "block", "comment": null, "groups": [0], "enabled": false, "id": 2, "date_added": 1700000000, "date_modified": 1700000500, "date_updated": 1763190000, "number": 41322, "invalid_domains": 3, "abp_entries": 0, "status": 2 },
+    { "address": "", "type": "block", "enabled": true, "id": 3 },
+    { "address": "https://raw.githubusercontent.com/anudeepND/whitelist/master/domains/whitelist.txt", "type": "allow", "comment": "", "groups": [0], "enabled": true, "id": 4, "number": 210, "status": 1 }
+  ],
+  "took": 0.0021
+}
