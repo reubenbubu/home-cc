@@ -118,6 +118,17 @@ const SCREENS = [
       await page.getByText("Couldn't open the terminal").waitFor();
     },
   },
+  {
+    name: "terminals-lost",
+    path: "/terminals",
+    ready: ".empty",
+    async before(page) {
+      await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+      await terminalShows(page, "Try ls");
+      await page.keyboard.type("ls\rdrop\r");
+      await page.getByText("was lost").waitFor();
+    },
+  },
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
     name: "overview-check-problem",
@@ -636,6 +647,36 @@ async function checkFlows(browser, url) {
         await page.getByRole("button", { name: "Reconnect" }).click();
         await page.getByText("Session ended.").waitFor({ state: "detached" });
         await page.getByRole("tab", { selected: true, name: "Dev VM" }).waitFor();
+      },
+    },
+    {
+      what: "a new terminal takes the keyboard by itself, also what is typed while it connects",
+      path: "/machines",
+      async run(page) {
+        await page.getByRole("button", { name: "Open a terminal on Homelab VM" }).click();
+        await page.waitForURL("**/terminals");
+        // No click in the terminal first: typing straight away has to reach it.
+        await page.keyboard.type("size\r");
+        await terminalShows(page, "columns");
+        await page.keyboard.type("ls\r");
+        await terminalShows(page, "update.sh");
+      },
+    },
+    {
+      what: "a terminal whose connection is lost says so as a problem that can be handed on, and can reconnect",
+      path: "/terminals",
+      async run(page) {
+        await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+        await terminalShows(page, "Try ls");
+        await page.keyboard.type("drop\r");
+        const problem = page.getByRole("alert").filter({ hasText: "was lost" });
+        await problem.waitFor();
+        if (!(await problem.getByText("Session ended. The connection to").count())) {
+          throw new Error("the lost connection isn't shown as a problem");
+        }
+        await page.getByRole("button", { name: "Reconnect" }).click();
+        await problem.waitFor({ state: "detached" });
+        await terminalShows(page, "Try ls");
       },
     },
   ];

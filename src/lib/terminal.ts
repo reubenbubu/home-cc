@@ -66,38 +66,69 @@ export class Drawn {
   }
 }
 
+/** The most text the back end takes in one go (MAX_INPUT in terminal.rs), in bytes once sent as UTF-8. */
+export const MAX_INPUT_BYTES = 4 * 1024 * 1024;
+
+/** The back end's words for a terminal that has gone (terminal.rs). Sending to one is not worth showing: the
+ *  tab already says the session ended. */
+export function isClosedError(text: string): boolean {
+  return text.includes("has already closed");
+}
+
+/** Why this text can't be pasted, or null if it can. The terminal adds a few bytes around a paste for programs
+ *  that ask (bracketed paste), so a little room is kept. */
+export function pasteProblem(text: string): string | null {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes <= MAX_INPUT_BYTES - 64) return null;
+  const mib = (bytes / (1024 * 1024)).toFixed(1);
+  return `That is too much text to paste into a terminal at once (${mib} MB; up to 4 MB fits). Paste it in parts, or copy the file to the machine instead.`;
+}
+
+/** What the screen sends: typing and pastes as text, and the terminal's own reports in its oldest mouse
+ *  format as bytes (each character one byte, 0 to 255), which must not be turned into UTF-8 on the way. */
+export type InputKind = "text" | "binary";
+
 /** Sends typing one piece at a time, so it can't arrive out of order; what is typed meanwhile goes in the
- *  next piece, joined up. */
+ *  next piece, joined up, as long as it is of the same kind and the piece doesn't grow past `maxJoined`
+ *  characters (so joining can't make a piece the back end refuses). */
 export class InOrder {
-  #waiting = "";
+  #waiting: { kind: InputKind; data: string }[] = [];
   #busy = false;
   #stopped = false;
-  readonly #send: (data: string) => Promise<unknown>;
+  readonly #send: (data: string, kind: InputKind) => Promise<unknown>;
   readonly #failed: (error: unknown) => void;
-  constructor(send: (data: string) => Promise<unknown>, failed: (error: unknown) => void = () => {}) {
+  readonly maxJoined: number;
+  constructor(
+    send: (data: string, kind: InputKind) => Promise<unknown>,
+    failed: (error: unknown) => void = () => {},
+    // A character is at most three bytes in UTF-8, so this many always fit in MAX_INPUT_BYTES.
+    maxJoined = 1024 * 1024,
+  ) {
     this.#send = send;
     this.#failed = failed;
+    this.maxJoined = maxJoined;
   }
 
-  push(data: string) {
+  push(data: string, kind: InputKind = "text") {
     if (this.#stopped || !data) return;
-    this.#waiting += data;
+    const last = this.#waiting.at(-1);
+    if (last && last.kind === kind && last.data.length + data.length <= this.maxJoined) last.data += data;
+    else this.#waiting.push({ kind, data });
     if (!this.#busy) void this.#next();
   }
 
   /** Drop anything still waiting and send no more. */
   stop() {
     this.#stopped = true;
-    this.#waiting = "";
+    this.#waiting = [];
   }
 
   async #next() {
     this.#busy = true;
-    while (this.#waiting && !this.#stopped) {
-      const data = this.#waiting;
-      this.#waiting = "";
+    let piece: { kind: InputKind; data: string } | undefined;
+    while (!this.#stopped && (piece = this.#waiting.shift())) {
       try {
-        await this.#send(data);
+        await this.#send(piece.data, piece.kind);
       } catch (e) {
         this.#failed(e);
       }
@@ -174,4 +205,14 @@ export function tabTitle(title: string, taken: string[]): string {
 /** What a tab says once its terminal has ended. */
 export function endedText(reason: string | null): string {
   return reason ? `Session ended. ${reason}` : "Session ended.";
+}
+
+/** Waiting for the screen to hear what terminals print. Each event has its own listener; if one can't be
+ *  set up, the others are taken down again, so trying again later doesn't hear anything twice. */
+export async function listenAll(listeners: (() => Promise<() => void>)[]): Promise<void> {
+  const results = await Promise.allSettled(listeners.map((listen) => listen()));
+  const failed = results.find((r) => r.status === "rejected");
+  if (!failed) return;
+  for (const r of results) if (r.status === "fulfilled") r.value();
+  throw failed.reason;
 }

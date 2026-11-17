@@ -62,6 +62,33 @@
     };
   }
 
+  /** A terminal that ended for a reason worth handing on: the connection was lost, or the program was
+   *  stopped or failed. */
+  function endProblem(tab: Tab): ProblemInfo {
+    const d = devices.byId.get(tab.deviceId);
+    return {
+      area: "terminal",
+      what: `A terminal on "${d?.name ?? tab.title}"${tab.command ? " running a command" : ""}, which ended`,
+      error: tab.endReason ?? "",
+      details: {
+        ...(d ? deviceDetails(d) : { Device: `id ${tab.deviceId}, no longer saved` }),
+        Command: tab.command,
+        "Exit code": tab.exitStatus == null ? null : String(tab.exitStatus),
+      },
+    };
+  }
+
+  /** Typing, a paste or a new size that didn't reach the machine. */
+  function sendProblem(tab: Tab): ProblemInfo {
+    const d = devices.byId.get(tab.deviceId);
+    return {
+      area: "terminal",
+      what: `Sending what was typed or pasted to the terminal on "${d?.name ?? tab.title}"`,
+      error: tab.sendError ?? "",
+      details: { ...(d ? deviceDetails(d) : { Device: `id ${tab.deviceId}, no longer saved` }), Command: tab.command },
+    };
+  }
+
   /** Arrow keys move between tabs, as in other tab bars. */
   function tabKeys(e: KeyboardEvent, i: number) {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
@@ -171,17 +198,37 @@
             </div>
           </div>
         {:else if tab.state === "ended"}
-          <div class="banner ended" role="status">
-            <p>{tab.ended}</p>
+          {#snippet again()}
             <div class="banner-actions">
               <button class="btn small" onclick={() => terminals.reconnect(tab.key)}>Reconnect</button>
               <button class="btn small" onclick={() => terminals.close(tab.key)}>Close tab</button>
             </div>
-          </div>
+          {/snippet}
+          {#if tab.endReason}
+            <!-- The connection was lost, or the program was stopped or ended with an error code. -->
+            <div class="banner">
+              <Problem problem={endProblem(tab)} message={tab.ended ?? ""} tone={tab.exitStatus != null ? "warn" : undefined} />
+              {@render again()}
+            </div>
+          {:else}
+            <div class="banner ended" role="status">
+              <p>{tab.ended}</p>
+              {@render again()}
+            </div>
+          {/if}
         {:else if tab.state === "connecting"}
           <p class="connecting muted" role="status">Connecting to {tab.title}…</p>
         {/if}
-        <!-- Kept in place (it is measured) but not shown until something has run in it. -->
+        {#if tab.sendError}
+          <div class="banner">
+            <Problem problem={sendProblem(tab)} message="Not sent to {tab.title}: {tab.sendError}" />
+            <div class="banner-actions">
+              <button class="btn small" onclick={() => terminals.dismissSendError(tab.key)}>Dismiss</button>
+            </div>
+          </div>
+        {/if}
+        <!-- Kept in place (it is measured, and takes the keyboard while connecting) but not seen until
+             something has run in it. -->
         <div class="screen" class:quiet={!tab.shown} use:host={tab.key}></div>
       </div>
     {/each}
@@ -253,7 +300,9 @@
 
   /* xterm.js draws into this; the padding keeps letters off the border. */
   .screen { flex: 1; min-height: 0; min-width: 0; padding: 0.4rem 0 0.2rem 0.6rem; overflow: hidden; }
-  .screen.quiet { visibility: hidden; }
+  /* Not visibility: hidden, which would stop the terminal taking the keyboard, so keys typed while it
+     connects would go nowhere. */
+  .screen.quiet { opacity: 0; pointer-events: none; }
   .screen :global(.terminal-host) { width: 100%; height: 100%; }
   .screen :global(.xterm) { height: 100%; }
   /* Every character as typed: no joined-up arrows for "->" or "!=", as a terminal should be. */

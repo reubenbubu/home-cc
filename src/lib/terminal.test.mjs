@@ -1,7 +1,20 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clipboardKey, decodeBase64, Drawn, EarlyOutput, endedText, InOrder, rightClickAction, tabTitle } from "./terminal.ts";
+import {
+  clipboardKey,
+  decodeBase64,
+  Drawn,
+  EarlyOutput,
+  endedText,
+  InOrder,
+  isClosedError,
+  listenAll,
+  MAX_INPUT_BYTES,
+  pasteProblem,
+  rightClickAction,
+  tabTitle,
+} from "./terminal.ts";
 
 const key = (k, mods = {}) => ({ key: k, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...mods });
 
@@ -91,6 +104,78 @@ test("a failed send is reported and the next piece still goes", async () => {
   queue.stop();
   queue.push("after");
   assert.deepEqual(sent, ["bad", "ok"]);
+});
+
+test("mouse bytes and text go in order but are never joined into one piece", async () => {
+  const sent = [];
+  const replies = [];
+  const queue = new InOrder((data, kind) => {
+    sent.push([kind, data]);
+    return new Promise((resolve) => replies.push(resolve));
+  });
+  queue.push("a");
+  queue.push("b");
+  queue.push("\x1b[M #!", "binary");
+  queue.push("\x1b[M#\x98!", "binary");
+  queue.push("c");
+  for (let i = 0; i < 4; i++) {
+    replies.shift()?.();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  assert.deepEqual(sent, [
+    ["text", "a"],
+    ["text", "b"],
+    ["binary", "\x1b[M #!\x1b[M#\x98!"],
+    ["text", "c"],
+  ]);
+});
+
+test("typing while a big paste is on its way is not joined into a piece too big to send", async () => {
+  const sent = [];
+  const replies = [];
+  const queue = new InOrder(
+    (data) => {
+      sent.push(data);
+      return new Promise((resolve) => replies.push(resolve));
+    },
+    () => {},
+    10,
+  );
+  queue.push("x");
+  queue.push("123456789");
+  queue.push("0");
+  queue.push("ab");
+  queue.push("cd");
+  for (let i = 0; i < 4; i++) {
+    replies.shift()?.();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  assert.deepEqual(sent, ["x", "1234567890", "abcd"]);
+});
+
+test("a paste the back end would refuse is caught before it is sent", () => {
+  assert.equal(pasteProblem("ls -l\r"), null);
+  assert.equal(pasteProblem("x".repeat(MAX_INPUT_BYTES - 64)), null);
+  assert.match(pasteProblem("x".repeat(MAX_INPUT_BYTES)), /too much text to paste/);
+  // Counted in bytes as sent: "é" is two.
+  assert.match(pasteProblem("é".repeat(MAX_INPUT_BYTES / 2)), /4\.0 MB/);
+});
+
+test("only a terminal that has already closed is quiet when sending to it fails", () => {
+  assert.equal(isClosedError("This terminal has already closed."), true);
+  assert.equal(isClosedError("That is too much text to paste into a terminal at once."), false);
+});
+
+test("listening that fails part way takes down what it set up, so trying again doesn't hear things twice", async () => {
+  const taken = [];
+  await assert.rejects(
+    listenAll([async () => () => taken.push("output"), async () => Promise.reject(new Error("no events")), async () => () => taken.push("exit")]),
+    /no events/,
+  );
+  assert.deepEqual(taken.sort(), ["exit", "output"]);
+  let kept = true;
+  await listenAll([async () => () => (kept = false)]);
+  assert.equal(kept, true);
 });
 
 test("output that comes before its tab knows it is kept, with the end, until claimed", () => {

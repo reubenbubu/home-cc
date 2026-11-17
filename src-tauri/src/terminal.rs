@@ -442,7 +442,21 @@ impl Terminals {
         if data.len() > MAX_INPUT {
             return Err(Error::Invalid("That is too much text to paste into a terminal at once.".into()));
         }
-        if self.get(id, |t| t.write(data.into_bytes()))? {
+        self.send(id, data.into_bytes())
+    }
+
+    /// Bytes the terminal on screen reports by itself, one character per byte: xterm.js
+    /// sends mouse clicks in the oldest mouse format this way. Sent in the same queue as
+    /// typing, so the two stay in order.
+    pub fn write_binary(&self, id: u32, data: &str) -> Result<()> {
+        if data.len() > MAX_INPUT {
+            return Err(Error::Invalid("That is too much for a terminal at once.".into()));
+        }
+        self.send(id, binary_bytes(data)?)
+    }
+
+    fn send(&self, id: u32, bytes: Vec<u8>) -> Result<()> {
+        if self.get(id, |t| t.write(bytes))? {
             Ok(())
         } else {
             Err(Error::Invalid("This terminal has already closed.".into()))
@@ -482,6 +496,16 @@ impl Terminals {
         };
         let _ = timeout(EXIT_LIMIT, all).await;
     }
+}
+
+/// The bytes in xterm.js's binary input: each character stands for the byte of the same
+/// number. A mouse click past column 95 is a byte of 128 or more, which as text would
+/// become two bytes of UTF-8 and reach the program as a different click.
+fn binary_bytes(data: &str) -> Result<Vec<u8>> {
+    data.chars()
+        .map(|c| u8::try_from(u32::from(c)).ok())
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(|| Error::Invalid("The terminal on screen sent something that isn't bytes; it was not passed on.".into()))
 }
 
 /// Why a terminal could not be opened, saying what to do about it.
@@ -839,6 +863,36 @@ mod tests {
         assert_eq!(seen.until_exit().await, (None, Some(0)));
         server.wait_for_log("disconnected").await;
         assert!(!running.write(b"more".to_vec()), "typing into an ended terminal is refused");
+    }
+
+    #[tokio::test]
+    async fn mouse_reports_from_the_screen_arrive_as_the_bytes_they_are() {
+        let server = ShellServer::start().await;
+        let (running, mut seen) = open(&server, None).await.unwrap();
+        seen.until(b"$ ").await;
+        let terminals = Terminals::default();
+        terminals.open.lock().unwrap().insert(1, running);
+
+        // A click at column 120, row 10 in the oldest mouse format: ESC [ M, then the button and the
+        // place, each plus 32. 152 is one byte, not the two bytes of UTF-8 that text would make of it.
+        terminals.write_binary(1, "\x1b[M\u{20}\u{98}\u{2a}").unwrap();
+        seen.until(&[0x1b, b'[', b'M', 0x20, 0x98, 0x2a]).await;
+        // Text and bytes share one queue, so they stay in order.
+        terminals.write(1, "é".into()).unwrap();
+        terminals.write_binary(1, "\u{ff}").unwrap();
+        seen.until(&[0xc3, 0xa9, 0xff]).await;
+
+        assert!(terminals.write_binary(1, "\u{100}").is_err(), "a character past 255 is not a byte");
+        assert!(terminals.write_binary(2, "x").is_err(), "an unknown terminal is refused");
+        terminals.close(1);
+        assert_eq!(seen.until_exit().await, (None, None));
+    }
+
+    #[test]
+    fn binary_input_is_one_byte_per_character() {
+        assert_eq!(binary_bytes("").unwrap(), Vec::<u8>::new());
+        assert_eq!(binary_bytes("\u{0}a\u{7f}\u{80}\u{ff}").unwrap(), vec![0, b'a', 0x7f, 0x80, 0xff]);
+        assert!(binary_bytes("€").is_err());
     }
 
     #[tokio::test]

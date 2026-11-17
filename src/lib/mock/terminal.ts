@@ -116,6 +116,10 @@ class Fake {
       case "logout":
         this.close(null, 0);
         return false;
+      // Not on the list: for trying how a tab looks when its machine drops off.
+      case "drop":
+        this.close(`The connection to ${this.machine.hostname} was lost.`, null);
+        return false;
       case "clear":
       case "cls":
         this.#out(`${ESC}2J${ESC}H`);
@@ -198,7 +202,13 @@ export function terminalCommands(lookup: (deviceId: number) => MockMachine): Rec
       fake.start();
       return id;
     },
-    terminal_write: ({ id, data }: { id: number; data: string }) => get(id).type(data),
+    terminal_write: ({ id, data }: { id: number; data: string }) => {
+      // As the real back end: more than 4 MB at once is refused (MAX_INPUT in terminal.rs).
+      if (new TextEncoder().encode(data).length > 4 * 1024 * 1024) throw "That is too much text to paste into a terminal at once.";
+      get(id).type(data);
+    },
+    // Mouse reports: the pretend shell doesn't follow the mouse, so there is nothing to do with them.
+    terminal_write_binary: ({ id }: { id: number }) => void get(id),
     terminal_resize: ({ id, cols, rows }: { id: number; cols: number; rows: number }) => {
       const fake = get(id);
       fake.cols = cols;

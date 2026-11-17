@@ -58,6 +58,7 @@ pub fn run() {
             // Terminals
             commands::terminal_open,
             commands::terminal_write,
+            commands::terminal_write_binary,
             commands::terminal_resize,
             commands::terminal_ack,
             commands::terminal_close,

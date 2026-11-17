@@ -213,6 +213,9 @@ export const terminalApi = {
     invoke<number>("terminal_open", { deviceId, command, cols, rows }),
   /** What was typed or pasted. Rejects once the terminal has closed. */
   write: (id: number, data: string) => invoke<void>("terminal_write", { id, data }),
+  /** Bytes the terminal itself reports, as xterm.js's onBinary gives them: each character is one byte (0 to
+   *  255). Mouse clicks in the oldest mouse format, which vim uses with xterm.js, come this way. */
+  writeBinary: (id: number, data: string) => invoke<void>("terminal_write_binary", { id, data }),
   resize: (id: number, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
   /** The screen has drawn this many more bytes of output. The back end stops reading while too much waits. */
   ack: (id: number, bytes: number) => invoke<void>("terminal_ack", { id, bytes }),

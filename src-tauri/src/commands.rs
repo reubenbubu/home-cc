@@ -249,6 +249,14 @@ pub fn terminal_write(terminals: State<crate::terminal::Terminals>, id: u32, dat
     terminals.write(id, data)
 }
 
+/// Bytes the terminal on screen reports by itself, one character per byte (0 to 255):
+/// mouse clicks in the oldest mouse format come this way, and must reach the program
+/// as the bytes they are, not as UTF-8.
+#[tauri::command]
+pub fn terminal_write_binary(terminals: State<crate::terminal::Terminals>, id: u32, data: String) -> Result<()> {
+    terminals.write_binary(id, &data)
+}
+
 #[tauri::command]
 pub fn terminal_resize(terminals: State<crate::terminal::Terminals>, id: u32, cols: u16, rows: u16) -> Result<()> {
     terminals.resize(id, cols, rows)
@@ -265,8 +273,8 @@ pub fn terminal_close(terminals: State<crate::terminal::Terminals>, id: u32) {
     terminals.close(id);
 }
 
-/// Close every terminal. The screens call it when they start, so terminals left behind
-/// by a reload of the window don't stay connected.
+/// Close every terminal. The window calls it each time it loads (+layout.svelte), so
+/// terminals left behind by a reload of the window don't stay connected.
 #[tauri::command]
 pub async fn terminal_close_all(terminals: State<'_, crate::terminal::Terminals>) -> Result<()> {
     terminals.close_all().await;

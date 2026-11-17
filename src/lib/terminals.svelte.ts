@@ -10,7 +10,19 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { errorText, terminalApi, terminalEvents } from "./api";
-import { clipboardKey, decodeBase64, Drawn, EarlyOutput, endedText, InOrder, rightClickAction, tabTitle } from "./terminal";
+import {
+  clipboardKey,
+  decodeBase64,
+  Drawn,
+  EarlyOutput,
+  endedText,
+  InOrder,
+  isClosedError,
+  listenAll,
+  pasteProblem,
+  rightClickAction,
+  tabTitle,
+} from "./terminal";
 
 export type TabState = "connecting" | "open" | "ended" | "failed";
 
@@ -25,6 +37,12 @@ export interface Tab {
   error: string | null;
   /** What the tab says once the terminal ended (ended). */
   ended: string | null;
+  /** Why it ended, if not normally: the connection was lost, a signal, an exit code (ended). */
+  endReason: string | null;
+  /** The program's exit code, when it ended with one. */
+  exitStatus: number | null;
+  /** Typing, a paste or a new size that didn't reach the machine. */
+  sendError: string | null;
   /** The title the program running in it set, if any (shells often show the user and folder). */
   programTitle: string;
   /** True once a terminal has run in it, so there is something to show. */
@@ -121,22 +139,21 @@ class Terminals {
   #early = new EarlyOutput();
   #nextKey = 1;
   #started = false;
-  /** Settles once the screen hears what terminals print. */
-  #listening: Promise<void> = Promise.resolve();
+  /** Settles once terminals left over from before are closed and the screen hears what terminals print. */
+  #ready: Promise<void> = Promise.resolve();
+  /** Why the screen can't hear what terminals print, while it can't. No terminal can work then. */
+  #eventsError: string | null = null;
+  /** Setting up the listeners, while that is under way, so two tabs trying again don't do it twice. */
+  #listenTry: Promise<void> | null = null;
 
-  /** Listen for output and ends, once. Terminals left behind by an earlier load of the window (a reload)
-   *  have no tab any more, so they are closed. */
-  #start() {
+  /** Called once when the app loads (+layout.svelte), and again harmlessly by open(). Terminals left
+   *  behind by an earlier load of the window (a reload) have no tab any more, so they are closed now
+   *  rather than staying connected; then the screen listens for output and ends. */
+  start() {
     if (this.#started) return;
     this.#started = true;
-    terminalApi.closeAll().catch(() => {});
-    this.#listening = Promise.all([
-      terminalEvents.onOutput(({ id, data }) => this.#output(id, decodeBase64(data))),
-      terminalEvents.onExit(({ id, reason, exitStatus }) => this.#exit(id, reason, exitStatus)),
-    ]).then(
-      () => {},
-      (e) => this.#lost(e),
-    );
+    const leftOver = terminalApi.closeAll().catch(() => {});
+    this.#ready = Promise.all([leftOver, this.#listen()]).then(() => {});
     setInterval(() => {
       for (const { id, running } of this.#early.unclaimed(UNCLAIMED_MS)) {
         if (running) terminalApi.close(id).catch(() => {});
@@ -144,14 +161,39 @@ class Terminals {
     }, UNCLAIMED_MS / 3);
   }
 
-  /** Without the events no terminal can work: say so on every tab that is trying. */
-  #lost(e: unknown) {
-    for (const tab of this.tabs) {
-      if (tab.state === "connecting" || tab.state === "open") {
-        tab.state = "failed";
-        tab.error = `The screen can't receive what terminals print: ${errorText(e)}`;
-      }
-    }
+  /** Listen for output and ends. If that fails, #eventsError says why and the next connect tries again. */
+  #listen(): Promise<void> {
+    this.#listenTry ??= listenAll([
+      () => terminalEvents.onOutput(({ id, data }) => this.#output(id, decodeBase64(data))),
+      () => terminalEvents.onExit(({ id, reason, exitStatus }) => this.#exit(id, reason, exitStatus)),
+    ])
+      .then(
+        () => {
+          this.#eventsError = null;
+        },
+        (e) => {
+          this.#eventsError = `The screen can't receive what terminals print: ${errorText(e)}`;
+        },
+      )
+      .finally(() => {
+        this.#listenTry = null;
+      });
+    return this.#listenTry;
+  }
+
+  /** Typing, a paste, a new size or a note of what was drawn didn't reach the machine. Shown on the tab.
+   *  A terminal that has just closed is no news: the tab says the session ended. */
+  #sendFailed(key: number, e: unknown) {
+    const text = errorText(e);
+    if (isClosedError(text)) return;
+    const tab = this.tab(key);
+    if (tab) tab.sendError = text;
+  }
+
+  /** The owner has seen the problem with sending. */
+  dismissSendError(key: number) {
+    const tab = this.tab(key);
+    if (tab) tab.sendError = null;
   }
 
   tab(key: number): Tab | undefined {
@@ -160,7 +202,7 @@ class Terminals {
 
   /** A new tab, shown at once, that connects by itself. Returns its key. */
   open(o: { deviceId: number; title: string; command?: string | null }): number {
-    this.#start();
+    this.start();
     const key = this.#nextKey++;
     this.tabs.push({
       key,
@@ -170,6 +212,9 @@ class Terminals {
       state: "connecting",
       error: null,
       ended: null,
+      endReason: null,
+      exitStatus: null,
+      sendError: null,
       programTitle: "",
       shown: false,
     });
@@ -273,8 +318,11 @@ class Terminals {
       if (live.input) live.input.push(data);
       else if (this.tab(key)?.state === "connecting" && live.typedEarly.length < 64 * 1024) live.typedEarly += data;
     });
+    // Mouse clicks and the wheel in the oldest mouse format (vim uses it with xterm.js) come here, as one
+    // character per byte. Not kept while connecting: a click then means nothing to the program.
+    term.onBinary((data) => live.input?.push(data, "binary"));
     term.onResize(({ cols, rows }) => {
-      if (live.id != null) terminalApi.resize(live.id, cols, rows).catch(() => {});
+      if (live.id != null) terminalApi.resize(live.id, cols, rows).catch((e) => this.#sendFailed(key, e));
     });
     term.onTitleChange((title) => {
       const tab = this.tab(key);
@@ -312,9 +360,10 @@ class Terminals {
     if (!live.input) return;
     try {
       const text = await terminalApi.clipboardRead();
-      this.clipboardError = null;
+      const tooBig = pasteProblem(text);
+      this.clipboardError = tooBig && `Couldn't paste: ${tooBig}`;
       // paste() marks it as pasted for programs that ask (vim, the shell), and sends Enter as a terminal does.
-      if (text && live.input) live.term.paste(text);
+      if (text && !tooBig && live.input) live.term.paste(text);
     } catch (e) {
       this.clipboardError = `Couldn't paste: ${errorText(e)}`;
     }
@@ -328,8 +377,22 @@ class Terminals {
     tab.state = "connecting";
     tab.error = null;
     tab.ended = null;
-    await Promise.all([settle(), this.#listening]);
-    if (this.tab(key)?.state === "failed") return;
+    tab.endReason = null;
+    tab.exitStatus = null;
+    tab.sendError = null;
+    await Promise.all([settle(), this.#ready]);
+    // Listening failed when the app loaded, or for an earlier tab: try again (this is what "Try again" does).
+    if (this.#eventsError) await this.#listen();
+    if (this.#eventsError) {
+      live.typedEarly = "";
+      const still = this.tab(key);
+      if (still) {
+        still.state = "failed";
+        still.error = this.#eventsError;
+      }
+      return;
+    }
+    if (this.#live.get(key) !== live) return;
     this.fit(key);
     const { cols, rows } = live.term;
     let id: number;
@@ -354,8 +417,8 @@ class Terminals {
     live.drawn = new Drawn();
     this.#tabOf.set(id, key);
     live.input = new InOrder(
-      (data) => terminalApi.write(id, data),
-      () => {},
+      (data, kind) => (kind === "binary" ? terminalApi.writeBinary(id, data) : terminalApi.write(id, data)),
+      (e) => this.#sendFailed(key, e),
     );
     live.input.push(live.typedEarly);
     live.typedEarly = "";
@@ -366,18 +429,20 @@ class Terminals {
     }
     // The tab may have changed size while connecting.
     if (live.term.cols !== cols || live.term.rows !== rows) {
-      terminalApi.resize(id, live.term.cols, live.term.rows).catch(() => {});
+      terminalApi.resize(id, live.term.cols, live.term.rows).catch((e) => this.#sendFailed(key, e));
     }
     const early = this.#early.take(id);
-    for (const chunk of early?.chunks ?? []) this.#draw(live, id, chunk);
-    if (early?.exit) this.#ended(key, early.exit.reason);
-    if (this.active === key) live.term.focus();
+    for (const chunk of early?.chunks ?? []) this.#draw(key, live, id, chunk);
+    if (early?.exit) this.#ended(key, early.exit.reason, early.exit.exitStatus);
+    // Once the screen shows the terminal (shown, above), so the keyboard can go to it.
+    await tick();
+    if (this.active === key && this.#live.get(key) === live) live.term.focus();
   }
 
-  #draw(live: Live, id: number, bytes: Uint8Array) {
+  #draw(key: number, live: Live, id: number, bytes: Uint8Array) {
     live.term.write(bytes, () => {
       const report = live.drawn.add(bytes.length);
-      if (report && live.id === id) terminalApi.ack(id, report).catch(() => {});
+      if (report && live.id === id) terminalApi.ack(id, report).catch((e) => this.#sendFailed(key, e));
     });
   }
 
@@ -385,11 +450,11 @@ class Terminals {
     if (this.#closed.has(id)) return;
     const key = this.#tabOf.get(id);
     const live = key == null ? undefined : this.#live.get(key);
-    if (!live || live.id !== id) {
+    if (key == null || !live || live.id !== id) {
       this.#early.output(id, bytes);
       return;
     }
-    this.#draw(live, id, bytes);
+    this.#draw(key, live, id, bytes);
   }
 
   #exit(id: number, reason: string | null, exitStatus: number | null) {
@@ -399,10 +464,10 @@ class Terminals {
       this.#early.exit(id, reason, exitStatus);
       return;
     }
-    this.#ended(key, reason);
+    this.#ended(key, reason, exitStatus);
   }
 
-  #ended(key: number, reason: string | null) {
+  #ended(key: number, reason: string | null, exitStatus: number | null) {
     const live = this.#live.get(key);
     if (live) {
       if (live.id != null) this.#tabOf.delete(live.id);
@@ -414,6 +479,8 @@ class Terminals {
     if (tab) {
       tab.state = "ended";
       tab.ended = endedText(reason);
+      tab.endReason = reason;
+      tab.exitStatus = exitStatus;
     }
   }
 }
