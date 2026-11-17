@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   containerKey,
+  commandShown,
   defaultPick,
+  DOCKER_PATH,
   execCommand,
   keptSelection,
   highlight,
@@ -175,15 +177,25 @@ test("cleanup picks everything but named volumes, and adds up what it frees", ()
 });
 
 test("a terminal into a container names it only as Docker could have", () => {
+  const env = 'env PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin" ';
   const shell = "sh -c 'command -v bash >/dev/null && exec bash || exec sh'";
-  assert.equal(execCommand({ id: "a".repeat(64), name: "media-jellyfin-1" }), `docker exec -it media-jellyfin-1 ${shell}`);
-  assert.equal(execCommand({ id: "a".repeat(64), name: "web_2.old" }), `docker exec -it web_2.old ${shell}`);
+  assert.equal(execCommand({ id: "a".repeat(64), name: "media-jellyfin-1" }), `${env}docker exec -it media-jellyfin-1 ${shell}`);
+  assert.equal(execCommand({ id: "a".repeat(64), name: "web_2.old" }), `${env}docker exec -it web_2.old ${shell}`);
   // A name that isn't one Docker gives: the id instead, if it is one.
-  assert.equal(execCommand({ id: "0123456789ab", name: "x; rm -rf ~" }), `docker exec -it 0123456789ab ${shell}`);
+  assert.equal(execCommand({ id: "0123456789ab", name: "x; rm -rf ~" }), `${env}docker exec -it 0123456789ab ${shell}`);
   for (const name of ["", "-it", "--privileged", "a b", "a'b", "$(id)", "/web", "ünïcode", "a\nb"]) {
     assert.equal(execCommand({ id: "not-hex!", name }), null, JSON.stringify(name));
   }
   for (const id of ["ABCDEF012345", "abc", "a".repeat(65), "0123456789ab;id"]) {
     assert.equal(execCommand({ id, name: "" }), null, id);
   }
+});
+
+test("a container's terminal looks for docker where the Docker module does, and that PATH isn't shown by the tab", () => {
+  // The same list as PREAMBLE in src-tauri/src/docker/scripts.rs (a Rust test there checks this file).
+  assert.equal(DOCKER_PATH, "/usr/local/bin:/usr/bin:/bin:/snap/bin");
+  const command = execCommand({ id: "a".repeat(64), name: "web" });
+  assert.equal(commandShown(command), "docker exec -it web sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
+  assert.equal(commandShown("pct enter 101"), "pct enter 101");
+  assert.equal(commandShown('PATH="$PATH:/x" docker ps'), 'PATH="$PATH:/x" docker ps');
 });

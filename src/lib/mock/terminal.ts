@@ -60,7 +60,7 @@ class Fake {
    *  Proxmox container, or a VM's serial console. */
   #inside(): { what: string; prompt: string } | null {
     const c = this.command ?? "";
-    const docker = /^docker exec -it ([a-zA-Z0-9][a-zA-Z0-9_.-]*) /.exec(c);
+    const docker = /^env PATH="\$PATH:[^"]*" docker exec -it ([a-zA-Z0-9][a-zA-Z0-9_.-]*) /.exec(c);
     if (docker) return { what: `the container ${docker[1]} on ${this.machine.name}`, prompt: "root@3f2a9c1d7b44:/# " };
     const ct = /^pct enter (\d+)$/.exec(c);
     if (ct) return { what: `container ${ct[1]} on ${this.machine.name}`, prompt: `root@CT${ct[1]}:~# ` };

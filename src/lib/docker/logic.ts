@@ -235,14 +235,30 @@ export function isLoginProblem(kind: string | undefined | null): boolean {
 const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 const CONTAINER_ID = /^[0-9a-f]{12,64}$/;
 
+/** Where docker is looked for on a Docker host besides the login's own PATH, /snap/bin among them: a command
+ *  sent over SSH gets no login shell, so on Debian with the docker snap, for one, /snap/bin isn't on its
+ *  PATH. The same list as PREAMBLE in src-tauri/src/docker/scripts.rs, whose tests check that they agree. */
+export const DOCKER_PATH = "/usr/local/bin:/usr/bin:/bin:/snap/bin";
+
+/** Put before docker in a command run on a Docker host. `env`, because `PATH=… docker` isn't understood by
+ *  csh or tcsh, which can be the login shell that runs the command. */
+const DOCKER_ENV = `env PATH="$PATH:${DOCKER_PATH}" `;
+
 /** The command a terminal into this running container runs on its Docker host: bash if the container has it,
- *  else sh. It is run the way the Docker screen runs docker, as the SSH user, who must be allowed to use
- *  Docker. The container goes in by its name (easier to read), or by its id; anything that isn't a name
- *  or id Docker could have given is refused (null) rather than quoted, so nothing odd ever reaches a shell. */
+ *  else sh. It is run the way the Docker screen runs docker: as the SSH user, who must be allowed to use
+ *  Docker, and with docker looked for in the same places. The container goes in by its name (easier to
+ *  read), or by its id; anything that isn't a name or id Docker could have given is refused (null) rather
+ *  than quoted, so nothing odd ever reaches a shell. */
 export function execCommand(c: { id: string; name: string }): string | null {
   const target = CONTAINER_NAME.test(c.name) && c.name.length <= 255 ? c.name : CONTAINER_ID.test(c.id) ? c.id : null;
   if (!target) return null;
-  return `docker exec -it ${target} sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
+  return `${DOCKER_ENV}docker exec -it ${target} sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
+}
+
+/** A command as shown beside a terminal's tabs: without the PATH that `execCommand` puts first, so the part
+ *  that says what runs is the part still in view when the line is cut short. */
+export function commandShown(command: string): string {
+  return command.startsWith(DOCKER_ENV) ? command.slice(DOCKER_ENV.length) : command;
 }
 
 /** The last part of a path, for tabs and titles. */

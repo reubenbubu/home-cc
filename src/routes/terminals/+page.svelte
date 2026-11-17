@@ -4,6 +4,7 @@
   import { tick } from "svelte";
   import type { Action } from "svelte/action";
   import { devices } from "$lib/devices.svelte";
+  import { commandShown } from "$lib/docker/logic";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
   import { terminals, type Tab } from "$lib/terminals.svelte";
@@ -191,7 +192,8 @@
     {#if shownTab && shownDevice}
       <p class="where small muted" title={where(shownTab)}>
         <span class="user">{shownDevice.sshUser}@</span><Address host={shownDevice.host} known={shownDevice.hostname} />
-        {#if shownTab.command}<span class="command mono ellipsis">{shownTab.command}</span>{/if}
+        <!-- Without the PATH a container's terminal puts first; the whole command is in the line's title. -->
+        {#if shownTab.command}<span class="command mono ellipsis">{commandShown(shownTab.command)}</span>{/if}
       </p>
     {/if}
     </div>

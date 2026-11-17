@@ -997,8 +997,45 @@ async function checkFlows(browser, url) {
         await page.getByRole("tab", { selected: true, name: "media-jellyfin-1 on Homelab VM" }).waitFor();
         await terminalShows(page, "Entered the container media-jellyfin-1");
         const opened = await page.evaluate(() => window.__opened);
-        const want = "docker exec -it media-jellyfin-1 sh -c 'command -v bash >/dev/null && exec bash || exec sh'";
+        const shown = "docker exec -it media-jellyfin-1 sh -c 'command -v bash >/dev/null && exec bash || exec sh'";
+        // Docker is looked for where the Docker module looks for it, the snap's /snap/bin among them.
+        const want = `env PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin" ${shown}`;
         if (opened.length !== 1 || opened[0].command !== want) throw new Error(`opened ${JSON.stringify(opened)}`);
+        // Beside the tabs, without that PATH, so what runs is what is in view.
+        const line = (await page.locator(".where .command").textContent())?.trim();
+        if (line !== shown) throw new Error(`beside the tabs: "${line}"`);
+      },
+    },
+    {
+      what: "Docker: at every window width a stack card's container rows fit in the card, controls included",
+      path: "/docker",
+      async run(page) {
+        await page.getByText("612 MB").waitFor();
+        // Every width in steps of 8px, so no band between the column layout and the narrow one is missed
+        // (the five screenshot sizes all fall outside such a band).
+        for (let width = 640; width <= 2600; width += 8) {
+          await page.setViewportSize({ width, height: 900 });
+          const bad = await page.evaluate(
+            () =>
+              new Promise((done) =>
+                requestAnimationFrame(() => {
+                  for (const card of document.querySelectorAll("article.stack")) {
+                    const style = getComputedStyle(card);
+                    const right = card.getBoundingClientRect().right - parseFloat(style.paddingRight);
+                    for (const el of card.querySelectorAll(".head, .row, .row .acts")) {
+                      if (el.clientWidth === 0) continue;
+                      // A row reaches into the card's padding by its negative margin, on purpose.
+                      const reach = -Math.min(0, parseFloat(getComputedStyle(el).marginRight));
+                      const over = Math.max(el.scrollWidth - el.clientWidth, el.getBoundingClientRect().right - right - reach);
+                      if (over > 1) return done(`${el.className.split(" ")[0]} in "${card.getAttribute("aria-label")}" runs ${Math.round(over)}px past the card`);
+                    }
+                  }
+                  done(null);
+                }),
+              ),
+          );
+          if (bad) throw new Error(`at ${width}px wide: ${bad}`);
+        }
       },
     },
     {
