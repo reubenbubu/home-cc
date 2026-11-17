@@ -4,7 +4,7 @@
 
 use tauri::State;
 
-use super::model::SnapshotList;
+use super::model::{GuestAddresses, SnapshotList};
 use super::{GuestRef, PowerAction, Proxmox, ProxmoxSettings, ProxmoxStatus, TaskOutcome};
 use crate::error::Result;
 use crate::inventory::Inventory;
@@ -55,6 +55,17 @@ pub async fn proxmox_power(
     action: PowerAction,
 ) -> Result<TaskOutcome> {
     px.power(&inv, device_id, &guest, action).await
+}
+
+/// A running guest's IPv4 addresses, as far as Proxmox knows them.
+#[tauri::command]
+pub async fn proxmox_guest_addresses(
+    inv: State<'_, Inventory>,
+    px: State<'_, Proxmox>,
+    device_id: i64,
+    guest: GuestRef,
+) -> Result<GuestAddresses> {
+    px.guest_addresses(&inv, device_id, &guest).await
 }
 
 #[tauri::command]

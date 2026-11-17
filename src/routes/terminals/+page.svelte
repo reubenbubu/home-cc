@@ -7,6 +7,7 @@
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
   import { terminals, type Tab } from "$lib/terminals.svelte";
+  import Address from "$lib/components/Address.svelte";
   import Problem from "$lib/components/Problem.svelte";
 
   const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, undefined, { numeric: true });
@@ -47,6 +48,10 @@
     const at = d ? `${d.sshUser}@${d.host}` : "";
     return [at, tab.command, tab.programTitle].filter(Boolean).join(" · ");
   }
+
+  /** The tab shown, and the machine it is on, for the line beside the tabs. */
+  const shownTab = $derived(terminals.tabs.find((t) => t.key === terminals.active) ?? null);
+  const shownDevice = $derived(shownTab ? devices.byId.get(shownTab.deviceId) : undefined);
 
   function stateText(tab: Tab): string {
     return { connecting: "Connecting", open: "Connected", ended: "Ended", failed: "Couldn't connect" }[tab.state];
@@ -120,6 +125,8 @@
           {/each}
         </select>
       </label>
+      <!-- The option's text can't hold the address's hostname as a field of its own: it is shown here. -->
+      {#if picked}<span class="picked-at small"><Address host={picked.host} known={picked.hostname} /></span>{/if}
       <button class="btn primary" type="submit" disabled={!picked}>Open terminal</button>
     </form>
   </header>
@@ -148,6 +155,7 @@
       {/if}
     </section>
   {:else}
+    <div class="tabbar">
     <div class="tabs" role="tablist" aria-label="Open terminals">
       {#each terminals.tabs as tab, i (tab.key)}
         <div class="tab" class:active={tab.key === terminals.active} title={where(tab)}>
@@ -179,6 +187,13 @@
           </button>
         </div>
       {/each}
+    </div>
+    {#if shownTab && shownDevice}
+      <p class="where small muted" title={where(shownTab)}>
+        <span class="user">{shownDevice.sshUser}@</span><Address host={shownDevice.host} known={shownDevice.hostname} />
+        {#if shownTab.command}<span class="command mono ellipsis">{shownTab.command}</span>{/if}
+      </p>
+    {/if}
     </div>
 
     {#each terminals.tabs as tab (tab.key)}
@@ -247,7 +262,13 @@
   .empty { max-width: 46rem; display: flex; flex-direction: column; gap: 0.6rem; }
   .empty p { margin: 0; line-height: 1.55; }
 
-  .tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+  /* The tabs, with the shown tab's login and command beside them; that goes above them when there is no room. */
+  .tabbar { display: flex; flex-wrap: wrap-reverse; align-items: flex-end; gap: 0 1rem; border-bottom: 1px solid var(--border); min-width: 0; }
+  .tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; min-width: 0; }
+  .where { display: flex; align-items: baseline; gap: 0 0.6rem; min-width: 0; max-width: 100%; margin: 0 0 0.55rem auto; }
+  .where .user { margin-right: -0.6rem; flex: none; }
+  .where .command { min-width: 0; color: var(--text-soft); }
+  .picked-at { display: flex; align-self: center; min-width: 0; flex: 0 1 auto; color: var(--text-soft); }
   .tab {
     display: flex;
     align-items: center;

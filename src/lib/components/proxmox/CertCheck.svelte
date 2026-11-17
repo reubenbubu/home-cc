@@ -4,6 +4,7 @@
   import type { Device, ProxmoxStatus } from "$lib/api";
   import { CERT_COMMAND, CUSTOM_CERT_COMMAND } from "$lib/proxmox";
   import { proxmox } from "$lib/proxmox.svelte";
+  import Address from "../Address.svelte";
   import ConfirmButton from "../ConfirmButton.svelte";
 
   let { device, status }: { device: Device; status: ProxmoxStatus } = $props();
@@ -18,7 +19,8 @@
     <p><strong>{device.name} shows a different certificate from the one you approved.</strong></p>
     <p>
       That is expected if you reinstalled Proxmox, renewed or replaced its certificate, or pointed this device at
-      another address. If you didn't, something else may be answering at {device.host}. home-cc has sent it nothing,
+      another address. If you didn't, something else may be answering at
+      <Address host={device.host} known={device.hostname} />. home-cc has sent it nothing,
       and won't until you approve the new certificate.
     </p>
     <dl class="prints">

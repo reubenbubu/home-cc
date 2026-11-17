@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   actionWords,
+  consoleCommand,
+  consoleTitle,
+  devicesAt,
   guestKey,
   guestName,
   isHibernated,
@@ -122,4 +125,23 @@ test("the token commands use the token typed, or the usual one", () => {
   for (const unusable of ["", "root@pam", "root@pam!x=secret", "it's me@pam!x"]) {
     assert.equal(tokenCommands(unusable).create, "pveum user token add root@pam homecc --privsep 1", unusable);
   }
+});
+
+test("a console runs pct enter or qm terminal, and only for a real guest ID", () => {
+  assert.equal(consoleCommand({ kind: "lxc", vmid: 101 }), "pct enter 101");
+  assert.equal(consoleCommand({ kind: "qemu", vmid: 110 }), "qm terminal 110");
+  for (const vmid of [99, 0, -5, 1.5, NaN, 1e12, Number("101; reboot")]) {
+    assert.equal(consoleCommand({ kind: "lxc", vmid }), null, String(vmid));
+  }
+  assert.equal(consoleTitle(guest({ kind: "lxc", vmid: 101, name: "pihole1" })), "pihole1 (CT 101)");
+  assert.equal(consoleTitle(guest({ kind: "qemu", vmid: 110, name: "" })), "VM 110 (VM 110)");
+});
+
+test("a guest's addresses are matched to the machines in home-cc", () => {
+  const dev = (id, host, kind = "vm") => ({ id, host, kind, name: `d${id}` });
+  const list = [dev(1, "192.168.68.21"), dev(2, " 192.168.68.22 "), dev(3, "192.168.68.23", "ignore")];
+  assert.deepEqual(
+    devicesAt(["192.168.68.21", "192.168.68.22", "192.168.68.23", "10.0.0.1"], list).map((x) => x.device?.id ?? null),
+    [1, 2, null, null],
+  );
 });

@@ -206,6 +206,28 @@ const SCREENS = [
       await page.getByText("before_2026_11", { exact: true }).waitFor();
     },
   },
+  // A container's console, and a VM whose address is a machine in home-cc: its serial console or a terminal there.
+  {
+    name: "proxmox-console",
+    path: "/machines",
+    ready: "article",
+    async before(page) {
+      await openProxmoxScreenLoggedIn(page);
+      await page.getByRole("button", { name: "Manage pihole1" }).click();
+      await page.getByRole("complementary").getByRole("button", { name: "Open console" }).click();
+      await page.waitForURL("**/terminals");
+      await terminalShows(page, "Entered container 101");
+    },
+  },
+  {
+    name: "proxmox-vm-console",
+    path: "/proxmox",
+    ready: "table",
+    async before(page) {
+      await page.getByRole("button", { name: "Manage homelab" }).click();
+      await page.getByRole("complementary").getByRole("button", { name: "Terminal on Homelab VM" }).waitFor();
+    },
+  },
   { name: "proxmox-cert", path: "/proxmox?pvecert", ready: ".alert", before: (page) => page.getByText("check its certificate").waitFor() },
   { name: "proxmox-cert-changed", path: "/proxmox?pvechanged", ready: ".alert", before: (page) => page.getByText("different certificate").waitFor() },
   { name: "proxmox-setup", path: "/proxmox?pvenotoken", ready: "form", before: (page) => page.getByText("How to make a token").waitFor() },
@@ -262,6 +284,16 @@ const SCREENS = [
     },
   },
   {
+    name: "docker-terminal",
+    path: "/docker",
+    ready: "article",
+    async before(page) {
+      await page.getByRole("button", { name: "Open a terminal in media-jellyfin-1" }).click();
+      await page.waitForURL("**/terminals");
+      await terminalShows(page, "Entered the container media-jellyfin-1");
+    },
+  },
+  {
     name: "docker-hosts",
     path: "/docker",
     ready: "article",
@@ -271,6 +303,17 @@ const SCREENS = [
     },
   },
 ];
+
+/** From the Machines screen: approve the Proxmox host's new SSH identity (the sample has it changed), so a
+ *  console can log in to it, then go to the Proxmox screen. */
+async function openProxmoxScreenLoggedIn(page) {
+  const proxmox = page.locator("article", { hasText: "Proxmox" });
+  await proxmox.getByRole("button", { name: "Approve the new identity" }).click();
+  await proxmox.getByRole("button", { name: "Yes, it matches" }).click();
+  await proxmox.getByText("This machine's identity has changed").waitFor({ state: "detached" });
+  await page.getByRole("link", { name: "Proxmox", exact: true }).click();
+  await page.locator("table").waitFor();
+}
 
 /** On the Terminals screen: open a tab on the machine with this label in the list. */
 async function openTerminalTab(page, label) {
@@ -934,6 +977,31 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "Docker: a running container's terminal opens a tab on its host that runs docker exec, and a stopped one has none",
+      path: "/docker",
+      async run(page) {
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          window.__opened = [];
+          tauri.invoke = (cmd, args, ...rest) => {
+            if (cmd === "terminal_open") window.__opened.push(args);
+            return invoke(cmd, args, ...rest);
+          };
+        });
+        if (await page.getByRole("button", { name: "Open a terminal in media-prowlarr-1" }).count()) {
+          throw new Error("a stopped container offers a terminal");
+        }
+        await page.getByRole("button", { name: "Open a terminal in media-jellyfin-1" }).click();
+        await page.waitForURL("**/terminals");
+        await page.getByRole("tab", { selected: true, name: "media-jellyfin-1 on Homelab VM" }).waitFor();
+        await terminalShows(page, "Entered the container media-jellyfin-1");
+        const opened = await page.evaluate(() => window.__opened);
+        const want = "docker exec -it media-jellyfin-1 sh -c 'command -v bash >/dev/null && exec bash || exec sh'";
+        if (opened.length !== 1 || opened[0].command !== want) throw new Error(`opened ${JSON.stringify(opened)}`);
+      },
+    },
+    {
       what: "Docker: stopping and removing a container ask first, in its row",
       path: "/docker",
       async run(page) {
@@ -1032,7 +1100,7 @@ async function checkFlows(browser, url) {
         await panel.getByRole("button", { name: "Yes, restart" }).waitFor();
         // Another guest's panel doesn't inherit the first click.
         await page.getByRole("button", { name: "Manage pihole1" }).click();
-        await panel.getByText("pihole1", { exact: true }).waitFor();
+        await panel.getByRole("heading", { name: "pihole1" }).waitFor();
         if (await panel.getByRole("button", { name: "Yes, restart" }).count()) throw new Error("a first click carried over to another guest");
       },
     },
@@ -1065,6 +1133,54 @@ async function checkFlows(browser, url) {
         if (await resume.isDisabled()) throw new Error("a hibernated VM's Resume is held back by its lock");
         await resume.click();
         await hibernated.getByText("Running").waitFor();
+      },
+    },
+    {
+      what: "Proxmox: a container's console runs pct enter on the host, and a VM offers its serial console or a terminal on its machine",
+      path: "/machines",
+      async run(page) {
+        await openProxmoxScreenLoggedIn(page);
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          window.__opened = [];
+          tauri.invoke = (cmd, args, ...rest) => {
+            if (cmd === "terminal_open") window.__opened.push(args);
+            return invoke(cmd, args, ...rest);
+          };
+        });
+        const panel = page.getByRole("complementary");
+        await page.getByRole("button", { name: "Manage homelab" }).click();
+        await panel.getByText("needs a serial port set up on the VM").waitFor();
+        await panel.getByRole("button", { name: "Serial console" }).waitFor();
+        await panel.getByRole("button", { name: "Terminal on Homelab VM" }).click();
+        await page.waitForURL("**/terminals");
+        await page.getByRole("tab", { selected: true, name: "Homelab VM" }).waitFor();
+        await page.getByRole("link", { name: "Proxmox", exact: true }).click();
+        await page.getByRole("button", { name: "Manage pihole1" }).click();
+        await panel.getByRole("button", { name: "Open console" }).click();
+        await page.waitForURL("**/terminals");
+        await page.getByRole("tab", { selected: true, name: "pihole1 (CT 101)" }).waitFor();
+        await terminalShows(page, "Entered container 101");
+        const opened = await page.evaluate(() => window.__opened.map((o) => o.command ?? null));
+        if (JSON.stringify(opened) !== JSON.stringify([null, "pct enter 101"])) throw new Error(`opened ${JSON.stringify(opened)}`);
+        // A stopped guest has no console.
+        await page.getByRole("link", { name: "Proxmox", exact: true }).click();
+        await page.getByRole("button", { name: "Manage win11-test" }).click();
+        await panel.getByRole("heading", { name: "win11-test" }).waitFor();
+        if (await panel.getByRole("button", { name: "Serial console" }).count()) throw new Error("a stopped VM offers a console");
+      },
+    },
+    {
+      what: "Proxmox: without an SSH user for the host, the console says why and links to adding one",
+      path: "/proxmox?pvenossh",
+      async run(page) {
+        await page.getByRole("button", { name: "Manage pihole1" }).click();
+        const panel = page.getByRole("complementary");
+        if (!(await panel.getByRole("button", { name: "Open console" }).isDisabled())) throw new Error("the console can be opened without an SSH user");
+        await panel.getByRole("link", { name: "Add an SSH user to Proxmox" }).click();
+        await page.waitForURL("**/machines?edit=*");
+        await page.getByRole("button", { name: "Save", exact: true }).waitFor();
       },
     },
     {

@@ -56,9 +56,22 @@ class Fake {
     if (!this.#closed) emit("terminal-output", { id: this.id, data: base64(text) });
   }
 
+  /** What the command opens, for the commands other screens start: a shell in a Docker container, a
+   *  Proxmox container, or a VM's serial console. */
+  #inside(): { what: string; prompt: string } | null {
+    const c = this.command ?? "";
+    const docker = /^docker exec -it ([a-zA-Z0-9][a-zA-Z0-9_.-]*) /.exec(c);
+    if (docker) return { what: `the container ${docker[1]} on ${this.machine.name}`, prompt: "root@3f2a9c1d7b44:/# " };
+    const ct = /^pct enter (\d+)$/.exec(c);
+    if (ct) return { what: `container ${ct[1]} on ${this.machine.name}`, prompt: `root@CT${ct[1]}:~# ` };
+    const vm = /^qm terminal (\d+)$/.exec(c);
+    if (vm) return { what: `the serial console of VM ${vm[1]} (press Ctrl+O to leave it)`, prompt: `vm${vm[1]} login: ` };
+    return null;
+  }
+
   #prompt() {
     const m = this.machine;
-    if (this.command) this.#out("/ # ");
+    if (this.command) this.#out(this.#inside()?.prompt ?? "/ # ");
     else if (m.os === "windows") this.#out(`${m.user}@${m.hostname} C:\\Users\\${m.user}>`);
     else this.#out(`${bold("32", `${m.user}@${m.hostname}`)}:${bold("34", "~")}$ `);
   }
@@ -67,6 +80,8 @@ class Fake {
     const m = this.machine;
     if (this.command) {
       this.#out(colour("2", `(sample) ${this.command}`) + "\r\n");
+      const inside = this.#inside();
+      if (inside) this.#out(`(sample) Entered ${inside.what}.\r\n`);
     } else if (m.os === "windows") {
       this.#out("Microsoft Windows [Version 10.0.26100.2605]\r\n(c) Microsoft Corporation. All rights reserved.\r\n\r\n");
     } else {

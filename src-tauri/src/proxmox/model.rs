@@ -330,9 +330,95 @@ pub fn check_node_name(name: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(format!("\"{}\" isn't a Proxmox node name.", clean(name))) }
 }
 
+/// A guest's network addresses as Proxmox knows them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestAddresses {
+    /// IPv4 addresses, in the order reported, without the guest's own loopback and
+    /// link-local ones.
+    pub addresses: Vec<String>,
+    /// Why Proxmox can't tell, when that is normal (a VM without the QEMU guest agent).
+    pub unknown_why: Option<String>,
+}
+
+/// One address as a guest reports it, if it is worth showing: IPv4, not 127.x or
+/// 169.254.x. A container reports it with its prefix ("192.168.68.31/24").
+fn usable_ipv4(text: &str) -> Option<String> {
+    let ip: std::net::Ipv4Addr = text.split('/').next()?.trim().parse().ok()?;
+    (!ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()).then(|| ip.to_string())
+}
+
+fn push_new(list: &mut Vec<String>, ip: Option<String>) {
+    if let Some(ip) = ip.filter(|ip| !list.contains(ip)) {
+        list.push(ip);
+    }
+}
+
+/// A VM's addresses from its QEMU guest agent (agent/network-get-interfaces):
+/// {"result": [{"name": "eth0", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "…"}]}]}.
+pub fn parse_agent_addresses(data: &Value) -> Vec<String> {
+    let mut found = Vec::new();
+    let interfaces = data.get("result").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    for interface in interfaces {
+        let addresses = interface.get("ip-addresses").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        for a in addresses {
+            if a.get("ip-address-type").and_then(Value::as_str).is_some_and(|t| t.eq_ignore_ascii_case("ipv4")) {
+                push_new(&mut found, a.get("ip-address").and_then(Value::as_str).and_then(usable_ipv4));
+            }
+        }
+    }
+    found
+}
+
+/// A container's addresses (lxc/<vmid>/interfaces): [{"name": "eth0", "inet": "192.168.68.31/24"}].
+pub fn parse_lxc_addresses(data: &Value) -> Vec<String> {
+    let mut found = Vec::new();
+    for interface in data.as_array().map(Vec::as_slice).unwrap_or_default() {
+        push_new(&mut found, interface.get("inet").and_then(Value::as_str).and_then(usable_ipv4));
+    }
+    found
+}
+
+/// True when Proxmox's refusal only says the VM has no guest agent running, which
+/// is normal: then it simply can't tell the VM's address.
+pub fn no_guest_agent(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("guest agent") && (m.contains("not running") || m.contains("not configured") || m.contains("no qemu"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_guest_addresses() {
+        let agent = serde_json::json!({"result": [
+            {"name": "lo", "ip-addresses": [
+                {"ip-address-type": "ipv4", "ip-address": "127.0.0.1", "prefix": 8},
+                {"ip-address-type": "ipv6", "ip-address": "::1", "prefix": 128}]},
+            {"name": "ens18", "ip-addresses": [
+                {"ip-address-type": "ipv4", "ip-address": "192.168.68.35", "prefix": 24},
+                {"ip-address-type": "ipv6", "ip-address": "fe80::be24:11ff:fe3a:5510", "prefix": 64}]},
+            {"name": "docker0", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "172.17.0.1", "prefix": 16}]},
+            {"name": "odd", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "169.254.3.4"}, {"ip-address": "10.0.0.9"}]},
+            {"name": "again", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "192.168.68.35"}]}
+        ]});
+        assert_eq!(parse_agent_addresses(&agent), ["192.168.68.35", "172.17.0.1"]);
+        assert!(parse_agent_addresses(&Value::Null).is_empty());
+
+        let lxc = serde_json::json!([
+            {"name": "lo", "inet": "127.0.0.1/8", "inet6": "::1/128", "hwaddr": "00:00:00:00:00:00"},
+            {"name": "eth0", "inet": "192.168.68.31/24", "inet6": "fe80::be24:11ff:fe3a:5501/64", "hwaddr": "bc:24:11:3a:55:01"},
+            {"name": "eth1", "hwaddr": "bc:24:11:3a:55:09"},
+            {"name": "bad", "inet": "not an address"}
+        ]);
+        assert_eq!(parse_lxc_addresses(&lxc), ["192.168.68.31"]);
+        assert!(parse_lxc_addresses(&serde_json::json!({"oops": 1})).is_empty());
+
+        assert!(no_guest_agent("QEMU guest agent is not running (HTTP 500)"));
+        assert!(no_guest_agent("No QEMU guest agent configured (HTTP 500)"));
+        assert!(!no_guest_agent("Permission check failed (/vms/110, VM.Monitor) (HTTP 403)"));
+    }
 
     fn fixture(text: &str) -> Value {
         serde_json::from_str::<Value>(text).unwrap()["data"].clone()

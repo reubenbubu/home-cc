@@ -15,6 +15,14 @@ export function portText(p: Port): string {
   return `${host}→${inside}`;
 }
 
+/** A published port as the list shows it: "1900→1900/udp", and the address it is published on when that is
+ *  one address rather than all of them, which the list shows beside it with its hostname (Address). */
+export function portShown(p: Port): { text: string; ip: string | null } {
+  const inside = `${p.containerPort}/${p.protocol}`;
+  if (p.hostPort == null) return { text: inside, ip: null };
+  return { text: `${p.hostPort}→${inside}`, ip: p.hostIp?.trim() || null };
+}
+
 /** Published ports only, as the list shows them; the rest are only in the details. */
 export function publishedPorts(c: Container): Port[] {
   return c.ports.filter((p) => p.hostPort != null);
@@ -223,9 +231,18 @@ export function isLoginProblem(kind: string | undefined | null): boolean {
   return kind === "newHost" || kind === "hostKeyChanged" || kind === "auth";
 }
 
-/** The command a terminal into this container would run (for the Terminals module, once it is there). */
-export function execCommand(c: Container): string {
-  return `docker exec -it ${c.id.slice(0, 12)} sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
+/** The names Docker gives containers, and full or short container ids. Nothing else goes into a command. */
+const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const CONTAINER_ID = /^[0-9a-f]{12,64}$/;
+
+/** The command a terminal into this running container runs on its Docker host: bash if the container has it,
+ *  else sh. It is run the way the Docker screen runs docker, as the SSH user, who must be allowed to use
+ *  Docker. The container goes in by its name (easier to read), or by its id; anything that isn't a name
+ *  or id Docker could have given is refused (null) rather than quoted, so nothing odd ever reaches a shell. */
+export function execCommand(c: { id: string; name: string }): string | null {
+  const target = CONTAINER_NAME.test(c.name) && c.name.length <= 255 ? c.name : CONTAINER_ID.test(c.id) ? c.id : null;
+  if (!target) return null;
+  return `docker exec -it ${target} sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
 }
 
 /** The last part of a path, for tabs and titles. */

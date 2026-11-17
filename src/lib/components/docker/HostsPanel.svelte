@@ -8,6 +8,7 @@
   import { dockerProblem } from "$lib/docker/problem";
   import { clock } from "$lib/clock.svelte";
   import { count, relTime } from "$lib/format";
+  import Address from "../Address.svelte";
   import Icon from "../Icon.svelte";
   import Problem from "../Problem.svelte";
 
@@ -54,7 +55,7 @@
       <li>
         <div class="who">
           <strong class="ellipsis">{d?.name ?? `Device ${h.deviceId}`}</strong>
-          <span class="mono small muted">{d?.host}</span>
+          {#if d}<Address class="small muted" host={d.host} known={d.hostname} />{/if}
         </div>
         <div class="what small">
           {#if probing}

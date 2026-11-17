@@ -155,7 +155,7 @@ function homelabStacks(): MockStack[] {
         "/srv/media/.env": "PUID=1000\nPGID=1000\nTZ=Europe/London\n",
       },
       templates: [
-        { service: "jellyfin", image: "jellyfin/jellyfin:10.10", ports: [tcp(8096), exposed(8920)], health: "healthy", cpu: 12.4, memMiB: 1430, age: 4 * 86400 + 3 * 3600 },
+        { service: "jellyfin", image: "jellyfin/jellyfin:10.10", ports: [tcp(8096), { hostPort: 1900, hostIp: "192.168.68.21", containerPort: 1900, protocol: "udp" }, exposed(8920)], health: "healthy", cpu: 12.4, memMiB: 1430, age: 4 * 86400 + 3 * 3600 },
         { service: "sonarr", image: "lscr.io/linuxserver/sonarr:latest", ports: [tcp(8989)], cpu: 0.6, memMiB: 248, age: 4 * 86400 + 3 * 3600 },
         { service: "radarr", image: "lscr.io/linuxserver/radarr:latest", ports: [tcp(7878)], cpu: 0.4, memMiB: 231, age: 4 * 86400 + 3 * 3600 },
         { service: "prowlarr", image: "lscr.io/linuxserver/prowlarr:latest", ports: [tcp(9696)], state: "exited", exitCode: 0, age: 2 * 3600 },

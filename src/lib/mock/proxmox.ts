@@ -1,5 +1,5 @@
 // The sample back end's Proxmox host, shaped like the owner's: one node running the Pi-holes and the
-// monitoring container, a Home Assistant VM, a stopped test VM and a template.
+// monitoring container, a Home Assistant VM, the Homelab VM, a stopped test VM and a template.
 //
 // Extra words in the address show the states that wait for the owner:
 //   ?pvecert     first contact: the certificate must be approved
@@ -8,6 +8,7 @@
 //   ?pvenosecret a token ID is saved, but its secret isn't in the keychain
 //   ?pveperm     the token lacks permissions
 //   ?pvestates   homeassistant is paused and win11-test is hibernated
+//   ?pvenossh    the host has no SSH user, so consoles can't be opened (set in mock/index.ts)
 import type {
   GuestRef,
   PowerAction,
@@ -78,6 +79,8 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
       diskTotal: 32 * GB,
       lock: query.has("awkward") ? "backup" : null,
     }),
+    // The Homelab VM on the Machines screen (192.168.68.21) runs here.
+    guest(111, "qemu", "homelab", { cpuCount: 4, memTotal: 8 * GB, diskTotal: 128 * GB, tags: ["docker"] }),
     guest(120, "qemu", "win11-test", {
       status: "stopped",
       cpuCount: 4,
@@ -87,7 +90,9 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
     }),
     guest(9000, "qemu", "debian-12-template", { status: "stopped", template: true, cpuCount: 2, memTotal: 2 * GB, diskTotal: 3 * GB }),
   ];
-  const ages: Record<number, number> = { 101: 14 * 86400 + 3600, 102: 14 * 86400 + 3500, 103: 6 * 86400, 110: 2 * 86400 + 7200 };
+  const ages: Record<number, number> = { 101: 14 * 86400 + 3600, 102: 14 * 86400 + 3500, 103: 6 * 86400, 110: 2 * 86400 + 7200, 111: 9 * 86400 };
+  /** What each guest reports as its address while it runs. win11-test has no guest agent. */
+  const addresses: Record<number, string> = { 101: "192.168.68.31", 102: "192.168.68.32", 103: "192.168.68.33", 110: "192.168.68.35", 111: "192.168.68.21" };
   for (const g of guests) since.set(g.vmid, g.status !== "stopped" ? start - (ages[g.vmid] ?? 3600) : null);
 
   const snapshots = new Map<number, { list: ProxmoxSnapshot[]; current: string | null }>([
@@ -304,6 +309,18 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
         since.set(g.vmid, null);
       }
       return { finished: true };
+    },
+    proxmox_guest_addresses: async ({ deviceId, guest: ref }: { deviceId: number; guest: GuestRef }) => {
+      ready(deviceId);
+      const g = find(ref);
+      await sleep(200);
+      if (g.status !== "running") {
+        if (g.kind === "lxc") return { addresses: [], unknownWhy: null };
+        throw "VM " + g.vmid + " is not running (HTTP 500)";
+      }
+      const ip = addresses[g.vmid];
+      if (!ip) return { addresses: [], unknownWhy: "Proxmox can't tell this VM's address: the QEMU guest agent isn't running in it." };
+      return { addresses: [ip], unknownWhy: null };
     },
     proxmox_snapshots: async ({ deviceId, guest: ref }: { deviceId: number; guest: GuestRef }) => {
       ready(deviceId);
