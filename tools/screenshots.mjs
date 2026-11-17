@@ -83,6 +83,22 @@ const SCREENS = [
     },
   },
   { name: "settings", path: "/settings", ready: "form" },
+  // --- Proxmox ---
+  { name: "proxmox", path: "/proxmox", ready: "table" },
+  {
+    name: "proxmox-guest",
+    path: "/proxmox",
+    ready: "table",
+    async before(page) {
+      await page.getByRole("button", { name: "Manage homeassistant" }).click();
+      await page.getByText("before_2026_11", { exact: true }).waitFor();
+    },
+  },
+  { name: "proxmox-cert", path: "/proxmox?pvecert", ready: ".alert", before: (page) => page.getByText("check its certificate").waitFor() },
+  { name: "proxmox-cert-changed", path: "/proxmox?pvechanged", ready: ".alert", before: (page) => page.getByText("different certificate").waitFor() },
+  { name: "proxmox-setup", path: "/proxmox?pvenotoken", ready: "form", before: (page) => page.getByText("How to make a token").waitFor() },
+  { name: "proxmox-permission", path: "/proxmox?pveperm", ready: ".alert", before: (page) => page.getByText("Privilege Separation").waitFor() },
+  // --- end Proxmox ---
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
     name: "overview-check-problem",
@@ -541,6 +557,46 @@ async function checkFlows(browser, url) {
         if (!got.title.includes(NAS_MAC)) throw new Error(`the address's tooltip doesn't have the hardware address (it reads "${got.title}")`);
       },
     },
+    // --- Proxmox ---
+    {
+      what: "Proxmox: approving the certificate on first contact shows the VMs",
+      path: "/proxmox?pvecert",
+      async run(page) {
+        await page.getByText("check its certificate").waitFor();
+        if ((await page.locator("table").count()) !== 0) throw new Error("guests are shown before the certificate is approved");
+        await page.getByRole("button", { name: "Approve this certificate" }).click();
+        await page.getByRole("button", { name: "Yes, it matches" }).click();
+        await page.getByText("check its certificate").waitFor({ state: "detached" });
+        await page.getByText("homeassistant", { exact: true }).waitFor();
+      },
+    },
+    {
+      what: "Proxmox: a stopped VM starts, a snapshot is taken, and force stop asks first",
+      path: "/proxmox",
+      async run(page) {
+        const row = page.locator("tbody tr", { hasText: "win11-test" });
+        await row.getByRole("button", { name: "Start", exact: true }).click();
+        await row.getByText("Running").waitFor();
+
+        await page.getByRole("button", { name: "Manage win11-test" }).click();
+        const panel = page.getByRole("complementary");
+        await panel.getByText("No snapshots yet.").waitFor();
+        await panel.getByLabel("Name").fill("bad name");
+        await panel.getByRole("button", { name: "Take snapshot" }).click();
+        await panel.getByText("no spaces").waitFor();
+        await panel.getByLabel("Name").fill("before_test");
+        await panel.getByRole("button", { name: "Take snapshot" }).click();
+        await panel.getByText('Snapshot "before_test" taken.').waitFor();
+        await panel.getByText("before_test", { exact: true }).waitFor();
+
+        await panel.getByRole("button", { name: "Force stop" }).click();
+        await panel.getByRole("button", { name: "Yes, force stop" }).waitFor();
+        if (!(await row.getByText("Running").isVisible())) throw new Error("the first click on Force stop already stopped it");
+        await panel.getByRole("button", { name: "Yes, force stop" }).click();
+        await row.getByText("Stopped").waitFor();
+      },
+    },
+    // --- end Proxmox ---
   ];
   const problems = [];
   for (const flow of flows) {

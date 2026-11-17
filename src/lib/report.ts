@@ -6,7 +6,18 @@
 export const REPO_URL = "https://github.com/reubenbubu/home-cc";
 
 /** Which part of the app a problem came from. Decides where the agent is told to start looking. */
-export type Area = "stats" | "trust" | "scan" | "status" | "devices" | "secrets" | "settings" | "live" | "screen";
+export type Area =
+  | "stats"
+  | "trust"
+  | "scan"
+  | "status"
+  | "devices"
+  | "secrets"
+  | "settings"
+  | "live"
+  | "screen"
+  // Proxmox (spec 5.6)
+  | "proxmox";
 
 /** Source files to start from for each area. Paths are from the root of the repository. */
 export const AREA_FILES: Record<Area, string[]> = {
@@ -53,6 +64,13 @@ export const AREA_FILES: Record<Area, string[]> = {
   screen: [
     "the screen named under App, in src/routes/ (its +page.svelte) and the components it uses in src/lib/components/",
     "src/lib/api.ts (the shapes the back end sends)",
+  ],
+  // --- Proxmox ---
+  proxmox: [
+    "src-tauri/src/proxmox/client.rs (the HTTPS calls to the Proxmox API) and src-tauri/src/proxmox/pin.rs (the approved certificate)",
+    "src-tauri/src/proxmox/mod.rs (what each action asks Proxmox, and how failures are worded) and src-tauri/src/proxmox/model.rs (reading Proxmox's answers)",
+    "src-tauri/src/proxmox/store.rs (token ID, port and certificate per device)",
+    "src/lib/proxmox.svelte.ts, src/lib/proxmox.ts and src/routes/proxmox/ with src/lib/components/proxmox/ (the screen)",
   ],
 };
 

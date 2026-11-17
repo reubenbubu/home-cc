@@ -227,8 +227,8 @@ pub fn explain(e: ApiError, token_id: &str) -> Failure {
                 "Proxmox refused: {why}. The token {token_id} is missing a permission. A token made with \"Privilege \
                  Separation\" ticked (the default) only gets the permissions given to the token itself, not its user's. \
                  Give it the PVEAuditor role (to see nodes, storage and guests) and PVEVMAdmin (to start, stop and take \
-                 snapshots) on \"/\": in Proxmox under Datacenter > Permissions > Add > API Token Permission, or run this on \
-                 the Proxmox host: {}",
+                 snapshots) on \"/\": in Proxmox under Datacenter > Permissions > Add > API Token Permission, or run this in \
+                 the Proxmox host's shell:\n{}",
                 grant_command(token_id)
             ),
         ),

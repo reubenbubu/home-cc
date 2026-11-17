@@ -21,6 +21,8 @@ import type {
   StatsErrorKind,
   Subnet,
 } from "../api";
+// Proxmox
+import { proxmoxMock } from "./proxmox";
 
 /** How a sample device behaves when it is checked. */
 type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
@@ -747,6 +749,10 @@ export function installMock() {
       approved.add(d.id);
     },
   };
+
+  // --- Proxmox: its sample host and commands live in mock/proxmox.ts ---
+  Object.assign(commands, proxmoxMock({ find, secrets, query }, idOf("Proxmox")));
+  // --- end Proxmox ---
 
   mockIPC(
     (cmd, payload) => {
