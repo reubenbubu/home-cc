@@ -13,9 +13,8 @@ use crate::history::Check;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -45,7 +44,48 @@ pub const REAL: Pace = Pace {
 
 /// How long host names get to turn into addresses, all of them together.
 pub const NAME_WAIT: Duration = Duration::from_secs(3);
-const NAME_LOOKUPS_AT_ONCE: usize = 16;
+/// How long a name's last address is still used when a new lookup is slow.
+const NAME_KEEP: Duration = Duration::from_secs(300);
+
+/// What earlier rounds learned about host names. One slow answer from the
+/// name service should not show a device as down, and a name that takes
+/// longer to fail than a round lasts should not be asked about twice at once.
+#[derive(Debug)]
+pub struct NameMemory {
+    keep: Duration,
+    /// The last address each name turned into, and when.
+    known: HashMap<String, (Ipv4Addr, Instant)>,
+    /// Names with a lookup still out.
+    asking: HashSet<String>,
+}
+
+impl NameMemory {
+    pub fn new(keep: Duration) -> Self {
+        Self { keep, known: HashMap::new(), asking: HashSet::new() }
+    }
+
+    /// A lookup has ended, in this round or long after it.
+    fn answered(&mut self, name: &str, answer: Option<Ipv4Addr>) {
+        self.asking.remove(name);
+        match answer {
+            Some(ip) => {
+                self.known.insert(name.to_string(), (ip, Instant::now()));
+            }
+            // A clear "no such name" beats what was known before.
+            None => {
+                self.known.remove(name);
+            }
+        }
+    }
+
+    fn address(&self, name: &str) -> Option<Ipv4Addr> {
+        self.known.get(name).filter(|(_, learned)| learned.elapsed() <= self.keep).map(|(ip, _)| *ip)
+    }
+}
+
+/// The app's own memory of host names, until it closes.
+pub static NAMES: LazyLock<Arc<Mutex<NameMemory>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(NameMemory::new(NAME_KEEP))));
 
 /// Devices that have answered a ping since the app started, by inventory id.
 pub static ANSWERS_PING: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
@@ -93,40 +133,50 @@ pub async fn os_lookup(name: String) -> Option<Ipv4Addr> {
     })
 }
 
-/// Turn each target's host into an address. Names are looked up side by
-/// side, and any that are not answered within `wait` count as not found.
+/// Turn each target's host into an address. All names are looked up at the
+/// same time, so slow ones don't keep the others waiting, and the round
+/// moves on after `wait`. A name not answered by then is taken to be where
+/// `memory` last saw it, if that was not long ago, and otherwise counts as
+/// not found. Its lookup runs on, for the next round to use.
 pub async fn resolve<F, Fut>(
     targets: &[Target],
     own: &HashSet<Ipv4Addr>,
     lookup: F,
     wait: Duration,
+    memory: &Arc<Mutex<NameMemory>>,
 ) -> Vec<Probe>
 where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Option<Ipv4Addr>> + Send + 'static,
 {
     let names: BTreeSet<&str> = targets.iter().map(|t| t.host.trim()).filter(|host| is_name(host)).collect();
-    let mut found: HashMap<String, Ipv4Addr> = HashMap::new();
     if !names.is_empty() {
-        let limit = Arc::new(Semaphore::new(NAME_LOOKUPS_AT_ONCE));
         let mut lookups = JoinSet::new();
-        for name in names {
-            let (name, limit, job) = (name.to_string(), limit.clone(), lookup(name.to_string()));
-            lookups.spawn(async move {
-                let _permit = limit.acquire_owned().await.ok()?;
-                Some((name, job.await?))
-            });
-        }
-        let deadline = Instant::now() + wait;
-        while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, lookups.join_next()).await {
-            if let Ok(Some((name, ip))) = joined {
-                found.insert(name, ip);
+        {
+            let mut remembered = lock(memory);
+            let keep = remembered.keep;
+            remembered.known.retain(|_, (_, learned)| learned.elapsed() <= keep);
+            for name in names {
+                // A lookup left over from an earlier round will answer for this name.
+                if !remembered.asking.insert(name.to_string()) {
+                    continue;
+                }
+                let (name, memory, job) = (name.to_string(), memory.clone(), lookup(name.to_string()));
+                lookups.spawn(async move {
+                    let answer = job.await;
+                    lock(&memory).answered(&name, answer);
+                });
             }
         }
+        let deadline = Instant::now() + wait;
+        while let Ok(Some(_)) = tokio::time::timeout_at(deadline, lookups.join_next()).await {}
+        // The ones still out are left to finish by themselves.
+        lookups.detach_all();
     }
+    let remembered = lock(memory);
     let locate = |host: &str| match host.parse::<Ipv4Addr>() {
         Ok(ip) => place(ip, own),
-        Err(_) => found.get(host).map_or(Place::Nowhere, |ip| place(*ip, own)),
+        Err(_) => remembered.address(host).map_or(Place::Nowhere, |ip| place(ip, own)),
     };
     targets.iter().map(|t| Probe { device_id: t.device_id, place: locate(t.host.trim()) }).collect()
 }
@@ -163,8 +213,8 @@ fn state_of(table: &[Neighbour], ip: Ipv4Addr) -> Option<NeighState> {
     best
 }
 
-fn lock(set: &Mutex<BTreeSet<i64>>) -> std::sync::MutexGuard<'_, BTreeSet<i64>> {
-    set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
+    shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// One round over resolved targets. `started` is when the round began, name
@@ -198,7 +248,7 @@ pub async fn check_round<L: Lan>(
     // The table as it is before our pings stir it up. An entry that is
     // fresh now can run out while the round is under way, and the system
     // then takes longer to make up its mind than the round has time for.
-    let before = if may_use_table.is_empty() { Vec::new() } else { lan.neighbours(None).await };
+    let before = if may_use_table.is_empty() { Vec::new() } else { lan.neighbours().await };
 
     let mut seen: BTreeMap<Ipv4Addr, Seen> = BTreeMap::new();
     let mut first_ping: BTreeMap<Ipv4Addr, Instant> = BTreeMap::new();
@@ -236,7 +286,7 @@ pub async fn check_round<L: Lan>(
     let quiet: Vec<Ipv4Addr> =
         ips.iter().filter(|ip| may_use_table.contains(ip) && !seen.contains_key(ip)).copied().collect();
     if !quiet.is_empty() {
-        let table = lan.neighbours(None).await;
+        let table = lan.neighbours().await;
         let mut unsure = Vec::new();
         for ip in quiet {
             if state_of(&before, ip) == Some(NeighState::Reachable) {
@@ -253,7 +303,7 @@ pub async fn check_round<L: Lan>(
         }
         if let Some(decided) = unsure.iter().map(|(_, at)| *at).max() {
             tokio::time::sleep_until(decided.min(started + pace.longest)).await;
-            let table = lan.neighbours(None).await;
+            let table = lan.neighbours().await;
             for (ip, _) in unsure {
                 if state_of(&table, ip) == Some(NeighState::Reachable) {
                     seen.entry(ip).or_default().neighbour = true;
@@ -286,7 +336,8 @@ mod tests {
     use super::*;
     use crate::net::lan::fake::{Device, FakeLan, ip};
     use crate::net::neigh::NeighState::{Permanent, Reachable, Unconfirmed};
-    use std::sync::atomic::Ordering;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
     /// The real steps, speeded up.
     const FAST: Pace = Pace {
@@ -500,7 +551,7 @@ mod tests {
             .map(|(n, host)| Target { device_id: n as i64, host: host.to_string() })
             .collect();
         let started = std::time::Instant::now();
-        let probes = resolve(&targets, &own, lookup, Duration::from_millis(100)).await;
+        let probes = resolve(&targets, &own, lookup, Duration::from_millis(100), &memory(300_000)).await;
         assert!(started.elapsed() < Duration::from_secs(5));
         let places: Vec<Place> = probes.iter().map(|p| p.place).collect();
         let nas = Place::At(ip("192.168.68.60"));
@@ -525,6 +576,109 @@ mod tests {
             ]
         );
         assert_eq!(probes.iter().map(|p| p.device_id).collect::<Vec<_>>(), (0..15).collect::<Vec<i64>>());
+    }
+
+    /// A name memory that keeps addresses for `keep_ms` milliseconds.
+    fn memory(keep_ms: u64) -> Arc<Mutex<NameMemory>> {
+        Arc::new(Mutex::new(NameMemory::new(Duration::from_millis(keep_ms))))
+    }
+
+    fn named(hosts: &[&str]) -> Vec<Target> {
+        let target = |(n, host): (usize, &&str)| Target { device_id: n as i64, host: host.to_string() };
+        hosts.iter().enumerate().map(target).collect()
+    }
+
+    #[tokio::test]
+    async fn slow_names_do_not_keep_the_others_from_being_looked_up() {
+        // Forty switched-off machines whose names take ages to fail, and one
+        // that is on, last in line.
+        let mut hosts: Vec<String> = (0..40).map(|n| format!("off-{n:02}.local")).collect();
+        hosts.push("zz-on.local".into());
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let lookup = |name: String| async move {
+            if name.starts_with("off-") {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                return None;
+            }
+            Some(ip("192.168.68.60"))
+        };
+        let (own, wait) = (HashSet::new(), Duration::from_millis(100));
+        let probes = resolve(&named(&hosts), &own, lookup, wait, &memory(300_000)).await;
+        assert_eq!(probes.len(), 41);
+        assert_eq!(probes.last().map(|p| p.place), Some(Place::At(ip("192.168.68.60"))));
+        assert!(probes.iter().take(40).all(|p| p.place == Place::Nowhere));
+    }
+
+    /// A name service that can be made slow or empty, and counts its lookups.
+    #[derive(Default)]
+    struct NameService {
+        asked: AtomicUsize,
+        /// How long each lookup takes, in milliseconds.
+        slowness: AtomicU64,
+        /// The last part of the address it gives for every name; 0 for "no such name".
+        answer: AtomicU8,
+    }
+
+    type Lookup = Pin<Box<dyn Future<Output = Option<Ipv4Addr>> + Send>>;
+
+    impl NameService {
+        fn answering(last_part: u8) -> Arc<Self> {
+            Arc::new(Self { answer: AtomicU8::new(last_part), ..Self::default() })
+        }
+
+        fn lookup(self: &Arc<Self>) -> impl Fn(String) -> Lookup {
+            let service = self.clone();
+            move |_name| {
+                let service = service.clone();
+                Box::pin(async move {
+                    service.asked.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(service.slowness.load(Ordering::SeqCst))).await;
+                    let last_part = service.answer.load(Ordering::SeqCst);
+                    (last_part != 0).then(|| Ipv4Addr::new(192, 168, 68, last_part))
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_lookup_falls_back_on_the_last_address_for_a_while() {
+        let service = NameService::answering(60);
+        let (memory, own, targets) = (memory(400), HashSet::new(), named(&["nas.local"]));
+        let round = || resolve(&targets, &own, service.lookup(), Duration::from_millis(40), &memory);
+        let at = |addr: &str| [Probe { device_id: 0, place: Place::At(ip(addr)) }];
+
+        assert_eq!(round().await, at("192.168.68.60"));
+        // The name service turns slow (and the device moves): the round does
+        // not wait for it, and the device is checked where it was a moment ago.
+        service.slowness.store(250, Ordering::SeqCst);
+        service.answer.store(61, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        assert_eq!(round().await, at("192.168.68.60"));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        // The lookup of that round is still out, so no second one is started.
+        assert_eq!(round().await, at("192.168.68.60"));
+        assert_eq!(service.asked.load(Ordering::SeqCst), 2);
+        // Its late answer counts when it comes, and frees the name for a new lookup.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(round().await, at("192.168.68.61"));
+        assert_eq!(service.asked.load(Ordering::SeqCst), 3);
+
+        // With no answer for longer than addresses are kept, the old one is dropped.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        service.slowness.store(5_000, Ordering::SeqCst);
+        assert_eq!(round().await, at("192.168.68.61"));
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert_eq!(round().await, [Probe { device_id: 0, place: Place::Nowhere }]);
+    }
+
+    #[tokio::test]
+    async fn a_name_that_is_no_longer_known_is_forgotten_at_once() {
+        let service = NameService::answering(60);
+        let (memory, own, targets) = (memory(300_000), HashSet::new(), named(&["nas.local"]));
+        let round = || resolve(&targets, &own, service.lookup(), Duration::from_millis(40), &memory);
+        assert_eq!(round().await, [Probe { device_id: 0, place: Place::At(ip("192.168.68.60")) }]);
+        service.answer.store(0, Ordering::SeqCst);
+        assert_eq!(round().await, [Probe { device_id: 0, place: Place::Nowhere }]);
     }
 
     #[tokio::test]

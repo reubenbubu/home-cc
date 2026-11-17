@@ -2,7 +2,6 @@
 //! seen for each IP address, and how sure it still is. Reading it needs no
 //! special rights, and it is how devices that ignore ping are found.
 
-use super::ifaces::Adapter;
 use std::io;
 use std::net::Ipv4Addr;
 
@@ -23,21 +22,20 @@ pub struct Neighbour {
     pub state: NeighState,
 }
 
-/// The table for one adapter, or for all of them. Entries the system has no
-/// hardware address for are left out. Blocks briefly: call it through
-/// `spawn_blocking`.
+/// The table, for all adapters together: with two adapters on one network
+/// only the system knows which of them it sends through, and the entries are
+/// on that one. The same address can so be listed more than once. Entries the
+/// system has no hardware address for are left out. Blocks briefly: call it
+/// through `spawn_blocking`.
 #[cfg(target_os = "linux")]
-pub fn neighbours(adapter: Option<&Adapter>) -> io::Result<Vec<Neighbour>> {
+pub fn neighbours() -> io::Result<Vec<Neighbour>> {
     // The second way has no "how sure" detail, so it is only the fallback.
-    netlink_neighbours(adapter.map(|a| a.index)).or_else(|_| {
-        let text = std::fs::read_to_string("/proc/net/arp")?;
-        Ok(parse_proc_arp(&text, adapter.map(|a| a.name.as_str())))
-    })
+    netlink_neighbours().or_else(|_| Ok(parse_proc_arp(&std::fs::read_to_string("/proc/net/arp")?)))
 }
 
 /// Asks the kernel directly: no rights needed and no other program run.
 #[cfg(target_os = "linux")]
-fn netlink_neighbours(if_index: Option<u32>) -> io::Result<Vec<Neighbour>> {
+fn netlink_neighbours() -> io::Result<Vec<Neighbour>> {
     use netlink_packet_core::{NLM_F_DUMP, NLM_F_REQUEST, NetlinkMessage, NetlinkPayload};
     use netlink_packet_route::neighbour::{
         NeighbourAddress, NeighbourAttribute, NeighbourMessage, NeighbourState,
@@ -75,9 +73,6 @@ fn netlink_neighbours(if_index: Option<u32>) -> io::Result<Vec<Neighbour>> {
                 NetlinkPayload::Done(_) => return Ok(out),
                 NetlinkPayload::Error(e) => return Err(e.to_io()),
                 NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNeighbour(n)) => {
-                    if if_index.is_some_and(|index| n.header.ifindex != index) {
-                        continue;
-                    }
                     let state = match n.header.state {
                         NeighbourState::Reachable => NeighState::Reachable,
                         NeighbourState::Stale | NeighbourState::Delay | NeighbourState::Probe => {
@@ -110,17 +105,14 @@ fn netlink_neighbours(if_index: Option<u32>) -> io::Result<Vec<Neighbour>> {
 /// Reads the text of /proc/net/arp. It does not say how fresh an entry is,
 /// so every entry counts as remembered from earlier.
 #[cfg(any(target_os = "linux", test))]
-fn parse_proc_arp(text: &str, if_name: Option<&str>) -> Vec<Neighbour> {
+fn parse_proc_arp(text: &str) -> Vec<Neighbour> {
     const HAS_ADDRESS: u32 = 0x02;
     const PERMANENT: u32 = 0x04;
     let mut out = Vec::new();
     // Columns: IP address, HW type, Flags, HW address, Mask, Device.
     for line in text.lines().skip(1) {
         let columns: Vec<&str> = line.split_whitespace().collect();
-        let [ip, _, flags, mac, _, device, ..] = columns.as_slice() else { continue };
-        if if_name.is_some_and(|name| name != *device) {
-            continue;
-        }
+        let [ip, _, flags, mac, _, _, ..] = columns.as_slice() else { continue };
         let Ok(ip) = ip.parse::<Ipv4Addr>() else { continue };
         let Ok(flags) = u32::from_str_radix(flags.trim_start_matches("0x"), 16) else { continue };
         let Some(mac) = parse_mac(mac) else { continue };
@@ -146,7 +138,7 @@ fn parse_mac(text: &str) -> Option<[u8; 6]> {
 /// Windows keeps the same table; this is the call behind `arp -a`, without
 /// running it and without needing administrator rights.
 #[cfg(windows)]
-pub fn neighbours(adapter: Option<&Adapter>) -> io::Result<Vec<Neighbour>> {
+pub fn neighbours() -> io::Result<Vec<Neighbour>> {
     use windows::Win32::Foundation::{ERROR_NOT_FOUND, NO_ERROR};
     use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIpNetTable2, MIB_IPNET_TABLE2};
     use windows::Win32::Networking::WinSock::{
@@ -167,7 +159,7 @@ pub fn neighbours(adapter: Option<&Adapter>) -> io::Result<Vec<Neighbour>> {
     // SAFETY: Table is the first of NumEntries rows laid out one after another.
     let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
     for row in rows {
-        if adapter.is_some_and(|a| a.index != row.InterfaceIndex) || row.PhysicalAddressLength != 6 {
+        if row.PhysicalAddressLength != 6 {
             continue;
         }
         let state = match row.State {
@@ -189,7 +181,7 @@ pub fn neighbours(adapter: Option<&Adapter>) -> io::Result<Vec<Neighbour>> {
 
 /// Other systems: no table, so only devices that answer ping are found.
 #[cfg(not(any(target_os = "linux", windows)))]
-pub fn neighbours(_adapter: Option<&Adapter>) -> io::Result<Vec<Neighbour>> {
+pub fn neighbours() -> io::Result<Vec<Neighbour>> {
     Ok(Vec::new())
 }
 
@@ -221,10 +213,9 @@ short line
 ";
 
     #[test]
-    fn proc_arp_is_read_per_adapter() {
-        let on_eth0 = parse_proc_arp(PROC_ARP, Some("eth0"));
+    fn proc_arp_is_read_for_every_adapter() {
         assert_eq!(
-            on_eth0,
+            parse_proc_arp(PROC_ARP),
             [
                 Neighbour {
                     ip: "192.168.68.1".parse().unwrap(),
@@ -236,10 +227,14 @@ short line
                     mac: [0, 0x15, 0x5d, 0x44, 0x35, 1],
                     state: NeighState::Permanent
                 },
+                Neighbour {
+                    ip: "172.17.0.2".parse().unwrap(),
+                    mac: [0x02, 0x42, 0xac, 0x11, 0, 0x02],
+                    state: NeighState::Unconfirmed
+                },
             ]
         );
-        assert_eq!(parse_proc_arp(PROC_ARP, None).len(), 3);
-        assert!(parse_proc_arp("", None).is_empty());
+        assert!(parse_proc_arp("").is_empty());
     }
 
     #[test]
@@ -262,7 +257,7 @@ short line
     #[cfg(target_os = "linux")]
     #[test]
     fn the_real_table_can_be_read() {
-        neighbours(None).expect("neighbour table");
-        netlink_neighbours(None).expect("neighbour table straight from the kernel");
+        neighbours().expect("neighbour table");
+        netlink_neighbours().expect("neighbour table straight from the kernel");
     }
 }

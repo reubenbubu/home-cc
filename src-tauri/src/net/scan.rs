@@ -2,7 +2,7 @@
 //! neighbour table, give quiet devices a second chance, then let the
 //! neighbour table decide about the ones that never answered.
 
-use super::ifaces::{Plan, is_host_of};
+use super::ifaces::Plan;
 use super::lan::{Lan, MOST_PINGS, Pinger};
 use super::neigh::{NeighState, Neighbour, is_device_mac};
 use super::ping::PingOutcome;
@@ -157,12 +157,38 @@ impl Tally {
 
 /// The neighbour table, cut down to real devices inside the range.
 async fn read_table<L: Lan>(lan: &L, plan: &Plan) -> Vec<Neighbour> {
-    let Some(adapter) = &plan.adapter else { return Vec::new() };
-    let mut table = lan.neighbours(Some(adapter)).await;
-    table.retain(|n| {
-        is_host_of(&plan.range, n.ip) && is_device_mac(&n.mac) && !plan.own.iter().any(|(ip, _)| *ip == n.ip)
-    });
-    table
+    if plan.links.is_empty() {
+        return Vec::new();
+    }
+    devices_in_range(lan.neighbours().await, plan)
+}
+
+/// One entry for each device in the range, in address order. The table
+/// covers every adapter, so with two of them on the network an address can be
+/// in it twice: the entry the system is surest of is the one from the adapter
+/// it really sends through.
+fn devices_in_range(table: Vec<Neighbour>, plan: &Plan) -> Vec<Neighbour> {
+    let sureness = |state| match state {
+        NeighState::Reachable => 2,
+        NeighState::Permanent => 1,
+        NeighState::Unconfirmed => 0,
+    };
+    let mut surest: BTreeMap<Ipv4Addr, Neighbour> = BTreeMap::new();
+    for entry in table {
+        if !plan.is_host(entry.ip)
+            || !is_device_mac(&entry.mac)
+            || plan.own.iter().any(|(ip, _)| *ip == entry.ip)
+        {
+            continue;
+        }
+        match surest.get(&entry.ip) {
+            Some(kept) if sureness(kept.state) >= sureness(entry.state) => {}
+            _ => {
+                surest.insert(entry.ip, entry);
+            }
+        }
+    }
+    surest.into_values().collect()
 }
 
 /// Find the devices in `plan.range`. `progress` is called through the sweep
@@ -178,7 +204,9 @@ pub async fn find_devices<L: Lan>(
     let own: Vec<Ipv4Addr> = plan.own.iter().map(|(ip, _)| *ip).collect();
     // Our own address is never pinged: there is nothing to learn from it,
     // and an instant reply is the one case the Windows ping code handles badly.
-    let targets: Vec<Ipv4Addr> = plan.range.hosts().filter(|ip| !own.contains(ip)).collect();
+    let targets: Vec<Ipv4Addr> = plan.hosts().filter(|ip| !own.contains(ip)).collect();
+    // Without an adapter on the range there is no neighbour table to read.
+    let on_link = !plan.links.is_empty();
     let cancelled = || cancel.load(Ordering::Relaxed);
     let report = |phase, done, total, found: usize| {
         progress(ScanProgress { phase, done, total, found: found + own.len() })
@@ -223,7 +251,7 @@ pub async fn find_devices<L: Lan>(
                 done += 1;
                 report(ScanPhase::Sweep, done, targets.len(), tally.len());
             }
-            _ = ticker.tick(), if plan.adapter.is_some() => {
+            _ = ticker.tick(), if on_link => {
                 let table = read_table(&*lan, plan).await;
                 copied.extend(table.iter().map(|n| n.ip));
                 tally.learn(&table);
@@ -276,7 +304,7 @@ pub async fn find_devices<L: Lan>(
     //    remembered addresses, then look once more. Some pings failing to
     //    send is the other reason: their lookups may still come in.
     let some_failed = counters.ping_errors > 0 && counters.ping_errors < counters.pinged;
-    if (!unsure.is_empty() || some_failed) && plan.adapter.is_some() && !cancelled() {
+    if (!unsure.is_empty() || some_failed) && on_link && !cancelled() {
         counters.waited_to_settle = true;
         let until = Instant::now() + timing.settle;
         while Instant::now() < until && !cancelled() {
@@ -307,7 +335,7 @@ pub async fn find_devices<L: Lan>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::ifaces::Adapter;
+    use crate::net::ifaces::{Adapter, Link};
     use crate::net::lan::fake::{Device, FakeLan, ip};
     use crate::net::neigh::NeighState::{Permanent, Reachable, Unconfirmed};
     use std::sync::Mutex;
@@ -321,10 +349,17 @@ mod tests {
         sample_every: Duration::from_millis(10),
     };
 
+    /// A plan for a range that is this PC's whole network.
     fn plan(range: &str, own: &[&str]) -> Plan {
+        plan_on(range, range, own)
+    }
+
+    /// A plan for a range, with this PC on the network `net`.
+    fn plan_on(range: &str, net: &str, own: &[&str]) -> Plan {
+        let adapter = Adapter { index: 2, name: "eth0".into() };
         Plan {
             range: range.parse().unwrap(),
-            adapter: Some(Adapter { index: 2, name: "eth0".into() }),
+            links: vec![Link { adapter, net: net.parse().unwrap() }],
             own: own.iter().map(|addr| (ip(addr), Some([2, 0, 0, 0, 0, 0xee]))).collect(),
         }
     }
@@ -462,7 +497,7 @@ mod tests {
             ("10.9.0.6", Device::new(6).state(Reachable)),
         ]);
         let mut plan = plan("10.9.0.0/28", &[]);
-        plan.adapter = None;
+        plan.links.clear();
         let swept = run(&lan, &plan).await;
         assert_eq!(summary(&swept), [("10.9.0.5".into(), false, true, false)]);
         assert_eq!(swept.counters.table_copies, 0);
@@ -485,6 +520,122 @@ mod tests {
             summary(&swept),
             [("10.0.0.3".into(), true, false, true), ("10.0.0.7".into(), true, false, false)]
         );
+    }
+
+    #[test]
+    fn of_two_table_entries_for_one_address_the_surest_is_kept() {
+        let entry = |addr: &str, last_mac_byte, state| Neighbour {
+            ip: ip(addr),
+            mac: [2, 0, 0, 0, 0, last_mac_byte],
+            state,
+        };
+        let table = vec![
+            // The same devices as two adapters see them, in either order.
+            entry("10.0.0.5", 1, Unconfirmed),
+            entry("10.0.0.5", 2, Reachable),
+            entry("10.0.0.4", 3, Reachable),
+            entry("10.0.0.4", 4, Unconfirmed),
+            entry("10.0.0.6", 5, Unconfirmed),
+            entry("10.0.0.6", 6, Permanent),
+            // Equally sure: the first one stays.
+            entry("10.0.0.7", 7, Unconfirmed),
+            entry("10.0.0.7", 8, Unconfirmed),
+            // This PC, a group address and an address outside the range.
+            entry("10.0.0.3", 9, Reachable),
+            Neighbour { ip: ip("10.0.0.8"), mac: [0x01, 0, 0x5e, 0, 0, 0xfb], state: Permanent },
+            entry("10.0.0.16", 10, Reachable),
+        ];
+        let kept = devices_in_range(table, &plan("10.0.0.0/28", &["10.0.0.3"]));
+        let expected = [
+            entry("10.0.0.4", 3, Reachable),
+            entry("10.0.0.5", 2, Reachable),
+            entry("10.0.0.6", 6, Permanent),
+            entry("10.0.0.7", 7, Unconfirmed),
+        ];
+        assert_eq!(kept, expected);
+    }
+
+    /// A PC with a cable and Wi-Fi on the same network: the system sends
+    /// through one of them, and what it learns is listed under that one.
+    #[tokio::test]
+    async fn hardware_addresses_on_any_adapter_of_the_network_are_seen() {
+        let lan = FakeLan::with(vec![
+            ("10.0.0.1", Device::new(1).answers(2)),
+            // The adapter that is not used still remembers this one from earlier.
+            ("10.0.0.9", Device::new(0x99).state(Unconfirmed)),
+            ("10.0.0.10", Device::new(10)),
+        ]);
+        let on_other_adapter = |addr: &str, last_mac_byte| Neighbour {
+            ip: ip(addr),
+            mac: [2, 0, 0, 0, 0, last_mac_byte],
+            state: Reachable,
+        };
+        *lan.other_adapter.lock().unwrap() = vec![
+            on_other_adapter("10.0.0.1", 1),
+            on_other_adapter("10.0.0.9", 9),
+            on_other_adapter("10.0.0.10", 10),
+        ];
+        let mut plan = plan("10.0.0.0/28", &[]);
+        let net = plan.range;
+        plan.links.insert(0, Link { adapter: Adapter { index: 7, name: "wlan0".into() }, net });
+        let swept = run(&lan, &plan).await;
+        // The one that answers ping has its hardware address, and the two
+        // that don't are found at all.
+        assert_eq!(
+            summary(&swept),
+            [
+                ("10.0.0.1".into(), true, true, false),
+                ("10.0.0.9".into(), true, false, false),
+                ("10.0.0.10".into(), true, false, false),
+            ]
+        );
+        // The fresh entry wins over the remembered one, so there was nothing to wait for.
+        let fresh = swept.hits.iter().find(|h| h.ip == ip("10.0.0.9")).and_then(|h| h.mac);
+        assert_eq!(fresh, Some([2, 0, 0, 0, 0, 9]));
+        assert!(!swept.counters.waited_to_settle);
+    }
+
+    #[tokio::test]
+    async fn part_of_a_bigger_network_is_scanned_to_both_its_ends() {
+        // The first and last address of the part are ordinary devices here.
+        let lan = FakeLan::with(vec![
+            ("10.0.4.0", Device::new(1).answers(2).state(Reachable)),
+            ("10.0.4.15", Device::new(2).state(Reachable)),
+        ]);
+        let swept = run(&lan, &plan_on("10.0.4.0/28", "10.0.0.0/16", &["10.0.4.9"])).await;
+        assert_eq!(
+            summary(&swept),
+            [
+                ("10.0.4.0".into(), true, true, false),
+                ("10.0.4.9".into(), true, false, true),
+                ("10.0.4.15".into(), true, false, false),
+            ]
+        );
+        assert_eq!(swept.counters.pinged, 15);
+    }
+
+    #[tokio::test]
+    async fn the_networks_own_two_addresses_inside_a_wider_range_are_left_alone() {
+        // This PC is on 10.0.1.0/29; the owner typed a range twice as wide.
+        let lan = FakeLan::with(vec![
+            ("10.0.1.0", Device::new(1).answers(1).state(Reachable)),
+            ("10.0.1.7", Device::new(2).answers(1).state(Reachable)),
+            ("10.0.1.6", Device::new(3).answers(1).state(Reachable)),
+            // Behind the router: it answers, but has no hardware address here.
+            ("10.0.1.8", Device::new(4).answers(1)),
+        ]);
+        let swept = run(&lan, &plan_on("10.0.1.0/28", "10.0.1.0/29", &["10.0.1.2"])).await;
+        assert_eq!(
+            summary(&swept),
+            [
+                ("10.0.1.2".into(), true, false, true),
+                ("10.0.1.6".into(), true, true, false),
+                ("10.0.1.8".into(), false, true, false),
+            ]
+        );
+        // Neither the network's first address nor the one that reaches everybody was pinged.
+        assert_eq!(lan.pings_to("10.0.1.0") + lan.pings_to("10.0.1.7"), 0);
+        assert_eq!(swept.counters.pinged, 12);
     }
 
     #[tokio::test]

@@ -155,12 +155,13 @@ pub async fn scan_raw(
 }
 
 fn notes(plan: &ifaces::Plan, c: &scan::Counters) -> Vec<String> {
-    let adapter = match &plan.adapter {
-        Some(a) => format!("adapter {} (number {})", a.name, a.index),
-        None => "no adapter on this range: it is reached through a router, so no hardware addresses".into(),
+    let on = |l: &ifaces::Link| format!("{} (number {}) on {}", l.adapter.name, l.adapter.index, l.net);
+    let adapters = match plan.links.as_slice() {
+        [] => "no adapter on this range: it is reached through a router, so no hardware addresses".into(),
+        links => format!("adapters on this range: {}", links.iter().map(on).collect::<Vec<_>>().join(", ")),
     };
     vec![
-        adapter,
+        adapters,
         format!(
             "{} addresses pinged, {} answered in the sweep, {} pings failed to send",
             c.pinged, c.answered_in_sweep, c.ping_errors
@@ -216,13 +217,17 @@ fn decorate(raw: RawFound, names: &HashMap<Ipv4Addr, String>) -> Found {
 /// Check each device once. One result per target, in any order. A device is
 /// up if it answers ping (with a retry, so Wi-Fi devices don't flap) or, for
 /// devices that never answer ping, if the neighbour table shows it is there.
-/// A host name that doesn't resolve counts as down. Never fails as a whole.
+/// A host name that doesn't resolve counts as down; one whose lookup is slow
+/// is checked at the address it had in the last few minutes. Never fails as
+/// a whole.
 ///
 /// A round takes a moment when everything answers, about 4 seconds when
-/// something is down, and 12 at the very most. It remembers (until the app
-/// closes) which devices have answered ping: for those a missing reply means
-/// down at once, without asking the neighbour table. This PC's own addresses
-/// are never pinged and always up. Must run inside the tokio runtime.
+/// something is down, and 12 at the most (a few more only if the system
+/// loses track of a ping, which is then given up on). It remembers (until
+/// the app closes) which devices have answered ping: for those a missing
+/// reply means down at once, without asking the neighbour table. This PC's
+/// own addresses are never pinged and always up. Must run inside the tokio
+/// runtime.
 pub async fn check(targets: Vec<Target>) -> Vec<Check> {
     if targets.is_empty() {
         return Vec::new();
@@ -230,7 +235,8 @@ pub async fn check(targets: Vec<Target>) -> Vec<Check> {
     let started = tokio::time::Instant::now();
     let interfaces = tokio::task::spawn_blocking(netdev::get_interfaces).await.unwrap_or_default();
     let own = ifaces::own_ips(&interfaces);
-    let probes = status::resolve(&targets, &own, status::os_lookup, status::NAME_WAIT).await;
+    let probes =
+        status::resolve(&targets, &own, status::os_lookup, status::NAME_WAIT, &status::NAMES).await;
     status::check_round(Arc::new(lan::OsLan), &probes, &status::REAL, &status::ANSWERS_PING, started).await
 }
 

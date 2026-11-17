@@ -2,7 +2,6 @@
 //! and read the neighbour table. They sit behind a trait so the logic built
 //! on them can be tested against a made-up network.
 
-use super::ifaces::Adapter;
 use super::neigh::{self, Neighbour};
 use super::ping::{self, PingOutcome};
 use std::future::Future;
@@ -17,12 +16,17 @@ use tokio::sync::{Semaphore, mpsc};
 /// overflowing: 128 did overflow it on Linux, and pings then fail to send.
 pub const MOST_PINGS: usize = 64;
 
+/// How long past its own timeout a ping is waited for before it is given up on.
+const PING_GRACE: Duration = Duration::from_secs(3);
+
 pub trait Lan: Send + Sync + 'static {
-    /// One ping. Returns within about `timeout`.
+    /// One ping. It must come back soon after `timeout` whatever happens:
+    /// scans and status rounds wait for every ping they start.
     fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> impl Future<Output = io::Result<PingOutcome>> + Send;
 
-    /// The neighbour table of one adapter, or of all. Empty when it can't be read.
-    fn neighbours(&self, adapter: Option<&Adapter>) -> impl Future<Output = Vec<Neighbour>> + Send;
+    /// The neighbour table of all adapters together, so the same address can
+    /// be in it more than once. Empty when it can't be read.
+    fn neighbours(&self) -> impl Future<Output = Vec<Neighbour>> + Send;
 }
 
 /// The real network, through the operating system.
@@ -34,15 +38,34 @@ static PING_SLOTS: Semaphore = Semaphore::const_new(MOST_PINGS);
 
 impl Lan for OsLan {
     async fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> io::Result<PingOutcome> {
-        let _slot = PING_SLOTS.acquire().await.map_err(io::Error::other)?;
-        ping::ping_once(ip, timeout).await
+        in_slot(&PING_SLOTS, timeout + PING_GRACE, ping::ping_once(ip, timeout)).await
     }
 
-    async fn neighbours(&self, adapter: Option<&Adapter>) -> Vec<Neighbour> {
-        let adapter = adapter.cloned();
-        let read = tokio::task::spawn_blocking(move || neigh::neighbours(adapter.as_ref())).await;
+    async fn neighbours(&self) -> Vec<Neighbour> {
+        let read = tokio::task::spawn_blocking(neigh::neighbours).await;
         // A scan without hardware addresses is still worth more than no scan.
         read.ok().and_then(Result::ok).unwrap_or_default()
+    }
+}
+
+/// Run `ping` in one of `slots`, as a task of its own, and wait for it no
+/// longer than `longest`.
+///
+/// The ping has a timeout of its own, but on Windows that one is kept by the
+/// system, and a request the system never answers would otherwise hang the
+/// scan or status round that sent it and keep its slot until the app is
+/// closed. Such a ping is never stopped (see `ping::ping_once` for why): it
+/// is left to end by itself, and only the waiting and the slot are given up.
+async fn in_slot(
+    slots: &Semaphore,
+    longest: Duration,
+    ping: impl Future<Output = io::Result<PingOutcome>> + Send + 'static,
+) -> io::Result<PingOutcome> {
+    let _slot = slots.acquire().await.map_err(io::Error::other)?;
+    // Dropping the handle of a task lets it run on; it does not stop it.
+    match tokio::time::timeout(longest, tokio::spawn(ping)).await {
+        Ok(ended) => ended.map_err(io::Error::other)?,
+        Err(_) => Err(io::Error::other("the ping never came back")),
     }
 }
 
@@ -52,7 +75,8 @@ type Finished = (Ipv4Addr, io::Result<PingOutcome>);
 ///
 /// Each ping is its own task that is never stopped early, even when the
 /// `Pinger` is dropped: a ping that has started always runs to its end (see
-/// `ping::ping_once` for why that matters on Windows).
+/// `ping::ping_once` for why that matters on Windows). The `Pinger` waits for
+/// every one of them, which `Lan::ping` keeps short.
 pub struct Pinger<L> {
     lan: Arc<L>,
     limit: usize,
@@ -210,6 +234,8 @@ pub mod fake {
         pub table_reads: AtomicUsize,
         /// When set, every ping fails outright, as on a PC that forbids them.
         broken: bool,
+        /// Rows a second adapter adds to every table read, after the devices' own.
+        pub other_adapter: Mutex<Vec<Neighbour>>,
     }
 
     pub fn ip(text: &str) -> Ipv4Addr {
@@ -267,7 +293,7 @@ pub mod fake {
             outcome
         }
 
-        async fn neighbours(&self, _adapter: Option<&Adapter>) -> Vec<Neighbour> {
+        async fn neighbours(&self) -> Vec<Neighbour> {
             self.table_reads.fetch_add(1, Ordering::SeqCst);
             let mut devices = self.devices.lock().unwrap();
             let mut table = Vec::new();
@@ -277,6 +303,7 @@ pub mod fake {
                     table.push(Neighbour { ip: *ip, mac: device.mac, state });
                 }
             }
+            table.extend(self.other_adapter.lock().unwrap().iter().cloned());
             table
         }
     }
@@ -331,5 +358,64 @@ pub mod fake {
             }
         };
         tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the ping never finished");
+    }
+
+    #[tokio::test]
+    async fn a_ping_that_never_comes_back_is_given_up_on_but_not_stopped() {
+        let slots = Semaphore::new(1);
+        let ended = Arc::new(AtomicUsize::new(0));
+        let stuck = {
+            let ended = ended.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                ended.fetch_add(1, Ordering::SeqCst);
+                Ok(PingOutcome::Timeout)
+            }
+        };
+        let started = std::time::Instant::now();
+        let outcome = in_slot(&slots, Duration::from_millis(30), stuck).await;
+        assert!(outcome.is_err() && started.elapsed() < Duration::from_millis(140), "{outcome:?}");
+        // The only slot is free again for the next ping...
+        let quick = async { Ok(PingOutcome::Up(Duration::from_millis(1))) };
+        let outcome = in_slot(&slots, Duration::from_millis(30), quick).await;
+        assert_eq!(outcome.ok(), Some(PingOutcome::Up(Duration::from_millis(1))));
+        // ...and the one given up on still ran to its own end.
+        assert_eq!(ended.load(Ordering::SeqCst), 0);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(ended.load(Ordering::SeqCst), 1);
+    }
+
+    /// With every slot taken by a ping that never comes back, the pings
+    /// queued behind them still get their turn and the `Pinger` still ends.
+    #[tokio::test]
+    async fn stuck_pings_do_not_hold_up_the_ones_behind_them() {
+        struct StuckLan(Semaphore);
+        impl Lan for StuckLan {
+            async fn ping(&self, ip: Ipv4Addr, timeout: Duration) -> io::Result<PingOutcome> {
+                // Odd addresses hang for ever; even ones answer at once.
+                let stuck = ip.octets()[3] % 2 == 1;
+                let ping = async move {
+                    if stuck {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(PingOutcome::Up(Duration::from_millis(1)))
+                };
+                in_slot(&self.0, timeout, ping).await
+            }
+
+            async fn neighbours(&self) -> Vec<Neighbour> {
+                Vec::new()
+            }
+        }
+        let ips: Vec<Ipv4Addr> = [1, 3, 5, 7, 2, 4].map(|n| Ipv4Addr::new(10, 0, 0, n)).to_vec();
+        let (mut up, mut failed) = (0, 0);
+        let mut pinger = Pinger::new(Arc::new(StuckLan(Semaphore::new(2))), 6);
+        let record = |_, outcome: io::Result<PingOutcome>| match outcome {
+            Ok(_) => up += 1,
+            Err(_) => failed += 1,
+        };
+        let all = pinger.run(&ips, Duration::from_millis(40), |_| true, record);
+        tokio::time::timeout(Duration::from_secs(10), all).await.expect("the pings were waited for for ever");
+        assert_eq!((up, failed), (2, 4));
     }
 }
