@@ -131,9 +131,9 @@
       }
       editing = null;
       password = "";
-      // Show the effect of a new user or password straight away instead of after the next timer.
+      // Saving a machine or its password makes the back end read it again by itself, and the result
+      // arrives as a "stats-changed" event; this only clears what the old entry showed.
       stats.load();
-      if (saved.sshUser && saved.kind !== "ignore") stats.refresh(saved.id);
     } catch (err) {
       formError = errorText(err);
     } finally {

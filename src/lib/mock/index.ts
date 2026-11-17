@@ -339,6 +339,8 @@ export function installMock() {
   // SSH identities. Each machine presents one; home-cc stores the one it accepts.
   const serverKeys = new Map<number, HostKey>();
   const pinned = new Map<number, HostKey>();
+  /** Machines whose stored identity the owner has approved: only these are sent the password. */
+  const approved = new Set<number>();
   function serverKey(d: MockDevice): HostKey {
     let key = serverKeys.get(d.id);
     if (!key) serverKeys.set(d.id, (key = sampleKey(d.id * 104729)));
@@ -348,7 +350,7 @@ export function installMock() {
   const say = {
     changed: (was: HostKey, now: HostKey) =>
       `This machine's identity has changed since home-cc first reached it (was ${was.fingerprint}, now ${now.fingerprint})`,
-    newHost: "This is the first connection to this machine, so the stored password was not sent. Approve this machine's identity first.",
+    newHost: "The stored password has not been sent: this machine's identity needs your approval first.",
     auth: (d: MockDevice) =>
       `Couldn't log in as ${d.sshUser}. Tried the key file id_ed25519 and the ssh-agent; ` +
       (hasPassword(d) ? "the stored password was refused too." : "no password is stored for this machine."),
@@ -381,7 +383,10 @@ export function installMock() {
   };
   // Machines that have been reached before have their identity stored.
   for (const d of devices) {
-    if (d.sshUser && d.name !== "Dev VM" && d.name !== "Media PC") pinned.set(d.id, serverKey(d));
+    if (d.sshUser && d.name !== "Dev VM" && d.name !== "Media PC") {
+      pinned.set(d.id, serverKey(d));
+      if (d.access === "password") approved.add(d.id);
+    }
   }
   entry("Main PC", 21);
   entry("NAS", 20);
@@ -432,12 +437,14 @@ export function installMock() {
       next = failed("unreachable", `Couldn't reach ${d.host}: nothing answered on port ${d.sshPort}. Is SSH turned on there?`);
     } else if (known && known.fingerprint !== key.fingerprint) {
       next = failed("hostKeyChanged", say.changed(known, key), { offeredKey: key, expectedFingerprint: known.fingerprint });
-    } else if (!known && needsPassword && hasPassword(d)) {
-      // Waiting for the owner, so not tried again by the timer.
-      next = failed("newHost", say.newHost, { offeredKey: key, paused: true });
+    } else if (needsPassword && hasPassword(d) && !approved.has(d.id)) {
+      // The identity is remembered, but the password waits for the owner's approval, and the timer
+      // doesn't try again by itself.
+      if (!known && !pinned.has(d.id)) pinned.set(d.id, key);
+      next = failed("newHost", say.newHost, { offeredKey: known ?? key, paused: true });
     } else {
-      // First use with nothing reusable at stake: the identity is stored before the login is tried.
-      // The first one stored stays: an approval given while this try was under way is not overwritten.
+      // The identity is remembered on first contact, before the login is tried. The first one stored
+      // stays: an approval given while this try was under way is not overwritten.
       if (!known && !pinned.has(d.id)) pinned.set(d.id, key);
       if (needsPassword && !hasPassword(d)) {
         next = failed("auth", say.auth(d), { paused: true });
@@ -639,6 +646,7 @@ export function installMock() {
       }
       // Pointed somewhere else: the stored identity belonged to the old place, so first-use rules apply again.
       if (moved || sshPort !== d.sshPort) pinned.delete(d.id);
+      approved.delete(d.id);
       Object.assign(d, {
         name: input.name.trim(),
         host,
@@ -665,6 +673,7 @@ export function installMock() {
       histories.delete(id);
       entries.delete(id);
       pinned.delete(id);
+      approved.delete(id);
       serverKeys.delete(id);
       secrets.delete(`ssh-password:${id}`);
     },
@@ -734,6 +743,7 @@ export function installMock() {
       }
       // Exactly the identity the owner was shown, replacing any stored before.
       pinned.set(d.id, offered);
+      approved.add(d.id);
     },
   };
 

@@ -79,8 +79,7 @@ pub fn remove_device(app: AppHandle, inv: State<Inventory>, monitor: State<Monit
 #[tauri::command(async)]
 pub fn set_secret(monitor: State<Monitor>, key: String, value: String) -> Result<()> {
     secrets::set(&key, &value)?;
-    // A new password or passphrase may be what a failed login was missing.
-    monitor.retry_logins();
+    retry_after_secret(&monitor, &key);
     Ok(())
 }
 
@@ -92,8 +91,18 @@ pub fn has_secret(key: String) -> Result<bool> {
 #[tauri::command(async)]
 pub fn delete_secret(monitor: State<Monitor>, key: String) -> Result<()> {
     secrets::delete(&key)?;
-    monitor.retry_logins();
+    retry_after_secret(&monitor, &key);
     Ok(())
+}
+
+/// A new password or passphrase may be what a failed login was missing: try
+/// again the machines it is for, and no others.
+fn retry_after_secret(monitor: &Monitor, key: &str) {
+    if let Some(device_id) = monitor::password_owner(key) {
+        monitor.retry_login(device_id);
+    } else if key == monitor::KEY_PASSPHRASE {
+        monitor.retry_logins();
+    }
 }
 
 // --- Settings ---
@@ -105,7 +114,12 @@ pub fn get_settings(inv: State<Inventory>) -> Result<Settings> {
 
 #[tauri::command]
 pub fn save_settings(inv: State<Inventory>, monitor: State<Monitor>, settings: Settings) -> Result<Settings> {
+    let key_file_before = inv.settings().ok().map(|s| s.ssh_key_path);
     let saved = inv.save_settings(settings)?;
+    // A different key file may be what a failed login was missing.
+    if key_file_before.as_deref() != Some(saved.ssh_key_path.as_str()) {
+        monitor.retry_logins();
+    }
     // Pick up new timers straight away.
     monitor.wake();
     Ok(saved)

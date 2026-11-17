@@ -525,7 +525,7 @@ mod tests {
         let checks = round(&lan, targets, &kept).await.unwrap();
         assert_eq!(checks, [down(1), up(2, Some(3.0)), up(3, Some(3.0))]);
         // The phone is not remembered as a device that answers ping.
-        assert_eq!(*kept.answers_ping.lock().unwrap(), BTreeSet::from([2, 3]));
+        assert_eq!(kept.answers_ping.lock().unwrap().keys().copied().collect::<Vec<_>>(), [2, 3]);
     }
 
     #[tokio::test]

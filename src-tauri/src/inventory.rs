@@ -450,6 +450,17 @@ impl Inventory {
     /// Something found with a hardware address never takes over a device
     /// stored with a different one: that is a new device on a reused IP.
     pub fn record_scan(&self, found: &[Found], at: i64, named: &HashMap<String, i64>) -> Result<ScanSaved> {
+        self.record_scan_ids(found, at, named).map(|(saved, _)| saved)
+    }
+
+    /// `record_scan`, also giving the ids of the devices it added.
+    pub fn record_scan_ids(
+        &self,
+        found: &[Found],
+        at: i64,
+        named: &HashMap<String, i64>,
+    ) -> Result<(ScanSaved, Vec<i64>)> {
+        let mut added_ids = Vec::new();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let macs: Vec<Option<String>> = found.iter().map(|f| f.mac.as_deref().and_then(normalize_mac)).collect();
@@ -502,12 +513,13 @@ impl Inventory {
                         params![name, f.ip, kind.as_str(), mac, f.vendor, f.hostname, at],
                     )?;
                     matched.insert(tx.last_insert_rowid());
+                    added_ids.push(tx.last_insert_rowid());
                     saved.added += 1;
                 }
             }
         }
         tx.commit()?;
-        Ok(saved)
+        Ok((saved, added_ids))
     }
 }
 
@@ -1197,14 +1209,14 @@ mod tests {
         // The old identities are gone, and one can be stored for a device.
         assert_eq!(inv.host_key(nas).unwrap(), None);
         let key = HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into() };
-        inv.remember_host_key(nas, &key).unwrap();
+        inv.remember_host_key(nas, "192.168.68.20", 22, &key).unwrap();
         assert_eq!(inv.host_key(nas).unwrap(), Some(key.clone()));
         // Changing a device's address, which removes its identity, works too.
         let d = inv.update(nas, input("nas", "192.168.68.21")).unwrap();
         assert_eq!((d.host.as_str(), inv.host_key(nas).unwrap()), ("192.168.68.21", None));
 
         // Opening again leaves the table and what is in it alone.
-        inv.remember_host_key(nas, &key).unwrap();
+        inv.remember_host_key(nas, "192.168.68.21", 22, &key).unwrap();
         let inv = Inventory::from_conn(inv.conn.into_inner().unwrap()).unwrap();
         assert_eq!(inv.host_key(nas).unwrap(), Some(key));
     }

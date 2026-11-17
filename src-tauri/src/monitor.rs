@@ -23,13 +23,20 @@ pub const EVENT_STATS: &str = "stats-changed";
 pub const EVENT_SCAN: &str = "scan-progress";
 
 /// Keychain entry for the SSH key passphrase.
-const KEY_PASSPHRASE: &str = "ssh-key-passphrase";
+pub const KEY_PASSPHRASE: &str = "ssh-key-passphrase";
+/// The shortest pause between two rounds of a timer, however it was woken.
+const MIN_GAP: Duration = Duration::from_secs(2);
 /// Machines read at the same time.
 const STATS_AT_ONCE: usize = 4;
 
 /// Keychain entry for one machine's SSH password.
 pub fn password_key(device_id: i64) -> String {
     format!("ssh-password:{device_id}")
+}
+
+/// The machine a keychain entry made by `password_key` belongs to.
+pub fn password_owner(key: &str) -> Option<i64> {
+    key.strip_prefix("ssh-password:")?.parse().ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -166,10 +173,14 @@ impl Monitor {
                 // Problems are kept for the screens (see `check_problem`).
                 monitor.check_round(&handle).await.ok();
                 let secs = handle.state::<Inventory>().settings().map(|s| s.ping_interval_secs).unwrap_or(30);
-                let next = tokio::time::Instant::from_std(started + Duration::from_secs(secs.into()));
+                // Never straight into the next round: a round that overran, or
+                // several wake-ups in a row, must not turn into a busy loop.
+                let floor = tokio::time::Instant::now() + MIN_GAP;
+                let next = tokio::time::Instant::from_std(started + Duration::from_secs(secs.into())).max(floor);
                 tokio::select! {
+                    biased;
+                    _ = monitor.wake_checks.notified() => tokio::time::sleep_until(floor).await,
                     _ = tokio::time::sleep_until(next) => {}
-                    _ = monitor.wake_checks.notified() => {}
                 }
             }
         });
@@ -181,10 +192,14 @@ impl Monitor {
                 let monitor = handle.state::<Monitor>();
                 monitor.stats_round(&handle).await;
                 let secs = handle.state::<Inventory>().settings().map(|s| s.stats_interval_secs).unwrap_or(60);
-                let next = tokio::time::Instant::from_std(started + Duration::from_secs(secs.into()));
+                // Never straight into the next round: a round that overran, or
+                // several wake-ups in a row, must not turn into a busy loop.
+                let floor = tokio::time::Instant::now() + MIN_GAP;
+                let next = tokio::time::Instant::from_std(started + Duration::from_secs(secs.into())).max(floor);
                 tokio::select! {
+                    biased;
+                    _ = monitor.wake_stats.notified() => tokio::time::sleep_until(floor).await,
                     _ = tokio::time::sleep_until(next) => {}
-                    _ = monitor.wake_stats.notified() => {}
                 }
             }
         });
@@ -244,7 +259,19 @@ impl Monitor {
         };
         let outcome = net::scan(&range, progress, self.cancel_scan.clone()).await?;
         let named = named_devices(app, &outcome.found).await?;
-        let saved = app.state::<Inventory>().record_scan(&outcome.found, now(), &named)?;
+        let (saved, added) = app.state::<Inventory>().record_scan_ids(&outcome.found, now(), &named)?;
+        // Ids start again in a new database, so a password left in the
+        // keychain by an earlier one must not end up belonging to a device
+        // this scan just added. Done before the screens hear of the devices.
+        if !added.is_empty() {
+            tauri::async_runtime::spawn_blocking(move || {
+                for id in added {
+                    secrets::delete(&password_key(id)).ok();
+                }
+            })
+            .await
+            .ok();
+        }
 
         drop(quiet);
 
@@ -287,8 +314,16 @@ impl Monitor {
         self.stats.lock().unwrap().remove(&device_id);
     }
 
-    /// Let the timer try every machine again, after something that could fix
-    /// a failed login changed (a secret was stored or removed).
+    /// Let the timer try one machine again, after its password changed.
+    pub fn retry_login(&self, device_id: i64) {
+        if let Some(state) = self.stats.lock().unwrap().get_mut(&device_id) {
+            state.entry.paused = false;
+        }
+        self.wake_stats.notify_one();
+    }
+
+    /// Let the timer try every machine again, after something they all share
+    /// changed (the key file, or its passphrase).
     pub fn retry_logins(&self) {
         for state in self.stats.lock().unwrap().values_mut() {
             state.entry.paused = false;
@@ -361,36 +396,48 @@ impl Monitor {
         };
         let prev_ticks = self.stats.lock().unwrap().get(&device_id).and_then(|s| s.ticks);
         let login = login_for(app, &device).await;
-        // The identity the machine shows on a first connection, kept in case
-        // the owner has to be asked about it.
+        // A machine reached for the first time has its identity remembered
+        // before anything else happens, so a later change is noticed even if
+        // the login never works. Remembered is not approved: the password
+        // stays back until the owner has seen the fingerprint and said yes.
         let shown: Arc<Mutex<Option<HostKey>>> = Arc::default();
         let outcome = match &login {
             Ok(prepared) => {
-                let seen = shown.clone();
-                let first_use = move |key: &HostKey| *seen.lock().unwrap() = Some(key.clone());
+                let (seen, first_app) = (shown.clone(), app.clone());
+                let (host, port) = (prepared.login.host.clone(), prepared.login.port);
+                let first_use = move |key: &HostKey| {
+                    *seen.lock().unwrap() = Some(key.clone());
+                    remember(&first_app, device_id, &host, port, key);
+                };
                 stats::collect(&prepared.login, device.os, prev_ticks, &first_use).await
             }
             Err(e) => Err(SshError::Other(e.to_string())),
         };
         let outcome = match (outcome, &login) {
-            // A key got in, so this is a machine the owner set up for this PC:
-            // remember its identity, to notice if it ever changes.
-            (Ok(collected), Ok(prepared)) => {
-                if prepared.login.known_key.is_none() {
-                    remember(app, device_id, &collected.host_key);
-                }
-                Ok(collected)
-            }
             // No key got in and the password was held back because the owner
             // hasn't approved this machine's identity yet: ask them.
             (Err(SshError::AuthFailed(_)), Ok(prepared)) if prepared.password_held_back => {
                 match prepared.login.known_key.clone().or_else(|| shown.lock().unwrap().clone()) {
                     Some(key) => Err(SshError::NewHost(key)),
-                    None => Err(SshError::AuthFailed("Could not log in, and the machine did not show an identity to approve.".into())),
+                    None => Err(SshError::AuthFailed(
+                        "Could not log in, and the machine did not show an identity to approve.".into(),
+                    )),
                 }
             }
             (other, _) => other,
         };
+
+        // The owner may have pointed the device somewhere else, or changed
+        // its login, while this reading ran. Its outcome is about the old
+        // place, so it is dropped; the edit already started a fresh reading.
+        let same_place = |d: &Device| {
+            (d.host.as_str(), d.ssh_port, &d.ssh_user, d.os)
+                == (device.host.as_str(), device.ssh_port, &device.ssh_user, device.os)
+        };
+        if !app.state::<Inventory>().get(device_id).is_ok_and(|d| same_place(&d)) {
+            return self.stats.lock().unwrap().get(&device_id).map(|s| s.entry.clone())
+                .unwrap_or_else(|| MachineStatsEntry::empty(device_id));
+        }
         let pinned = app.state::<Inventory>().host_key(device_id).ok().flatten().map(|k| k.fingerprint);
 
         let mut known = self.stats.lock().unwrap();
@@ -439,8 +486,8 @@ impl Monitor {
     }
 }
 
-fn remember(app: &AppHandle, device_id: i64, key: &HostKey) {
-    if let Err(e) = app.state::<Inventory>().remember_host_key(device_id, key) {
+fn remember(app: &AppHandle, device_id: i64, host: &str, port: u16, key: &HostKey) {
+    if let Err(e) = app.state::<Inventory>().remember_host_key(device_id, host, port, key) {
         eprintln!("home-cc: could not store the identity of device {device_id}: {e}");
     }
 }
@@ -452,7 +499,7 @@ async fn named_devices(app: &AppHandle, found: &[Found]) -> Result<HashMap<Strin
         .state::<Inventory>()
         .list()?
         .into_iter()
-        .filter(|d| d.mac.is_none() && d.host.parse::<std::net::IpAddr>().is_err())
+        .filter(|d| d.host.parse::<std::net::IpAddr>().is_err())
         .map(|d| Target { device_id: d.id, host: d.host, mac: None })
         .collect();
     if targets.is_empty() {

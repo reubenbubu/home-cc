@@ -94,8 +94,10 @@ impl NameMemory {
 #[derive(Debug)]
 pub struct Kept {
     pub names: Arc<Mutex<NameMemory>>,
-    /// Devices that have answered a ping, by inventory id.
-    pub answers_ping: Mutex<BTreeSet<i64>>,
+    /// Devices that have answered a ping, by inventory id, with the address
+    /// they answered at. A device pointed at another address starts again:
+    /// what is there now may be a machine that never answers ping.
+    pub answers_ping: Mutex<BTreeMap<i64, Ipv4Addr>>,
     /// Devices whose host was this PC itself in the latest round.
     own_devices: Mutex<BTreeSet<i64>>,
 }
@@ -105,7 +107,7 @@ impl Kept {
     pub fn new(name_keep: Duration) -> Self {
         Self {
             names: Arc::new(Mutex::new(NameMemory::new(name_keep))),
-            answers_ping: Mutex::new(BTreeSet::new()),
+            answers_ping: Mutex::new(BTreeMap::new()),
             own_devices: Mutex::new(BTreeSet::new()),
         }
     }
@@ -320,7 +322,7 @@ pub async fn check_round<L: Lan>(
     lan: Arc<L>,
     probes: &[Probe],
     pace: &Pace,
-    answers_ping: &Mutex<BTreeSet<i64>>,
+    answers_ping: &Mutex<BTreeMap<i64, Ipv4Addr>>,
     started: Instant,
 ) -> Vec<Check> {
     let known = lock(answers_ping).clone();
@@ -332,7 +334,7 @@ pub async fn check_round<L: Lan>(
     let mut may_use_table: BTreeSet<Ipv4Addr> = BTreeSet::new();
     for probe in probes {
         if let Place::At(ip) = probe.place {
-            let answers = known.contains(&probe.device_id);
+            let answers = known.get(&probe.device_id) == Some(&ip);
             *wanted.entry(ip).or_default() |= answers;
             if !answers {
                 may_use_table.insert(ip);
@@ -447,11 +449,11 @@ pub async fn check_round<L: Lan>(
             Place::At(ip) => match (probe.mac, there.get(&ip)) {
                 // What is at its address is another device.
                 (Some(mac), Some(holders)) if !holders.contains(&mac) => (false, None),
-                _ => verdict(seen.get(&ip).copied().unwrap_or_default(), known.contains(&probe.device_id)),
+                _ => verdict(seen.get(&ip).copied().unwrap_or_default(), known.get(&probe.device_id) == Some(&ip)),
             },
         };
-        if rtt_ms.is_some() {
-            answered_now.push(probe.device_id);
+        if let (Some(_), Place::At(ip)) = (rtt_ms, probe.place) {
+            answered_now.push((probe.device_id, ip));
         }
         checks.push(Check { device_id: probe.device_id, up, rtt_ms });
     }
@@ -481,6 +483,11 @@ mod tests {
         Probe { device_id, place, mac: None }
     }
 
+    /// A memory in which these devices have answered a ping at `addr`.
+    fn answered(ids: &[i64], addr: &str) -> Mutex<BTreeMap<i64, Ipv4Addr>> {
+        Mutex::new(ids.iter().map(|id| (*id, ip(addr))).collect())
+    }
+
     fn at(device_id: i64, addr: &str) -> Probe {
         probe(device_id, Place::At(ip(addr)))
     }
@@ -502,7 +509,7 @@ mod tests {
         Check { device_id, up: false, rtt_ms: None }
     }
 
-    async fn round(lan: &Arc<FakeLan>, probes: &[Probe], memory: &Mutex<BTreeSet<i64>>) -> Vec<Check> {
+    async fn round(lan: &Arc<FakeLan>, probes: &[Probe], memory: &Mutex<BTreeMap<i64, Ipv4Addr>>) -> Vec<Check> {
         check_round(lan.clone(), probes, &FAST, memory, Instant::now()).await
     }
 
@@ -565,7 +572,7 @@ mod tests {
             at(8, "10.0.0.1"),
             at(9, "10.0.0.6"),
         ];
-        let memory = Mutex::new(BTreeSet::new());
+        let memory = Mutex::new(BTreeMap::new());
         let checks = round(&lan, &probes, &memory).await;
         let expected = [
             up(1, 2.0),
@@ -586,14 +593,14 @@ mod tests {
         // Nothing was left unsure, so the table was read before and after the
         // pings and not waited for.
         assert_eq!(lan.table_reads.load(Ordering::SeqCst), 2);
-        assert_eq!(*memory.lock().unwrap(), BTreeSet::from([1, 2, 8]));
+        assert_eq!(memory.lock().unwrap().keys().copied().collect::<Vec<_>>(), [1, 2, 8]);
     }
 
     #[tokio::test]
     async fn a_device_that_answered_before_is_down_as_soon_as_it_stops() {
         let lan =
             FakeLan::with(vec![("10.0.0.1", Device::new(1).replies(&[Some(2), None]).state(Reachable))]);
-        let memory = Mutex::new(BTreeSet::new());
+        let memory = Mutex::new(BTreeMap::new());
         let probes = [at(1, "10.0.0.1"), at(2, "10.0.0.1")];
         // Round one: it answers. Device 2 shares the address, so it is marked too.
         assert_eq!(round(&lan, &probes, &memory).await, [up(1, 2.0), up(2, 2.0)]);
@@ -618,7 +625,7 @@ mod tests {
             // Still undecided at the end counts as not there.
             ("10.0.0.5", Device::new(5).state(Unconfirmed)),
         ]);
-        let memory = Mutex::new(BTreeSet::new());
+        let memory = Mutex::new(BTreeMap::new());
         let started = std::time::Instant::now();
         let checks = round(&lan, &[at(3, "10.0.0.3"), at(4, "10.0.0.4"), at(5, "10.0.0.5")], &memory).await;
         assert_eq!(checks, [up_silent(3), down(4), down(5)]);
@@ -639,7 +646,7 @@ mod tests {
         // The device known to answer ping is last in the list but pinged first.
         let mut probes: Vec<Probe> = dead.iter().enumerate().map(|(n, addr)| at(n as i64, addr)).collect();
         probes.push(at(999, "10.0.9.9"));
-        let memory = Mutex::new(BTreeSet::from([999]));
+        let memory = Mutex::new(BTreeMap::from([(999, ip("10.0.9.9"))]));
 
         let checks = round(&lan, &probes, &memory).await;
         assert_eq!(checks.len(), 601);
@@ -941,19 +948,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_device_pointed_at_another_address_is_not_assumed_to_answer_ping() {
+        // Device 1 answered ping at 10.0.0.1. The owner then points it at
+        // 10.0.0.2, a PC that is there but never answers ping.
+        let lan = FakeLan::with(vec![("10.0.0.2", Device::new(2).state(Reachable))]);
+        let memory = answered(&[1], "10.0.0.1");
+        assert_eq!(round(&lan, &[at(1, "10.0.0.2")], &memory).await, [up_silent(1)]);
+    }
+
+    #[tokio::test]
     async fn an_address_handed_on_to_another_device_shows_only_that_one_as_up() {
         // A guest's phone (1) had 10.0.0.1 and left; a laptop (2) has it now.
         let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3).state(Reachable))]);
-        let memory = Mutex::new(BTreeSet::new());
+        let memory = Mutex::new(BTreeMap::new());
         let probes = [stored(1, "10.0.0.1", 1), stored(2, "10.0.0.1", 2)];
         assert_eq!(round(&lan, &probes, &memory).await, [down(1), up(2, 3.0)]);
         // The phone is not taken for a device that answers ping.
-        assert_eq!(*memory.lock().unwrap(), BTreeSet::from([2]));
+        assert_eq!(memory.lock().unwrap().keys().copied().collect::<Vec<_>>(), [2]);
         // Read once before the pings (neither had answered one yet) and once after.
         assert_eq!((lan.pings_to("10.0.0.1"), lan.table_reads.load(Ordering::SeqCst)), (1, 2));
 
         // Both known to answer ping: the table is read for this alone, once.
-        let memory = Mutex::new(BTreeSet::from([1, 2]));
+        let memory = answered(&[1, 2], "10.0.0.1");
         assert_eq!(round(&lan, &probes, &memory).await, [down(1), up(2, 3.0)]);
         assert_eq!(lan.table_reads.load(Ordering::SeqCst), 3);
 
@@ -969,7 +985,7 @@ mod tests {
     async fn a_shared_address_is_left_alone_when_the_table_cannot_tell() {
         let both_up = [up(1, 3.0), up(2, 3.0)];
         let probes = [stored(1, "10.0.0.1", 1), stored(2, "10.0.0.1", 2)];
-        let memory = || Mutex::new(BTreeSet::from([1, 2]));
+        let memory = || answered(&[1, 2], "10.0.0.1");
 
         // No entry for the address, as for one behind a router.
         let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3))]);
@@ -999,7 +1015,9 @@ mod tests {
     #[tokio::test]
     async fn devices_that_do_not_disagree_about_an_address_are_not_looked_up() {
         let lan = FakeLan::with(vec![("10.0.0.1", Device::new(2).answers(3).state(Reachable))]);
-        let memory = Mutex::new(BTreeSet::from([1, 2, 3]));
+        // All three are known to answer ping where they are.
+        let memory = answered(&[1, 2], "10.0.0.1");
+        memory.lock().unwrap().insert(3, ip("10.0.0.2"));
         // The same hardware address twice (an entry added by hand next to a
         // scanned one), and entries with none: nothing contradicts anything,
         // even though the table holds a different one than the first two have.
@@ -1026,7 +1044,7 @@ mod tests {
             // Nothing there any more: nobody is up, so nothing needs deciding.
             ("10.0.0.3", Device::new(6)),
         ]);
-        let memory = Mutex::new(BTreeSet::new());
+        let memory = Mutex::new(BTreeMap::new());
         let probes = [
             stored(1, "10.0.0.1", 1),
             stored(2, "10.0.0.1", 2),
