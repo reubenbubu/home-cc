@@ -31,6 +31,9 @@ npm ci --no-audit --no-fund
 step "Type-check"
 npm run check
 
+step "Front-end tests"
+npm test
+
 step "Rust tests"
 cargo test --manifest-path src-tauri/Cargo.toml
 
