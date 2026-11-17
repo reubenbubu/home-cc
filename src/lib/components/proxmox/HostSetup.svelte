@@ -52,7 +52,7 @@
     const s = stored;
     if (!s) {
       proxmox.loadSettings(device.id).catch((e) => {
-        error = problem("Reading the Proxmox token settings", `Couldn't read the saved settings: ${errorText(e)}`);
+        error = { ...problem("Reading the Proxmox token settings", `Couldn't read the saved settings: ${errorText(e)}`), about: "home-cc" };
       });
       return;
     }
@@ -100,7 +100,7 @@
       drafts.clear(draftKey);
       onclose?.();
     } catch (err) {
-      error = problem("Saving the Proxmox API token", errorText(err));
+      error = { ...problem("Saving the Proxmox API token", errorText(err)), about: "home-cc" };
     } finally {
       saving = false;
     }
@@ -111,7 +111,7 @@
     try {
       await proxmox.removeSecret(device.id);
     } catch (err) {
-      error = problem("Removing the Proxmox token secret", `Couldn't remove the secret: ${errorText(err)}`);
+      error = { ...problem("Removing the Proxmox token secret", `Couldn't remove the secret: ${errorText(err)}`), about: "home-cc" };
     }
   }
 </script>

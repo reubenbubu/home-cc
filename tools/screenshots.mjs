@@ -306,6 +306,19 @@ const SCREENS = [
   { name: "pihole-cert", path: "/pihole?phcert", ready: "article", before: (page) => page.getByText("check its certificate").waitFor() },
   { name: "pihole-cert-changed", path: "/pihole?phchanged", ready: "article", before: (page) => page.getByText("shows a different certificate from the one you approved").first().waitFor() },
   { name: "pihole-wrong-password", path: "/pihole?phwrong", ready: "article", before: (page) => page.getByText("didn't accept the password").first().waitFor() },
+  {
+    // The three agent prompts under a problem on a machine, with the Investigate one copied and shown.
+    name: "pihole-agent-prompt",
+    path: "/pihole?phwrong",
+    ready: "article",
+    async before(page) {
+      await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.resolve() }, configurable: true }));
+      const problem = page.locator(".alert.problem", { hasText: "didn't accept the password" });
+      await problem.getByRole("group", { name: "Copy a prompt for an agent" }).getByRole("button", { name: "Investigate" }).click();
+      await problem.getByRole("button", { name: "Show it" }).click();
+      await problem.getByLabel("Prompt for an agent: Investigate").waitFor();
+    },
+  },
   { name: "pihole-down", path: "/pihole?phdown", ready: "article", before: (page) => page.getByText("Nothing answered at").waitFor() },
   {
     name: "pihole-setup-http",
@@ -2496,12 +2509,77 @@ async function checkFlows(browser, url) {
         const two = piholeCard(page, "Pi-hole 2");
         const problem = two.locator(".alert.problem", { hasText: "didn't accept the password" });
         await problem.waitFor();
-        await problem.getByRole("button", { name: "Copy a prompt for an agent" }).waitFor();
+        const prompts = problem.getByRole("group", { name: "Copy a prompt for an agent" });
+        for (const name of ["Investigate", "Remediate", "I have a bug"]) await prompts.getByRole("button", { name, exact: true }).waitFor();
         await two.getByRole("button", { name: "Connection settings" }).click();
         await two.getByLabel("Password").fill("the-new-app-password");
         await two.getByRole("button", { name: "Save", exact: true }).click();
         await two.getByText("Queries today").waitFor();
         await problem.waitFor({ state: "detached" });
+      },
+    },
+    {
+      what: "agent prompts: Investigate and Remediate send the agent to the Pi-hole (address, how to reach it), I have a bug to home-cc's code, and none holds a password",
+      path: "/pihole?phwrong",
+      async run(page) {
+        await page.evaluate(() => {
+          window.__copied = [];
+          const write = (t) => (window.__copied.push(t), Promise.resolve());
+          Object.defineProperty(navigator, "clipboard", { value: { writeText: write }, configurable: true });
+        });
+        const two = piholeCard(page, "Pi-hole 2");
+        const problem = two.locator(".alert.problem", { hasText: "didn't accept the password" });
+        await problem.waitFor();
+        // A password typed but not saved must not reach any prompt.
+        await two.getByRole("button", { name: "Connection settings" }).click();
+        await two.getByLabel("Password").fill("typed-not-saved");
+        const prompts = problem.getByRole("group", { name: "Copy a prompt for an agent" });
+        const copied = async (name, says) => {
+          const before = await page.evaluate(() => window.__copied.length);
+          await prompts.getByRole("button", { name, exact: true }).click();
+          await problem.getByRole("status").filter({ hasText: `Copied "${name}"` }).waitFor();
+          const text = await page.evaluate((n) => (window.__copied.length > n ? window.__copied.at(-1) : null), before);
+          if (!text) throw new Error(`"${name}" put nothing on the clipboard`);
+          for (const want of says) if (!text.includes(want)) throw new Error(`the "${name}" prompt doesn't say "${want}":\n${text}`);
+          if (text.includes("typed-not-saved")) throw new Error(`the "${name}" prompt holds the password typed`);
+          return text;
+        };
+        const where = ['- Machine: "Pi-hole 2" at 192.168.68.32', "Pi-hole's web page and API: https://192.168.68.32:443/admin", "didn't accept the password"];
+        await copied("Investigate", ["## Where it is", "Don't change anything.", ...where]);
+        await copied("Remediate", ["## Where it is", "Before you change anything, tell me what you will change and why.", "wait for my yes", ...where]);
+        const bug = await copied("I have a bug", ["Please find out why it happened.", "## Where to start looking"]);
+        if (bug.includes("## Where it is")) throw new Error("the bug prompt sends the agent to the machine");
+        await problem.getByRole("button", { name: "Show it" }).click();
+        await problem.getByLabel("Prompt for an agent: I have a bug").waitFor();
+      },
+    },
+    {
+      what: "agent prompts: a problem with home-cc itself (a group rename refused) offers only the one bug prompt",
+      path: "/machines",
+      async run(page) {
+        await page.getByRole("button", { name: "Rename the group NAS PC" }).click();
+        await page.getByLabel("New name for NAS PC").fill("  ");
+        await page.locator("form").getByRole("button", { name: "Rename" }).click();
+        const problem = page.getByRole("alert").filter({ hasText: "A group needs a name" });
+        await problem.getByRole("button", { name: "Copy a prompt for an agent" }).waitFor();
+        for (const name of ["Investigate", "Remediate"]) {
+          if (await problem.getByRole("button", { name, exact: true }).count()) throw new Error(`a problem with home-cc itself offers "${name}"`);
+        }
+      },
+    },
+    {
+      what: "agent prompts: a Proxmox token home-cc won't save is about home-cc, not the host, so only the bug prompt is offered",
+      path: "/proxmox?pvenotoken",
+      async run(page) {
+        const setup = page.locator("form.setup");
+        await setup.getByText("How to make a token").waitFor();
+        await setup.getByLabel("Token ID").fill("root@pam!homecc=1234");
+        await setup.getByRole("button", { name: "Save", exact: true }).click();
+        const problem = setup.locator(".alert.problem", { hasText: "Put only the token ID here" });
+        await problem.getByRole("button", { name: "Copy a prompt for an agent" }).waitFor();
+        for (const name of ["Investigate", "Remediate"]) {
+          if (await problem.getByRole("button", { name, exact: true }).count()) throw new Error(`a token home-cc won't save offers "${name}"`);
+        }
       },
     },
     {

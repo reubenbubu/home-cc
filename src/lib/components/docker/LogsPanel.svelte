@@ -210,7 +210,7 @@
     <div><button class="btn small" onclick={() => start()}>Try again</button></div>
   {/if}
   {#if saveError}
-    <Problem problem={dockerProblem(device, `Saving the log of "${container.name}"`, saveError, host)} />
+    <Problem problem={{ ...dockerProblem(device, `Saving the log of "${container.name}"`, saveError, host), about: "home-cc" }} />
   {/if}
   {#if saved}
     <p class="saved small" role="status">

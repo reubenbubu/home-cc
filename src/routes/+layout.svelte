@@ -33,7 +33,8 @@
   /** True in a browser with the sample back end instead of the real one. */
   const sample = "__HOME_CC_MOCK__" in window;
 
-  /** Loading problems, shown on every screen so stale numbers are never taken for live ones. */
+  /** Loading problems, shown on every screen so stale numbers are never taken for live ones. Each is home-cc's
+   *  own back end not answering, not a machine, so only "I have a bug" is offered (about). */
   const problems = $derived(
     [
       devices.error && { area: "devices", what: "Loading the saved devices", lead: "Couldn't load devices", error: devices.error },
@@ -46,7 +47,9 @@
         lead: "Live updates aren't working, so this screen may be out of date",
         error: live.error,
       },
-    ].filter((p): p is ProblemInfo & { lead: string } => !!p),
+    ]
+      .filter((p): p is ProblemInfo & { lead: string } => !!p)
+      .map((p) => ({ ...p, about: "home-cc" as const })),
   );
 
   /** What a screen that couldn't be drawn hands to an agent. The stack says where in the screens it broke. */

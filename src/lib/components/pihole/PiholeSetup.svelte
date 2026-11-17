@@ -86,7 +86,7 @@
       drafts.clear(draftKey);
       onclose?.();
     } catch (err) {
-      error = problem("Saving the Pi-hole connection settings", errorText(err));
+      error = { ...problem("Saving the Pi-hole connection settings", errorText(err)), about: "home-cc" };
     } finally {
       saving = false;
     }
@@ -97,7 +97,7 @@
     try {
       await pihole.removePassword(device.id);
     } catch (err) {
-      error = problem("Removing the stored Pi-hole password", `Couldn't remove the password: ${errorText(err)}`);
+      error = { ...problem("Removing the stored Pi-hole password", `Couldn't remove the password: ${errorText(err)}`), about: "home-cc" };
     }
   }
 
@@ -107,7 +107,7 @@
       drafts.clear(draftKey);
       await pihole.remove(device.id);
     } catch (err) {
-      error = problem("Taking a device off the Pi-hole screen", errorText(err));
+      error = { ...problem("Taking a device off the Pi-hole screen", errorText(err)), about: "home-cc" };
     }
   }
 </script>
