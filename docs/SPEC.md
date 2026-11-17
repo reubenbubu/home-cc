@@ -135,6 +135,9 @@ can take one more timer period to show as down.
   or Linux. A machine with an SSH login on another port than 22, or on this
   PC's loopback address (a VM, WSL or a container reached through this PC),
   is not this PC and is still read over SSH.
+- The machine cards can be put in any order: drag a card by the grip in its
+  header, or use the arrow keys on that grip. The order is remembered on this
+  PC; new machines go at the end, and "Reset order" goes back to name order.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.

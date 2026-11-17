@@ -313,7 +313,7 @@ async function checkFlows(browser, url) {
         await media.getByRole("button", { name: "Approve and use the password" }).click();
         await media.getByRole("button", { name: "Yes, it matches" }).click();
         await media.getByText("RAM", { exact: true }).waitFor();
-        await media.getByText("First connection").waitFor({ state: "detached" });
+        await media.getByText("Before the stored password is used").waitFor({ state: "detached" });
         await page.getByRole("button", { name: "Edit Media PC" }).click();
         await page.getByText("Identity home-cc remembers").waitFor();
       },
@@ -481,7 +481,7 @@ async function checkFlows(browser, url) {
           b.click();
         });
         await media.getByText("RAM", { exact: true }).waitFor();
-        await media.getByText("First connection").waitFor({ state: "detached" });
+        await media.getByText("Before the stored password is used").waitFor({ state: "detached" });
         const calls = await page.evaluate(() => window.__calls.filter((c) => c === "trust_host_key" || c === "refresh_stats").join(", "));
         if (calls !== "refresh_stats, trust_host_key, refresh_stats") {
           throw new Error(`expected a second reading after the approval, but the back end was asked for "${calls}"`);
