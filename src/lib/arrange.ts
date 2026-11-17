@@ -51,13 +51,24 @@ export function moveItem<T>(list: T[], from: number, to: number): T[] {
   return next;
 }
 
-/** The order to save after the owner has moved a card: the cards as they are now on screen, then the
- *  saved places of machines that still exist but aren't shown (one set to "Ignore" for a while, say),
- *  so they get their place back. Machines that were removed are forgotten. */
+/** The order to save after the owner has moved a card: the cards as they are now on screen, with the
+ *  saved places of machines that still exist but aren't shown (one set to "Ignore" for a while, say)
+ *  kept among them, so they come back where they were. Each goes back straight after the card that
+ *  came before it in the saved order, or at the very start if none did. Machines that were removed
+ *  are forgotten. */
 export function remember(shown: number[], saved: number[], existing: Iterable<number>): number[] {
   const exists = new Set(existing);
   const onScreen = new Set(shown);
-  return [...shown, ...saved.filter((id) => exists.has(id) && !onScreen.has(id))];
+  // The hidden machines, by the shown card they follow (null: before every card).
+  const after = new Map<number | null, number[]>();
+  let anchor: number | null = null;
+  for (const id of saved) {
+    if (onScreen.has(id)) anchor = id;
+    else if (exists.has(id)) after.set(anchor, [...(after.get(anchor) ?? []), id]);
+  }
+  const next = [...(after.get(null) ?? [])];
+  for (const id of shown) next.push(id, ...(after.get(id) ?? []));
+  return [...new Set(next)];
 }
 
 /** Where a dragged card would land: the card under the pointer, or else the nearest card in the nearest

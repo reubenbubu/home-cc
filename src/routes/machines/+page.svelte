@@ -279,6 +279,14 @@
     if (!slot) return;
     press = { id, pointerId: e.pointerId, x: e.clientX, y: e.clientY, slot };
     pointer = { x: e.clientX, y: e.clientY };
+    // So letting go is still heard when it happens outside the window. The grip can lose this hold
+    // while the cards shuffle round (the page moves it), which is fine: the window still hears the
+    // pointer, and a move with no button held counts as letting go (below).
+    try {
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    } catch {
+      // Not held: the window's own listeners still follow the pointer.
+    }
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", cancelDrag);
@@ -288,6 +296,12 @@
 
   function onPointerMove(e: PointerEvent) {
     if (!press || e.pointerId !== press.pointerId) return;
+    // The button is up but letting go was never heard (a menu was open, say): the card is dropped where
+    // it was last shown landing, rather than carried about with no button held.
+    if ((e.buttons & 1) === 0) {
+      drop();
+      return;
+    }
     pointer = { x: e.clientX, y: e.clientY };
     if (!drag) {
       // A small slip while clicking the grip isn't a drag.
@@ -363,6 +377,11 @@
 
   function onPointerUp(e: PointerEvent) {
     if (!press || e.pointerId !== press.pointerId) return;
+    drop();
+  }
+
+  /** Lets go of the card: it stays at the place it was shown landing. */
+  function drop() {
     const moved = drag;
     endDrag();
     if (!moved) return;

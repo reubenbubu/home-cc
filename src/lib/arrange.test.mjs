@@ -57,8 +57,21 @@ test("a saved order that isn't a list of machine numbers counts as none", () => 
 
 test("the order saved after a move keeps hidden machines that still exist, and forgets removed ones", () => {
   // 5 is set to "Ignore" for now, 6 was removed.
-  assert.deepEqual(remember([2, 1, 3], [1, 5, 6, 2, 3], [1, 2, 3, 5]), [2, 1, 3, 5]);
+  assert.deepEqual(remember([2, 1, 3], [1, 5, 6, 2, 3], [1, 2, 3, 5]), [2, 1, 5, 3]);
   assert.deepEqual(remember([2, 1], [], [1, 2]), [2, 1]);
+});
+
+test("a hidden machine keeps its place among the others when another card is moved", () => {
+  // Saved A B C D (1 2 3 4); B is set to "Ignore", so A C D are shown. D is moved one place earlier.
+  const saved = remember([1, 4, 3], [1, 2, 3, 4], [1, 2, 3, 4]);
+  assert.deepEqual(saved, [1, 2, 4, 3]);
+  // Set back from "Ignore", B is second again, after A.
+  const back = [1, 2, 3, 4].map((id) => ({ id }));
+  assert.deepEqual(ids(arrange(back, saved)), [1, 2, 4, 3]);
+  // Hidden machines at the very start stay at the start, and two in a row stay together, in order.
+  assert.deepEqual(remember([3, 1], [5, 1, 6, 7, 3], [1, 3, 5, 6, 7]), [5, 3, 1, 6, 7]);
+  // A machine that only shows up now (no saved place yet) stays where it is on screen.
+  assert.deepEqual(remember([8, 1, 3], [1, 2, 3], [1, 2, 3, 8]), [8, 1, 2, 3]);
 });
 
 // Three cards in a row and two below, 100 wide with 10 between them.
