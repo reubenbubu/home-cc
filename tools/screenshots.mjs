@@ -1532,6 +1532,125 @@ async function checkFlows(browser, url) {
         await terminalShows(page, "Try ls");
       },
     },
+    {
+      what: "in a terminal the zoom keys, the wheel and the buttons change only its text, which zooming the app leaves the same size, and both are kept after a restart",
+      path: "/terminals",
+      async run(page) {
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          window.__typed = [];
+          tauri.invoke = (cmd, args, ...rest) => {
+            if (cmd === "terminal_write" || cmd === "terminal_write_binary") window.__typed.push(args.data);
+            return invoke(cmd, args, ...rest);
+          };
+        });
+        await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+        await terminalShows(page, "Try ls");
+        const term = page.locator('[role="tabpanel"]:not([hidden]) .xterm');
+        await term.click();
+        /** The height of a row of the terminal on the screen, the size the buttons show, and the app's zoom. */
+        const now = () =>
+          page.evaluate(() => ({
+            row: document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-rows > div').getBoundingClientRect().height,
+            shown: document.querySelector(".text-size .now")?.textContent.trim(),
+            app: Number(document.documentElement.style.zoom || "1"),
+          }));
+        /** Waits for the terminal's text to be at `text`% and the app at `app`%; with `row`, its rows that
+         *  tall on the screen, give or take the rounding to whole pixels. */
+        const expectSizes = async (text, app, when, row = null) => {
+          let got;
+          const until = Date.now() + 3000;
+          for (;;) {
+            got = await now();
+            const near = row == null || Math.abs(got.row - row) <= 2;
+            if ((got.shown === `${text}%` && got.app === app / 100 && near) || Date.now() > until) break;
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          if (got.shown !== `${text}%`) throw new Error(`${when}: the terminal's text is at ${got.shown}, not ${text}%`);
+          if (got.app !== app / 100) throw new Error(`${when}: the app is at ${got.app * 100}%, not ${app}%`);
+          if (row != null && Math.abs(got.row - row) > 2) throw new Error(`${when}: a row of the terminal is ${got.row}px tall on the screen, not ${row}px`);
+          return got.row;
+        };
+        const normal = await expectSizes(100, 100, "at the start");
+        await page.keyboard.press("Control+Equal");
+        const bigger = await expectSizes(110, 100, "after Ctrl and = in the terminal");
+        if (!(bigger > normal)) throw new Error(`at 110% a row is ${bigger}px tall, at 100% ${normal}px`);
+        await page.keyboard.press("Control+Minus");
+        await page.keyboard.press("Control+Minus");
+        await expectSizes(90, 100, "after Ctrl and - twice in the terminal");
+        await page.keyboard.press("Control+Digit0");
+        await expectSizes(100, 100, "after Ctrl and 0 in the terminal", normal);
+        const typed = await page.evaluate(() => window.__typed.join(""));
+        if (typed) throw new Error(`the zoom keys reached the program in the terminal as ${JSON.stringify(typed)}`);
+        // The wheel goes by where the pointer is.
+        const box = await term.boundingBox();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.keyboard.down("Control");
+        await page.mouse.wheel(0, -100);
+        await page.keyboard.up("Control");
+        const ref = await expectSizes(110, 100, "after Ctrl and the wheel over the terminal", bigger);
+        // The program is told the terminal's new size: fewer columns for bigger letters.
+        await page.keyboard.type("size\r");
+        await terminalShows(page, "columns");
+        // Elsewhere the keys and the wheel zoom the app, and the terminal's text stays the size it was.
+        const picker = page.getByLabel("Machine");
+        await picker.focus();
+        await page.keyboard.press("Control+Equal");
+        await expectSizes(110, 110, "after Ctrl and = outside the terminal", ref);
+        for (let i = 0; i < 3; i++) await page.keyboard.press("Control+Equal");
+        await expectSizes(110, 175, "with the app at 175%", ref);
+        await page.mouse.move(20, 20);
+        for (let i = 0; i < 8; i++) {
+          await page.keyboard.down("Control");
+          await page.mouse.wheel(0, 100);
+          await page.keyboard.up("Control");
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        await expectSizes(110, 67, "with the app at 67% (Ctrl and the wheel outside the terminal)", ref);
+        // Both are remembered.
+        await page.reload({ waitUntil: "networkidle" });
+        await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+        await terminalShows(page, "Try ls");
+        await expectSizes(110, 67, "after starting again", ref);
+        await page.getByLabel("Machine").focus();
+        await page.keyboard.press("Control+Digit0");
+        await expectSizes(110, 100, "after Ctrl and 0 outside the terminal", ref);
+        // The buttons; pressed with the mouse, the keyboard goes back to the terminal.
+        await page.getByRole("button", { name: "Larger text" }).click();
+        await expectSizes(125, 100, "after Larger text");
+        const back = await page.evaluate(() => document.activeElement?.closest(".terminal-host") != null);
+        if (!back) throw new Error("after a text size button, the keyboard isn't back in the terminal");
+        await page.getByRole("button", { name: "Text at 125%, back to normal size" }).click();
+        await expectSizes(100, 100, "after the size button", normal);
+        await page.getByRole("button", { name: "Smaller text" }).click();
+        await expectSizes(90, 100, "after Smaller text");
+        await page.reload({ waitUntil: "networkidle" });
+        await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+        await expectSizes(90, 100, "after starting again with smaller text");
+        // In the smallest window with the app at 200%, the tab bar and its buttons still fit.
+        await page.setViewportSize({ width: 960, height: 600 });
+        await page.getByLabel("Machine").focus();
+        for (let i = 0; i < 5; i++) await page.keyboard.press("Control+Equal");
+        await expectSizes(90, 200, "in the smallest window at 200%");
+        await page.getByRole("button", { name: "Larger text" }).waitFor();
+        const found = await page.evaluate(inspect);
+        if (found.overflow.length) throw new Error(found.overflow.join("; "));
+        // Fitted again to its new place with its new letters: every row in sight.
+        await page.getByRole("button", { name: "Larger text" }).click();
+        await expectSizes(100, 200, "after Larger text at 200%", normal);
+        await new Promise((r) => setTimeout(r, 300));
+        const fit = await page.evaluate(() => {
+          const host = document.querySelector('[role="tabpanel"]:not([hidden]) .terminal-host').getBoundingClientRect();
+          const drawn = document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-screen').getBoundingClientRect();
+          const row = document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-rows > div').getBoundingClientRect();
+          return { host: host.height, drawn: drawn.height, row: row.height };
+        });
+        if (fit.drawn > fit.host + 0.5 || fit.host - fit.drawn >= fit.row) {
+          throw new Error(`the terminal doesn't fit its place at 200%: ${fit.drawn}px of rows in ${fit.host}px`);
+        }
+      },
+    },
     // --- Docker (spec 5.5) ---
     {
       what: "Docker: a container is restarted, its log followed and searched, and closing the log stops following it",

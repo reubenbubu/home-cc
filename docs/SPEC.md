@@ -170,6 +170,13 @@ machines does Prometheus already watch?
   such as vim, htop and tmux.
 - Several tabs open at once, to different machines.
 - Option to open a terminal straight into a running Docker container.
+- The terminals' text has a size of its own, from 50% to 200% of normal, kept
+  apart from the app's zoom (section 6): zooming the app leaves the terminal
+  text the same size on the screen, and the reverse. While a terminal has the
+  focus, Ctrl with + / - (0 for normal) changes its text instead of the app,
+  and so does Ctrl with the mouse wheel over a terminal; these keys don't reach
+  the program in it then. Buttons beside the tabs do the same. The size is
+  kept for next time.
 
 Done when: vim, htop and tmux all work correctly in a tab, and closing the tab
 closes the connection.
@@ -304,7 +311,8 @@ The app must work well on all three and when moved between them.
 - The whole app can be zoomed from 50% to 200%: Ctrl with + / - (0 for 100%),
   Ctrl with the mouse wheel, or the buttons in Settings. The size is kept for
   next time, and every screen stays usable at 200% in the smallest window
-  (960x600).
+  (960x600). In a terminal those keys and the wheel change the terminals' own
+  text size instead (5.4).
 - The app remembers its window size and position, and which monitor it was on.
 - Done when: every screen is checked at all three resolutions, at 100% and
   125% scaling, with no cut-off text or overlapping parts.

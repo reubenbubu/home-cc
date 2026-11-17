@@ -1,6 +1,7 @@
 // How big the whole app is drawn: the steps between 50% and 200%, and which
-// keys and wheel turns move between them. Kept apart from the store
-// (zoom.svelte.ts) so it can be tested with plain Node.
+// keys and wheel turns move between them. The terminals' text has a size of
+// its own on the same steps, kept apart from the app's. Kept apart from the
+// store (zoom.svelte.ts) so it can be tested with plain Node.
 
 /** The sizes to step through, in percent: the same ones a web browser uses. */
 export const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
@@ -90,4 +91,31 @@ export function addWheel(total: number, deltaY: number): { total: number; action
     return { total: 0, action: sum < 0 ? "in" : "out" };
   }
   return { total: sum, action: null };
+}
+
+/** What the zoom keys and the wheel change: the whole app, or only the size of the text in the terminals. */
+export type ZoomTarget = "app" | "terminal";
+
+/** Which size a key press or a turn of the wheel (with Ctrl held) changes. The keys go where the keyboard
+ *  is: while a terminal has the focus they change the terminals' text, as in VS Code's terminal (so the
+ *  program in it doesn't get Ctrl and + / - / 0). The wheel goes where the pointer is. */
+export function zoomTarget(kind: "key" | "wheel", where: { focusInTerminal: boolean; pointerInTerminal: boolean }): ZoomTarget {
+  const inTerminal = kind === "key" ? where.focusInTerminal : where.pointerInTerminal;
+  return inTerminal ? "terminal" : "app";
+}
+
+/** The terminals' text at its normal size, in page pixels: a little larger than the app's text (the page's
+ *  own font size, `rootPx`), on a half pixel. */
+export function terminalBaseSize(rootPx: number): number {
+  const root = typeof rootPx === "number" && Number.isFinite(rootPx) && rootPx > 0 ? rootPx : 13;
+  return Math.round(root * 1.08 * 2) / 2;
+}
+
+/** The font size to give a terminal, in page pixels, so that on the screen its text is `terminalPercent`
+ *  of the normal size whatever the app is zoomed to. Zooming the app makes every page pixel `appPercent`
+ *  / 100 as big, so the terminal is given that much less. Always worked out afresh from the two sizes,
+ *  never from the size before, so zooming the app back and forth can't make the terminal creep. */
+export function terminalFontSize(rootPx: number, terminalPercent: number, appPercent: number): number {
+  const size = (terminalBaseSize(rootPx) * clampZoom(terminalPercent)) / clampZoom(appPercent);
+  return Math.round(size * 100) / 100;
 }

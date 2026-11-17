@@ -108,6 +108,13 @@ Windows machine.
   not to another place, another group, or out of the filter (`arrange` in
   `table.ts`). Focus is checked where it is now, so a focused button that is
   taken away (Start swapped for "Starting…") lets the table go again.
+  The zoom keys (Ctrl with + / - / 0) and Ctrl with the wheel are caught for
+  the whole window in `src/lib/zoom.svelte.ts`, before any box or terminal
+  sees them. Inside a terminal (anything in a `.terminal-host`) they change
+  `terminalZoom`, the terminals' own text size, and are kept from the program;
+  elsewhere the app's zoom. Each terminal's font is the chosen size divided by
+  the app's zoom (`terminalFontSize` in `src/lib/zoom.ts`), so one never
+  changes the other on the screen.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
     `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH
