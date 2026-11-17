@@ -1,75 +1,229 @@
 <script lang="ts">
-  import { devices } from "$lib/devices.svelte";
-  import { KIND_LABELS, OS_LABELS } from "$lib/api";
+  import { KIND_LABELS, OS_LABELS, type Device, type MachineStats } from "$lib/api";
+  import { clock } from "$lib/clock.svelte";
+  import { devices, isMachine } from "$lib/devices.svelte";
+  import { ms, pct, relTime, share } from "$lib/format";
+  import { icons } from "$lib/icons";
+  import { scan } from "$lib/scan.svelte";
+  import { settings } from "$lib/settings.svelte";
+  import { stats } from "$lib/stats.svelte";
+  import { status } from "$lib/status.svelte";
+  import Icon from "$lib/components/Icon.svelte";
+  import MiniMeter from "$lib/components/MiniMeter.svelte";
+  import ScanStatus from "$lib/components/ScanStatus.svelte";
+  import Sparkline from "$lib/components/Sparkline.svelte";
+  import StatusDot from "$lib/components/StatusDot.svelte";
 
-  const counts = $derived({
-    total: devices.list.length,
-    machines: devices.list.filter((d) => d.kind === "pc" || d.kind === "server").length,
-    vms: devices.list.filter((d) => d.kind === "vm" || d.kind === "container").length,
-    mesh: devices.list.filter((d) => d.kind === "mesh").length,
+  const byName = (a: Device, b: Device) => a.name.localeCompare(b.name, undefined, { numeric: true });
+  const shown = $derived(devices.list.filter((d) => d.kind !== "ignore"));
+  const machines = $derived(shown.filter(isMachine).sort(byName));
+  const meshNodes = $derived(shown.filter((d) => d.kind === "mesh").sort(byName));
+  const others = $derived(shown.filter((d) => d.kind === "other" && d.reviewed).sort(byName));
+  const fresh = $derived(shown.filter((d) => !d.reviewed));
+
+  const upOf = (list: Device[]) => list.filter((d) => status.health(d) === "up").length;
+  const downOf = (list: Device[]) => list.filter((d) => status.health(d) === "down").length;
+
+  function fullestDisk(st: MachineStats): { mount: string; used: number } | null {
+    let best: { mount: string; used: number } | null = null;
+    for (const d of st.disks) {
+      const used = share(d.usedBytes, d.totalBytes);
+      if (used != null && (!best || used > best.used)) best = { mount: d.mount, used };
+    }
+    return best;
+  }
+
+  interface Issue {
+    key: string;
+    text: string;
+    href: string;
+  }
+
+  /** Everything the owner should look at, most pressing first. */
+  const issues = $derived.by(() => {
+    const down: Issue[] = [];
+    const warn: Issue[] = [];
+    for (const d of [...machines, ...meshNodes]) {
+      const href = d.kind === "mesh" ? "/network" : "/machines";
+      if (status.health(d) === "down") {
+        const seen = status.get(d)?.lastSeen ?? d.lastSeen;
+        down.push({ key: `down-${d.id}`, text: `${d.name} is down (last seen ${relTime(seen, clock.now)})`, href });
+      }
+      const entry = stats.get(d.id);
+      if (!d.sshUser || !entry) continue;
+      if (entry.errorKind === "hostKeyChanged") {
+        warn.push({ key: `key-${d.id}`, text: `${d.name}: its identity has changed, check it before trusting it`, href });
+      } else if (entry.errorKind === "auth") {
+        warn.push({ key: `auth-${d.id}`, text: `${d.name}: couldn't log in to read stats`, href });
+      }
+      if (!entry.stats || entry.error) continue;
+      const ram = share(entry.stats.memUsedKb, entry.stats.memTotalKb);
+      if (ram != null && ram > settings.value.ramWarnPct) {
+        warn.push({ key: `ram-${d.id}`, text: `${d.name}: RAM is ${pct(ram)} used`, href });
+      }
+      for (const disk of entry.stats.disks) {
+        const used = share(disk.usedBytes, disk.totalBytes);
+        if (used != null && used > settings.value.diskWarnPct) {
+          warn.push({ key: `disk-${d.id}-${disk.mount}`, text: `${d.name}: disk ${disk.mount} is ${pct(used)} full`, href });
+        }
+      }
+    }
+    return [...down, ...warn];
   });
-
-  const machines = $derived(devices.list.filter((d) => d.kind !== "mesh"));
-  const meshNodes = $derived(devices.list.filter((d) => d.kind === "mesh"));
 </script>
 
-<header class="head">
+{#snippet response(d: Device)}
+  {@const s = status.get(d)}
+  {#if s && !s.up}
+    <span class="down small">down</span>
+  {:else if s?.up && s.rttMs != null}
+    <span class="mono muted small">{ms(s.rttMs)}</span>
+  {/if}
+{/snippet}
+
+<header class="page-head">
   <h1>Overview</h1>
   <div class="actions">
-    <button class="btn" disabled title="Arrives with the network scanner">Scan network</button>
+    <button class="btn" onclick={() => scan.start()} disabled={scan.running}>
+      {scan.running ? "Scanning…" : "Scan network"}
+    </button>
     <a class="btn primary link-btn" href="/machines?add=1">Add machine</a>
   </div>
 </header>
 
+<ScanStatus compact />
+
 <section class="stats" aria-label="Summary">
-  <div class="panel stat"><div class="muted">Devices</div><div class="value mono">{counts.total}</div></div>
-  <div class="panel stat"><div class="muted">PCs and servers</div><div class="value mono">{counts.machines}</div></div>
-  <div class="panel stat"><div class="muted">VMs and containers</div><div class="value mono">{counts.vms}</div></div>
-  <div class="panel stat"><div class="muted">Mesh nodes</div><div class="value mono">{counts.mesh}</div></div>
+  <div class="panel stat">
+    <div class="muted">Up</div>
+    <div class="value mono">{upOf(shown)}</div>
+    <div class="muted small">of {shown.length} devices</div>
+  </div>
+  <div class="panel stat">
+    <div class="muted">Down</div>
+    <div class="value mono" class:alarm={downOf(shown) > 0}>{downOf(shown)}</div>
+    <div class="muted small">{downOf(machines) + downOf(meshNodes)} of them machines or mesh nodes</div>
+  </div>
+  <div class="panel stat">
+    <div class="muted">Machines up</div>
+    <div class="value mono">{upOf(machines)}<span class="of">of {machines.length}</span></div>
+    <div class="muted small">PCs, servers, VMs and containers</div>
+  </div>
+  <div class="panel stat">
+    <div class="muted">Mesh nodes up</div>
+    <div class="value mono">{upOf(meshNodes)}<span class="of">of {meshNodes.length}</span></div>
+    <div class="muted small">Deco</div>
+  </div>
+  <a class="panel stat link" href="/network">
+    <div class="muted">New devices</div>
+    <div class="value mono">{fresh.length}</div>
+    <div class="muted small">{fresh.length > 0 ? "Review them on Network" : "Nothing to review"}</div>
+  </a>
 </section>
 
-{#if devices.error}
-  <p class="panel error" role="alert">Couldn't load devices: {devices.error}</p>
-{/if}
-
 <div class="layout">
-  <section>
-    <h2 class="section-title">Machines</h2>
-    {#if devices.loaded && machines.length === 0}
-      <div class="panel empty">
-        <p>No machines yet. Add your PCs, VMs and Proxmox host to see them here.</p>
-        <a class="btn primary link-btn" href="/machines?add=1">Add your first machine</a>
-      </div>
-    {:else}
-      <div class="auto-grid">
-        {#each machines as m (m.id)}
-          <article class="panel card">
-            <div class="card-top">
-              <div class="card-name">
-                <span class="dot idle" title="Not checked yet"></span>
-                <span>{m.name}</span>
+  <div class="main">
+    <section>
+      <h2 class="section-title">Machines</h2>
+      {#if devices.loaded && machines.length === 0}
+        <div class="panel empty">
+          <p>No machines yet. Add your PCs, VMs and Proxmox host, or scan the network and pick them out.</p>
+          <a class="btn primary link-btn" href="/machines?add=1">Add your first machine</a>
+        </div>
+      {:else}
+        <div class="auto-grid">
+          {#each machines as m (m.id)}
+            {@const entry = stats.get(m.id)}
+            {@const st = entry?.stats}
+            {@const disk = st ? fullestDisk(st) : null}
+            {@const ram = share(st?.memUsedKb, st?.memTotalKb)}
+            <article class="panel card">
+              <div class="card-top">
+                <div class="card-name">
+                  <StatusDot health={status.health(m)} />
+                  <span class="ellipsis" title={m.name}>{m.name}</span>
+                </div>
+                {@render response(m)}
               </div>
-              <span class="mono muted small">{m.host}</span>
+              <div class="muted small ellipsis"><span class="mono">{m.host}</span> · {OS_LABELS[m.os]} · {KIND_LABELS[m.kind]}</div>
+              <Sparkline history={status.get(m)?.history ?? []} />
+              {#if !m.sshUser}
+                <a class="small quiet-link" href="/machines?edit={m.id}">Add an SSH user to see stats</a>
+              {:else if entry?.error}
+                <a class="small note" href="/machines" title={entry.error}>
+                  <Icon path={icons.warn} size={13} />
+                  {entry.errorKind === "hostKeyChanged" ? "Identity changed: check it" : "Couldn't read stats"}
+                </a>
+              {:else if st}
+                <div class="minis">
+                  {#if st.cpuPct == null && st.load1 != null}
+                    <MiniMeter label="Load" value={null} text={st.load1.toFixed(2)} />
+                  {:else}
+                    <MiniMeter label="CPU" value={st.cpuPct} />
+                  {/if}
+                  <MiniMeter
+                    label="RAM"
+                    value={ram}
+                    warn={ram != null && ram > settings.value.ramWarnPct ? `RAM is above your ${settings.value.ramWarnPct}% warning level` : null}
+                  />
+                  <MiniMeter
+                    label="Disk"
+                    value={disk?.used ?? null}
+                    warn={disk && disk.used > settings.value.diskWarnPct ? `Disk ${disk.mount} is nearly full` : null}
+                  />
+                </div>
+              {:else}
+                <div class="muted small">Waiting for the first reading…</div>
+              {/if}
+            </article>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    {#if others.length > 0}
+      <section>
+        <h2 class="section-title">Other devices</h2>
+        <div class="chips">
+          {#each others as d (d.id)}
+            <div class="chip">
+              <StatusDot health={status.health(d)} />
+              <span class="ellipsis" title={d.name}>{d.name}</span>
+              {@render response(d)}
             </div>
-            <div class="muted small">{OS_LABELS[m.os]} · {KIND_LABELS[m.kind]}</div>
-            <div class="muted small">Live status arrives in the next step.</div>
-          </article>
-        {/each}
-      </div>
+          {/each}
+        </div>
+      </section>
     {/if}
-  </section>
+  </div>
 
   <aside class="side">
     <section class="panel">
+      <h2 class="section-title">Needs attention</h2>
+      {#if issues.length === 0}
+        <p class="fine"><Icon path={icons.check} size={15} /> Nothing right now.</p>
+      {:else}
+        <ul class="issues">
+          {#each issues as issue (issue.key)}
+            <li><Icon path={icons.warn} size={14} /><a href={issue.href}>{issue.text}</a></li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+    <section class="panel">
       <h2 class="section-title">Deco mesh</h2>
       {#if meshNodes.length === 0}
-        <p class="muted">The network scanner will find your 4 Deco nodes. You can also add them by hand as "Mesh node".</p>
+        <p class="muted">A network scan finds your 4 Deco nodes. You can also add them by hand as "Mesh node".</p>
       {:else}
         <div class="mesh">
           {#each meshNodes as n (n.id)}
             <div class="mesh-node">
-              <div class="card-name"><span class="dot idle"></span>{n.name}</div>
-              <div class="mono muted small">{n.host}</div>
+              <div class="card-name"><StatusDot health={status.health(n)} /><span class="ellipsis" title={n.name}>{n.name}</span></div>
+              <div class="card-top">
+                <span class="mono muted small">{n.host}</span>
+                {@render response(n)}
+              </div>
+              <Sparkline history={status.get(n)?.history ?? []} />
             </div>
           {/each}
         </div>
@@ -83,34 +237,60 @@
 </div>
 
 <style>
-  .head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
-  h1 { margin: 0; font-size: 1.55rem; font-weight: 600; }
-  .actions { display: flex; gap: 0.6rem; }
-  .link-btn { display: inline-flex; align-items: center; text-decoration: none; }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: var(--gap); margin-bottom: 1.4rem; }
-  .stat .value { margin-top: 0.4rem; font-size: 1.85rem; }
+  .stat { display: block; color: inherit; text-decoration: none; }
+  .stat.link:hover { background: var(--panel-raised); }
+  .stat .value { margin: 0.3rem 0 0.15rem; font-size: 1.85rem; }
+  .stat .value.alarm { color: var(--bad); }
+  .stat .of { margin-left: 0.5rem; color: var(--muted); font-size: 1.1rem; }
 
   .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.4rem; }
-  .side { display: grid; grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); gap: var(--gap); align-content: start; }
+  .main { display: flex; flex-direction: column; gap: 1.4rem; min-width: 0; }
+  .side { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: var(--gap); align-content: start; }
 
   /* Ultrawide and other very wide windows: put the side panels next to the machines. */
   @media (min-width: 2400px) {
-    .layout { grid-template-columns: minmax(0, 1fr) 30rem; }
+    .layout { grid-template-columns: minmax(0, 1fr) 34rem; }
     .side { grid-template-columns: minmax(0, 1fr); }
   }
 
-  .card { display: flex; flex-direction: column; gap: 0.6rem; padding: 1rem; }
-  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .card { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.9rem 1rem; min-width: 0; }
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-width: 0; }
   .card-name { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; min-width: 0; }
-  .small { font-size: 0.85rem; }
+  .down { color: var(--bad); font-weight: 600; flex: none; }
+  .card-top .mono { flex: none; }
+  .minis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.9rem; }
+  .note { display: flex; align-items: center; gap: 0.35rem; color: var(--text-soft); text-decoration: none; }
+  .note :global(svg) { color: var(--warn); flex: none; }
+  .note:hover, .quiet-link:hover { text-decoration: underline; }
+  .quiet-link { color: var(--muted); text-decoration: none; }
 
-  .mesh { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 0.6rem; }
-  .mesh-node { padding: 0.75rem; border: 1px solid var(--track); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 0.4rem; }
+  .chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); gap: 0.5rem; }
+  .chip {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+    min-height: 2.5rem;
+    padding: 0 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+  }
+  .chip .ellipsis { flex: 1; }
+
+  .issues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .issues li { display: flex; gap: 0.5rem; line-height: 1.4; }
+  .issues :global(svg) { color: var(--warn); flex: none; margin-top: 0.15rem; }
+  .issues a { color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
+  .issues a:hover { text-decoration: underline; }
+  .fine { display: flex; align-items: center; gap: 0.45rem; color: var(--text-soft); }
+  .fine :global(svg) { color: var(--ok); }
+
+  .mesh { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); gap: 0.6rem; }
+  .mesh-node { padding: 0.75rem; border: 1px solid var(--track); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
 
   .empty { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; }
   .empty p { margin: 0; color: var(--text-soft); }
-  .error { color: var(--bad); }
   p { margin: 0; line-height: 1.5; }
 </style>

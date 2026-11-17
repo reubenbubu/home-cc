@@ -1,30 +1,38 @@
 // Shared list of devices, loaded once and kept in sync by every screen.
-import { api, errorText, type Device, type DeviceInput } from "./api";
+import { api, errorText, type Device, type DeviceInput, type DeviceKind } from "./api";
 
 class DeviceStore {
   list = $state<Device[]>([]);
   loaded = $state(false);
   error = $state<string | null>(null);
+  byId = $derived(new Map(this.list.map((d) => [d.id, d])));
+  #seq = 0;
 
   async load() {
+    // Reloads can overlap (an event arrives while one is running): the newest wins.
+    const seq = ++this.#seq;
     try {
-      this.list = await api.listDevices();
+      const list = await api.listDevices();
+      if (seq !== this.#seq) return;
+      this.list = list;
       this.error = null;
     } catch (e) {
-      this.error = errorText(e);
+      if (seq === this.#seq) this.error = errorText(e);
     } finally {
       this.loaded = true;
     }
   }
 
-  async add(input: DeviceInput) {
-    await api.addDevice(input);
+  async add(input: DeviceInput): Promise<Device> {
+    const device = await api.addDevice(input);
     await this.load();
+    return device;
   }
 
-  async update(id: number, input: DeviceInput) {
-    await api.updateDevice(id, input);
+  async update(id: number, input: DeviceInput): Promise<Device> {
+    const device = await api.updateDevice(id, input);
     await this.load();
+    return device;
   }
 
   async remove(id: number) {
@@ -34,3 +42,24 @@ class DeviceStore {
 }
 
 export const devices = new DeviceStore();
+
+/** A device as the input for saving it, with some fields changed. The hardware address is left as it is. */
+export function toInput(d: Device, patch: Partial<DeviceInput> = {}): DeviceInput {
+  return {
+    name: d.name,
+    host: d.host,
+    kind: d.kind,
+    os: d.os,
+    sshUser: d.sshUser,
+    sshPort: d.sshPort,
+    notes: d.notes,
+    ...patch,
+  };
+}
+
+const MACHINE_KINDS: DeviceKind[] = ["pc", "server", "vm", "container"];
+
+/** PCs, servers, VMs and containers: the devices that can have stats. */
+export function isMachine(d: Device): boolean {
+  return MACHINE_KINDS.includes(d.kind);
+}
