@@ -1,7 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isThisPc, macToSend, ownAddresses, repointed, scanRanges, sshLeadsElsewhere } from "./net.ts";
+import { isThisPc, macToSend, ownAddresses, rangeSpan, rangeSpanText, repointed, scanRanges, sshLeadsElsewhere } from "./net.ts";
 
 const subnet = (cidr, name, ownIp, best = false) => ({ cidr, interface: name, ownIp, best });
 const found = (ip, isSelf) => ({ ip, mac: null, vendor: null, hostname: null, looksLikeMesh: false, rttMs: null, isSelf });
@@ -112,4 +112,23 @@ test("an SSH login through a forwarded port leads to a VM or container, not this
   assert.equal(sshLeadsElsewhere(d("192.168.68.58", "sam")), false, "this PC by its address, usual port");
   assert.equal(sshLeadsElsewhere(d("127.0.0.1", null, 2222)), false, "no SSH user, no login");
   assert.equal(sshLeadsElsewhere(d("127.0.0.1", "  ", 2222)), false, "a blank user is no user");
+});
+
+test("a range is shown as the addresses it covers", () => {
+  assert.deepEqual(rangeSpan("192.168.68.0/22"), { first: "192.168.68.1", last: "192.168.71.254", count: 1022 });
+  assert.equal(rangeSpanText("192.168.68.0/22"), "192.168.68.1 to 192.168.71.254 (1,022 addresses)");
+  assert.equal(rangeSpanText("192.168.1.0/24"), "192.168.1.1 to 192.168.1.254 (254 addresses)");
+  // An address inside the range gives the same range.
+  assert.equal(rangeSpanText("192.168.70.17/22"), "192.168.68.1 to 192.168.71.254 (1,022 addresses)");
+  assert.equal(rangeSpanText("10.0.0.0/8"), "10.0.0.1 to 10.255.255.254 (16,777,214 addresses)");
+  assert.equal(rangeSpanText("10.0.0.4/31"), "10.0.0.4 to 10.0.0.5 (2 addresses)");
+  assert.equal(rangeSpanText("10.0.0.4/32"), "10.0.0.4 only");
+  assert.equal(rangeSpanText("0.0.0.0/0"), "0.0.0.1 to 255.255.255.254 (4,294,967,294 addresses)");
+});
+
+test("anything that isn't an IPv4 range gives no span", () => {
+  for (const bad of ["", "automatic", "192.168.68.0", "192.168.68.0/33", "300.1.1.1/24", "fe80::/64"]) {
+    assert.equal(rangeSpan(bad), null, bad);
+    assert.equal(rangeSpanText(bad), "", bad);
+  }
 });

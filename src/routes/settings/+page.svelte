@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, errorText, secretKeys, type AppInfo, type Settings } from "$lib/api";
   import { icons } from "$lib/icons";
+  import { rangeSpanText } from "$lib/net";
   import { settings } from "$lib/settings.svelte";
   import { zoom } from "$lib/zoom.svelte";
   import { ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN } from "$lib/zoom";
@@ -87,6 +88,11 @@
     const ips = settings.subnets.filter((s) => s.cidr === cidr && s.ownIp).map((s) => s.ownIp);
     return [...new Set(ips)];
   });
+
+  /** The addresses the chosen range covers, for the line under the picker ("" while unknown or mistyped). */
+  const chosenSpan = $derived(
+    rangeSpanText(rangeChoice === "auto" ? (settings.bestSubnet?.cidr ?? "") : rangeChoice === "custom" ? customRange : rangeChoice),
+  );
 
   /** Not an error: the back end decides what it will scan. A smaller number after the slash means more addresses. */
   const bigRange = $derived(rangeChoice === "custom" && !rangeProblem(customRange) && Number(customRange.trim().split("/")[1]) < 20);
@@ -191,6 +197,7 @@
           <option value="custom">Something else…</option>
         </select>
       </label>
+      {#if rangeChoice !== "custom" && chosenSpan}<p class="hint span">Covers {chosenSpan}</p>{/if}
       {#if ownAddresses.length > 0}
         <div class="own">
           <span class="muted">This PC on that network</span>
@@ -203,6 +210,7 @@
             aria-invalid={tried && !!problems.range} aria-describedby="p-range" />
         </label>
         {@render problem(problems.range, "p-range")}
+        {#if chosenSpan && !problems.range}<p class="hint span">Covers {chosenSpan}</p>{/if}
         {#if bigRange}<p class="hint">That is a big range: a scan of it may take a long time, or be refused.</p>{/if}
       {/if}
       <p class="hint">

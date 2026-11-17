@@ -4,6 +4,7 @@
   import { clock } from "$lib/clock.svelte";
   import { count, relTime } from "$lib/format";
   import { PHASE_TEXT, scan } from "$lib/scan.svelte";
+  import { rangeSpanText } from "$lib/net";
   import { settings } from "$lib/settings.svelte";
   import Problem from "./Problem.svelte";
 
@@ -26,7 +27,7 @@
       <div class="row">
         <div class="what">
           <strong>{scan.stopping ? "Stopping…" : p ? PHASE_TEXT[p.phase] : "Starting the scan…"}</strong>
-          <span class="muted">step {scan.step} of 3 · range {settings.scanRangeLabel}</span>
+          <span class="muted" title={settings.scanRangeSpan}>step {scan.step} of 3 · range {settings.scanRangeLabel}</span>
         </div>
         <div class="numbers mono" aria-live="off">
           {#if p}
@@ -52,6 +53,7 @@
           <div class="what">
             <span class="muted">Range to scan</span>
             <span class="mono">{settings.scanRangeLabel}</span>
+            {#if settings.scanRangeSpan}<span class="muted span">{settings.scanRangeSpan}</span>{/if}
             <a href="/settings">Change</a>
           </div>
         {/if}
@@ -60,7 +62,7 @@
           <div class="result" role="status">
             <strong>{count(r.found.length, "device")} found, {r.added} new</strong>
             <span class="muted">
-              {r.cancelled ? "scan stopped early · " : ""}<span class="mono">{r.range}</span> · {relTime(scan.finishedAt, clock.now)}
+              {r.cancelled ? "scan stopped early · " : ""}<span class="mono" title={rangeSpanText(r.range)}>{r.range}</span> · {relTime(scan.finishedAt, clock.now)}
             </span>
             {#if compact && r.added > 0}<a href="/network">Review on Network</a>{/if}
           </div>
@@ -71,7 +73,7 @@
     {/if}
     {#if scan.error}
       <Problem
-        problem={{ area: "scan", what: SCAN_WHAT[scan.errorWhat].what, error: scan.error, details: { "Range to scan": settings.scanRangeLabel } }}
+        problem={{ area: "scan", what: SCAN_WHAT[scan.errorWhat].what, error: scan.error, details: { "Range to scan": settings.scanRangeLabel, "Addresses in it": settings.scanRangeSpan } }}
         message="{SCAN_WHAT[scan.errorWhat].lead}: {scan.error}"
       />
     {/if}

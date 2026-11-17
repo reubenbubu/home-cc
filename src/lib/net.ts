@@ -75,3 +75,30 @@ export function macToSend(stored: string | null, typed: string): string | null {
 export function repointed(stored: { host: string; sshPort: number }, host: string, sshPort: number): boolean {
   return host.trim() !== stored.host.trim() || sshPort !== stored.sshPort;
 }
+
+/** The addresses a range such as "192.168.68.0/22" covers: the first and last a device can have, and how many
+ *  that is. A /22 is 192.168.68.1 to 192.168.71.254, 1,022 addresses. The very first and last addresses of a
+ *  range are left out (they name the network itself and reach every device at once), except in a /31 or
+ *  /32, which have no such addresses. Null for anything that isn't an IPv4 range. */
+export function rangeSpan(cidr: string): { first: string; last: string; count: number } | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(cidr.trim());
+  if (!m) return null;
+  const parts = m.slice(1, 5).map(Number);
+  const bits = Number(m[5]);
+  if (parts.some((p) => p > 255) || bits > 32) return null;
+  const ip = parts.reduce((n, p) => n * 256 + p, 0);
+  const size = 2 ** (32 - bits);
+  const start = Math.floor(ip / size) * size;
+  const end = start + size - 1;
+  const [first, last] = bits >= 31 ? [start, end] : [start + 1, end - 1];
+  const text = (n: number) => [24, 16, 8, 0].map((s) => Math.floor(n / 2 ** s) % 256).join(".");
+  return { first: text(first), last: text(last), count: last - first + 1 };
+}
+
+/** "192.168.68.1 to 192.168.71.254 (1,022 addresses)", or "" for something that isn't a range. */
+export function rangeSpanText(cidr: string): string {
+  const s = rangeSpan(cidr);
+  if (!s) return "";
+  if (s.count === 1) return `${s.first} only`;
+  return `${s.first} to ${s.last} (${s.count.toLocaleString("en-US")} addresses)`;
+}

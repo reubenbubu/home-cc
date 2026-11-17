@@ -1,6 +1,6 @@
 // App settings and the list of local networks, shared by every screen.
 import { api, errorText, type Settings, type Subnet } from "./api";
-import { scanRanges } from "./net";
+import { rangeSpanText, scanRanges } from "./net";
 
 /** Same as the back end's defaults; shown until the saved ones have loaded. */
 export const DEFAULT_SETTINGS: Settings = {
@@ -29,6 +29,9 @@ class SettingsStore {
   scanRangeLabel = $derived(
     this.value.scanRange || (this.bestSubnet ? `automatic: ${this.bestSubnet.cidr}` : "automatic"),
   );
+  /** The addresses that range covers, such as "192.168.68.1 to 192.168.71.254 (1,022 addresses)"; "" when
+   *  it isn't known yet. */
+  scanRangeSpan = $derived(rangeSpanText(this.value.scanRange || this.bestSubnet?.cidr || ""));
 
   async load() {
     // Loaded separately so a problem listing networks doesn't hide the saved settings.
