@@ -1522,12 +1522,38 @@ async function checkFlows(browser, url) {
         const grip = page.getByRole("button", { name: /^Move Printer,/ });
         const from = await grip.boundingBox();
         const onto = await card(page, "Living room TV").boundingBox();
-        await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+        const past = await card(page, "Media PC").boundingBox();
+        let x = from.x + from.width / 2;
+        let y = from.y + from.height / 2;
+        await page.mouse.move(x, y);
         await page.mouse.down();
-        await page.mouse.move(onto.x + onto.width / 2, onto.y + onto.height / 2, { steps: 12 });
+        // Slowly, over Media PC and then across to Living room TV. Moving a card in packed columns moves the
+        // cards after it too; the place it would land must not swap back and forth on the way.
+        // The cards' own places, not the copy that follows the pointer.
+        const placed = async () => (await group(page, "Other machines").locator(".slot h3").allTextContents()).join();
+        const seen = [];
+        for (const [tx, ty] of [
+          [past.x + past.width / 2, past.y + past.height / 2],
+          [onto.x + onto.width / 2, onto.y + onto.height / 2],
+        ]) {
+          const steps = Math.ceil(Math.hypot(tx - x, ty - y) / 8);
+          for (let i = 1; i <= steps; i++) {
+            await page.mouse.move(x + ((tx - x) * i) / steps, y + ((ty - y) * i) / steps);
+            const now = await placed();
+            if (now !== seen[seen.length - 1]) seen.push(now);
+          }
+          [x, y] = [tx, ty];
+        }
+        if (new Set(seen).size !== seen.length) throw new Error(`while dragging, the cards went back to an order they had left: ${seen.join(" / ")}`);
         await page.locator(".ghost").waitFor();
         // Once the cards have slid to their new places.
         await page.waitForFunction(settled);
+        // A hand never holds still: small moves on the place it would land leave it there.
+        const held = await placed();
+        for (let i = 0; i < 12; i++) await page.mouse.move(x + (i % 2 ? 6 : -6), y + (i % 3 ? 5 : -5));
+        await page.mouse.move(x, y);
+        const still = await placed();
+        if (still !== held) throw new Error(`small moves of the pointer moved the card: ${held} became ${still}`);
         // The place it would land is under the pointer, and the cards around it are packed.
         const shown = await page.evaluate(
           ([x, y]) => {

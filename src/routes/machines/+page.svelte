@@ -480,12 +480,6 @@
   let hold = { x: 0, y: 0 };
   let scroller: HTMLElement | null = null;
   let scrollFrame = 0;
-  /** The order the cards were in before the last place the dragged card took, and where the pointer was
-   *  then. Moving a card in packed columns moves the cards after it too, so the pointer can find itself
-   *  on another card at once: going straight back would make the two swap places on every move. */
-  let lastMove: { order: string; x: number; y: number } | null = null;
-  /** How far the pointer must go (in the grid's pixels) before the card can go back where it just was. */
-  const BACK_AFTER = 40;
 
   // Packing the cards: each card is only as tall as what it shows, and in turn goes in the column that is
   // shortest so far, so a short card sits right under the one above it rather than beside a tall card's
@@ -892,21 +886,15 @@
       x: inside(at.x - hold.x, grid.offsetWidth - ghost.w),
       y: inside(at.y - hold.y, grid.offsetHeight - ghost.h),
     };
-    // Where the cards are laid out, not where a sliding card happens to be drawn at this moment.
-    const slots = [...grid.querySelectorAll<HTMLElement>(":scope > .slot")];
+    // From the cards' measured heights, as they are packed, not where a sliding card happens to be drawn
+    // at this moment. Until they have all been measured the card stays where it is.
     const now = cardsOf(section).map((m) => m.id);
     const from = now.indexOf(drag.id);
-    const to = landing(
-      slots.map((s) => ({ x: s.offsetLeft, y: s.offsetTop, w: s.offsetWidth, h: s.offsetHeight })),
-      from,
-      at.x,
-      at.y,
-    );
-    if (to < 0 || from < 0 || to === from) return;
-    const next = moveItem(now, from, to);
-    if (lastMove && next.join() === lastMove.order && Math.hypot(at.x - lastMove.x, at.y - lastMove.y) < BACK_AFTER) return;
-    lastMove = { order: now.join(), x: at.x, y: at.y };
-    drag.order = next;
+    const sizes = now.map((id) => heights[id]);
+    const layout = grids[drag.key];
+    if (!layout || sizes.some((h) => h === undefined)) return;
+    const to = landing(sizes, from, layout.columns, layout.gap, grid.clientWidth, at.x, at.y);
+    if (to >= 0 && from >= 0 && to !== from) drag.order = moveItem(now, from, to);
   }
 
   function scrollerOf(el: HTMLElement): HTMLElement | null {
@@ -975,7 +963,6 @@
     document.documentElement.classList.remove("moving-card");
     press = null;
     drag = null;
-    lastMove = null;
     ghost = null;
     ghostCopy = null;
     dragGrid = null;

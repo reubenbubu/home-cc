@@ -1,6 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { moveItem } from "./arrange.ts";
 import { landing, pack } from "./masonry.ts";
 
 /** Where each card ends up, as [column, top, bottom] in pixels, from the rows the grid is given. */
@@ -77,39 +78,40 @@ test("more columns than cards, nothing at all, and readings that make no sense",
   );
 });
 
-// Two columns, 100 wide and 10 apart, packed: 0 and 2 on the left, 1 (tall) and 3 on the right.
-const boxes = [
-  { x: 0, y: 0, w: 100, h: 80 },
-  { x: 110, y: 0, w: 100, h: 300 },
-  { x: 0, y: 90, w: 100, h: 60 },
-  { x: 110, y: 310, w: 100, h: 50 },
-];
+// Three columns 300 wide and 16 apart (932 in all), as in the owner's screenshot: A, a tall card, C, then
+// D under A and E under C.
+const cards = [200, 900, 220, 180, 150];
+const at = (from, x, y) => landing(cards, from, 3, 16, 932, x, y);
 
-test("a dragged card takes the place of the card under the pointer", () => {
-  assert.equal(landing(boxes, 0, 150, 200), 1);
-  assert.equal(landing(boxes, 0, 50, 120), 2);
-  assert.equal(landing(boxes, 3, 50, 10), 0);
+test("a dragged card takes the place where it would be drawn under the pointer", () => {
+  // E onto D, under A: E then sits under A, and D goes under C.
+  assert.equal(at(4, 150, 300), 3);
+  // D to the top of the first column, where A is: before A.
+  assert.equal(at(3, 150, 20), 0);
   // On its own place it stays.
-  assert.equal(landing(boxes, 2, 50, 120), 2);
+  assert.equal(at(4, 780, 300), 4);
+  assert.equal(at(1, 466, 800), 1);
 });
 
-test("below a column's last card it goes after that card, not to a card in the next column", () => {
-  // Under card 2 on the left, beside the tall card 1.
-  assert.equal(landing(boxes, 0, 50, 250), 2);
-  assert.equal(landing(boxes, 3, 50, 250), 3);
-  assert.equal(landing(boxes, 1, 50, 250), 2);
-  // Under the last card of all: the end.
-  assert.equal(landing(boxes, 0, 150, 500), 3);
-  assert.equal(landing(boxes, 3, 150, 500), 3);
+test("in the space under a short column it goes to the place drawn nearest the pointer", () => {
+  // D, far down beside the tall card in the last column: last, which draws it under C (and E under A).
+  assert.equal(at(3, 780, 600), 4);
+  assert.equal(landing([], 0, 3, 16, 932, 10, 10), -1);
 });
 
-test("in a gap it goes by the nearer card of the column, and between columns by the nearer column", () => {
-  assert.equal(landing(boxes, 3, 50, 83), 0);
-  assert.equal(landing(boxes, 3, 50, 88), 2);
-  assert.equal(landing(boxes, 0, 104, 120), 2);
-  assert.equal(landing(boxes, 0, 107, 120), 1);
-  // Above the first card of a column: before it.
-  assert.equal(landing(boxes, 3, 150, -20), 1);
-  assert.equal(landing(boxes, 0, 150, -20), 0);
-  assert.equal(landing([], 0, 10, 10), -1);
+test("once moved, the same pointer keeps it there: it never swaps back and forth", () => {
+  let seed = 7;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let n = 0; n < 500; n++) {
+    const heights = Array.from({ length: 2 + Math.floor(random() * 8) }, () => 60 + random() * (random() < 0.2 ? 900 : 250));
+    const columns = 1 + Math.floor(random() * 4);
+    const width = columns * 300 + (columns - 1) * 16;
+    const from = Math.floor(random() * heights.length);
+    const x = random() * width;
+    const y = random() * 1400;
+    const to = landing(heights, from, columns, 16, width, x, y);
+    const moved = moveItem(heights, from, to);
+    assert.equal(landing(moved, to, columns, 16, width, x, y), to, JSON.stringify({ heights, from, columns, x, y }));
+  }
 });
+
