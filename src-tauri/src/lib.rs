@@ -47,9 +47,10 @@ pub fn run() {
             commands::scan_running,
             commands::device_statuses,
             commands::check_now,
+            commands::check_problem,
             commands::machine_stats,
             commands::refresh_stats,
-            commands::forget_host_key,
+            commands::trust_host_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running home-cc");

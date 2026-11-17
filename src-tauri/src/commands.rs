@@ -25,31 +25,44 @@ pub fn app_info() -> AppInfo {
 
 // --- Inventory ---
 
-#[tauri::command]
+// Commands marked `async` here are ordinary functions that Tauri runs off
+// the window's own thread, because they touch the database or the keychain.
+
+#[tauri::command(async)]
 pub fn list_devices(inv: State<Inventory>) -> Result<Vec<Device>> {
     inv.list()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_device(inv: State<Inventory>, monitor: State<Monitor>, input: DeviceInput) -> Result<Device> {
     let device = inv.add(input)?;
+    // Ids start again in a new database, so a password left in the keychain
+    // by an earlier one must not end up belonging to this device.
+    secrets::delete(&monitor::password_key(device.id)).ok();
     monitor.wake();
     Ok(device)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_device(
     inv: State<Inventory>,
     monitor: State<Monitor>,
     id: i64,
     input: DeviceInput,
 ) -> Result<Device> {
+    let before = inv.get(id)?;
     let device = inv.update(id, input)?;
+    // Stats and login state belong to the machine the entry pointed at.
+    if (&before.host, before.ssh_port, &before.ssh_user, before.os)
+        != (&device.host, device.ssh_port, &device.ssh_user, device.os)
+    {
+        monitor.forget(id);
+    }
     monitor.wake();
     Ok(device)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_device(app: AppHandle, inv: State<Inventory>, monitor: State<Monitor>, id: i64) -> Result<()> {
     inv.remove(id)?;
     monitor.forget(id);
@@ -63,19 +76,24 @@ pub fn remove_device(app: AppHandle, inv: State<Inventory>, monitor: State<Monit
 
 // --- Secrets ---
 
-#[tauri::command]
-pub fn set_secret(key: String, value: String) -> Result<()> {
-    secrets::set(&key, &value)
+#[tauri::command(async)]
+pub fn set_secret(monitor: State<Monitor>, key: String, value: String) -> Result<()> {
+    secrets::set(&key, &value)?;
+    // A new password or passphrase may be what a failed login was missing.
+    monitor.retry_logins();
+    Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn has_secret(key: String) -> Result<bool> {
     secrets::has(&key)
 }
 
-#[tauri::command]
-pub fn delete_secret(key: String) -> Result<()> {
-    secrets::delete(&key)
+#[tauri::command(async)]
+pub fn delete_secret(monitor: State<Monitor>, key: String) -> Result<()> {
+    secrets::delete(&key)?;
+    monitor.retry_logins();
+    Ok(())
 }
 
 // --- Settings ---
@@ -117,19 +135,35 @@ pub fn scan_running(monitor: State<Monitor>) -> bool {
     monitor.scan_running()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn device_statuses(inv: State<Inventory>) -> Result<Vec<DeviceStatus>> {
-    inv.statuses()
+    let own = net::own_devices();
+    let mut statuses = inv.statuses()?;
+    for status in &mut statuses {
+        status.is_self = own.contains(&status.device_id);
+    }
+    Ok(statuses)
 }
 
 #[tauri::command]
 pub async fn check_now(app: AppHandle, monitor: State<'_, Monitor>) -> Result<()> {
+    if monitor.scan_running() {
+        return Err(Error::Invalid(
+            "A scan is running. Every device is checked again as soon as it finishes.".into(),
+        ));
+    }
     monitor.check_round(&app).await
+}
+
+/// Why status checks can't work at all, if they can't.
+#[tauri::command]
+pub fn check_problem(monitor: State<Monitor>) -> Option<String> {
+    monitor.check_problem()
 }
 
 // --- Machine stats ---
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn machine_stats(inv: State<Inventory>, monitor: State<Monitor>) -> Result<Vec<MachineStatsEntry>> {
     monitor.stats_entries(&inv)
 }
@@ -145,15 +179,18 @@ pub async fn refresh_stats(
     if device.ssh_user.as_deref().is_none_or(|u| u.trim().is_empty()) {
         return Err(Error::Invalid("Add an SSH user to this machine first".into()));
     }
-    let entry = monitor.read_stats(&app, &device).await;
+    let entry = monitor.read_stats(&app, device_id).await;
     app.emit(monitor::EVENT_STATS, ()).ok();
     Ok(entry)
 }
 
-/// After the owner confirms a machine's identity really did change: forget
-/// the stored one, so the next reading trusts what the machine presents.
-#[tauri::command]
-pub fn forget_host_key(inv: State<Inventory>, device_id: i64) -> Result<()> {
-    let device = inv.get(device_id)?;
-    inv.forget_host_key(&device.host, device.ssh_port)
+/// The owner checked the identity a machine presented and approves it.
+#[tauri::command(async)]
+pub fn trust_host_key(
+    inv: State<Inventory>,
+    monitor: State<Monitor>,
+    device_id: i64,
+    fingerprint: String,
+) -> Result<()> {
+    monitor.trust_host_key(&inv, device_id, &fingerprint)
 }

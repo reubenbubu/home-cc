@@ -4,16 +4,16 @@
 
 use crate::error::{Error, Result};
 use crate::inventory::{Device, DeviceKind, Found, Inventory, now};
-use crate::net::{self, ScanProgress, Target};
+use crate::net::{self, Located, ScanProgress, Target};
 use crate::secrets;
-use crate::ssh::{Login, SshError};
+use crate::ssh::{HostKey, Login, SshError};
 use crate::stats::{self, CpuTicks, MachineStats};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
@@ -35,6 +35,9 @@ pub fn password_key(device_id: i64) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StatsErrorKind {
+    /// First connection, and getting in needs the stored password, which is
+    /// held back until the owner approves the machine's identity.
+    NewHost,
     HostKeyChanged,
     Auth,
     Unreachable,
@@ -52,11 +55,44 @@ pub struct MachineStatsEntry {
     /// Message from the latest try, if it failed. Older stats are kept.
     pub error: Option<String>,
     pub error_kind: Option<StatsErrorKind>,
+    /// The identity the machine presented, when the owner has to approve it.
+    pub offered_key: Option<OfferedKey>,
+    /// With a changed identity: the fingerprint that was stored.
+    pub expected_fingerprint: Option<String>,
+    /// The identity stored for this machine, if any.
+    pub pinned_fingerprint: Option<String>,
+    /// True when the app has stopped trying by itself, so it doesn't keep
+    /// knocking on a machine that turns it away.
+    pub paused: bool,
 }
 
 impl MachineStatsEntry {
     fn empty(device_id: i64) -> Self {
-        Self { device_id, stats: None, collected_at: None, error: None, error_kind: None }
+        Self {
+            device_id,
+            stats: None,
+            collected_at: None,
+            error: None,
+            error_kind: None,
+            offered_key: None,
+            expected_fingerprint: None,
+            pinned_fingerprint: None,
+            paused: false,
+        }
+    }
+}
+
+/// A machine's SSH identity, as shown to the owner.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferedKey {
+    pub algorithm: String,
+    pub fingerprint: String,
+}
+
+impl From<&HostKey> for OfferedKey {
+    fn from(key: &HostKey) -> Self {
+        Self { algorithm: key.algorithm.clone(), fingerprint: key.fingerprint.clone() }
     }
 }
 
@@ -79,6 +115,11 @@ struct StatsState {
 #[derive(Default)]
 pub struct Monitor {
     stats: Mutex<HashMap<i64, StatsState>>,
+    /// One reading of a machine at a time, so an older try can't finish last
+    /// and overwrite a newer result.
+    reading: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    /// Why status checks can't work at all, if they can't.
+    check_problem: Mutex<Option<String>>,
     /// Wakes the timers early, for example after settings change.
     wake_checks: Notify,
     wake_stats: Notify,
@@ -104,6 +145,7 @@ fn wants_stats(d: &Device) -> bool {
 
 fn error_kind(e: &SshError) -> StatsErrorKind {
     match e {
+        SshError::NewHost(_) => StatsErrorKind::NewHost,
         SshError::HostKeyChanged { .. } => StatsErrorKind::HostKeyChanged,
         SshError::AuthFailed(_) => StatsErrorKind::Auth,
         SshError::Unreachable(_) => StatsErrorKind::Unreachable,
@@ -112,18 +154,21 @@ fn error_kind(e: &SshError) -> StatsErrorKind {
 }
 
 impl Monitor {
-    /// Start both timers. They run until the app closes.
+    /// Start both timers. They run until the app closes. Each round starts
+    /// one timer period after the previous one started, however long the
+    /// round itself took.
     pub fn start(app: &AppHandle) {
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             loop {
+                let started = Instant::now();
                 let monitor = handle.state::<Monitor>();
-                if let Err(e) = monitor.check_round(&handle).await {
-                    eprintln!("home-cc: status check failed: {e}");
-                }
+                // Problems are kept for the screens (see `check_problem`).
+                monitor.check_round(&handle).await.ok();
                 let secs = handle.state::<Inventory>().settings().map(|s| s.ping_interval_secs).unwrap_or(30);
+                let next = tokio::time::Instant::from_std(started + Duration::from_secs(secs.into()));
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(secs.into())) => {}
+                    _ = tokio::time::sleep_until(next) => {}
                     _ = monitor.wake_checks.notified() => {}
                 }
             }
@@ -132,11 +177,13 @@ impl Monitor {
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             loop {
+                let started = Instant::now();
                 let monitor = handle.state::<Monitor>();
                 monitor.stats_round(&handle).await;
                 let secs = handle.state::<Inventory>().settings().map(|s| s.stats_interval_secs).unwrap_or(60);
+                let next = tokio::time::Instant::from_std(started + Duration::from_secs(secs.into()));
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(secs.into())) => {}
+                    _ = tokio::time::sleep_until(next) => {}
                     _ = monitor.wake_stats.notified() => {}
                 }
             }
@@ -157,14 +204,26 @@ impl Monitor {
             .list()?
             .into_iter()
             .filter(|d| d.kind != DeviceKind::Ignore)
-            .map(|d| Target { device_id: d.id, host: d.host })
+            .map(|d| Target { device_id: d.id, host: d.host, mac: d.mac })
             .collect();
-        if !targets.is_empty() {
-            let results = net::check(targets).await;
-            app.state::<Inventory>().record_pings(&results, now())?;
-        }
+        let outcome = match net::check(targets).await {
+            Ok(results) => {
+                *self.check_problem.lock().unwrap() = None;
+                app.state::<Inventory>().record_pings(&results, now())
+            }
+            Err(e) => {
+                // Nothing is recorded: "down" would be wrong for every device.
+                *self.check_problem.lock().unwrap() = Some(e.to_string());
+                Err(e)
+            }
+        };
         app.emit(EVENT_STATUS, ()).ok();
-        Ok(())
+        outcome
+    }
+
+    /// Why status checks can't work at all, with what to do about it.
+    pub fn check_problem(&self) -> Option<String> {
+        self.check_problem.lock().unwrap().clone()
     }
 
     /// Scan the network and save what is found into the inventory.
@@ -184,7 +243,8 @@ impl Monitor {
             progress_app.emit(EVENT_SCAN, p).ok();
         };
         let outcome = net::scan(&range, progress, self.cancel_scan.clone()).await?;
-        let saved = app.state::<Inventory>().record_scan(&outcome.found, now())?;
+        let named = named_devices(app, &outcome.found).await?;
+        let saved = app.state::<Inventory>().record_scan(&outcome.found, now(), &named)?;
 
         drop(quiet);
 
@@ -210,18 +270,46 @@ impl Monitor {
 
     /// One entry per machine with an SSH user, read or not.
     pub fn stats_entries(&self, inv: &Inventory) -> Result<Vec<MachineStatsEntry>> {
-        let known = self.stats.lock().unwrap();
-        Ok(inv
-            .list()?
-            .iter()
-            .filter(|d| wants_stats(d))
-            .map(|d| known.get(&d.id).map(|s| s.entry.clone()).unwrap_or_else(|| MachineStatsEntry::empty(d.id)))
-            .collect())
+        let machines: Vec<Device> = inv.list()?.into_iter().filter(wants_stats).collect();
+        let mut entries = Vec::with_capacity(machines.len());
+        for d in &machines {
+            let known = self.stats.lock().unwrap().get(&d.id).map(|s| s.entry.clone());
+            let mut entry = known.unwrap_or_else(|| MachineStatsEntry::empty(d.id));
+            entry.pinned_fingerprint = inv.host_key(d.id)?.map(|k| k.fingerprint);
+            entries.push(entry);
+        }
+        Ok(entries)
     }
 
-    /// Forget what is held for a device that was removed.
+    /// Forget what is held for a device that was removed, or that now points
+    /// at a different machine.
     pub fn forget(&self, device_id: i64) {
         self.stats.lock().unwrap().remove(&device_id);
+    }
+
+    /// Let the timer try every machine again, after something that could fix
+    /// a failed login changed (a secret was stored or removed).
+    pub fn retry_logins(&self) {
+        for state in self.stats.lock().unwrap().values_mut() {
+            state.entry.paused = false;
+        }
+        self.wake_stats.notify_one();
+    }
+
+    /// The owner approved the identity a machine presented. Only the one they
+    /// were shown is stored; from then on nothing else is accepted.
+    pub fn trust_host_key(&self, inv: &Inventory, device_id: i64, fingerprint: &str) -> Result<()> {
+        let offered = self.stats.lock().unwrap().get(&device_id).and_then(|s| s.entry.offered_key.clone());
+        let Some(offered) = offered.filter(|k| k.fingerprint == fingerprint) else {
+            return Err(Error::Invalid(
+                "This machine has shown a different identity since. Check the new one and approve again.".into(),
+            ));
+        };
+        inv.replace_host_key(device_id, &HostKey { algorithm: offered.algorithm, fingerprint: offered.fingerprint })?;
+        if let Some(state) = self.stats.lock().unwrap().get_mut(&device_id) {
+            state.entry.paused = false;
+        }
+        Ok(())
     }
 
     async fn stats_round(&self, app: &AppHandle) {
@@ -234,17 +322,22 @@ impl Monitor {
         };
         // Drop machines that were removed or no longer have an SSH user.
         self.stats.lock().unwrap().retain(|id, _| machines.iter().any(|d| d.id == *id));
-        if machines.is_empty() {
+        self.reading.lock().unwrap().retain(|id, _| machines.iter().any(|d| d.id == *id));
+        let due: Vec<i64> = {
+            let known = self.stats.lock().unwrap();
+            machines.iter().map(|d| d.id).filter(|id| !known.get(id).is_some_and(|s| s.entry.paused)).collect()
+        };
+        if due.is_empty() {
             return;
         }
 
         let gate = Arc::new(Semaphore::new(STATS_AT_ONCE));
         let mut running = JoinSet::new();
-        for device in machines {
+        for device_id in due {
             let (app, gate) = (app.clone(), gate.clone());
             running.spawn(async move {
                 let _slot = gate.acquire_owned().await;
-                app.state::<Monitor>().read_stats(&app, &device).await;
+                app.state::<Monitor>().read_stats(&app, device_id).await;
                 // Each machine shows as soon as its own reading is in.
                 app.emit(EVENT_STATS, ()).ok();
             });
@@ -253,55 +346,132 @@ impl Monitor {
     }
 
     /// Read one machine's stats now and remember the outcome.
-    pub async fn read_stats(&self, app: &AppHandle, device: &Device) -> MachineStatsEntry {
-        let prev_ticks = self.stats.lock().unwrap().get(&device.id).and_then(|s| s.ticks);
-        let outcome = match login_for(app, device).await {
-            Ok(login) => match stats::collect(&login, device.os, prev_ticks).await {
-                Ok(collected) => {
-                    if login.known_key.is_none() {
-                        let inv = app.state::<Inventory>();
-                        if let Err(e) = inv.remember_host_key(&login.host, login.port, &collected.host_key) {
-                            eprintln!("home-cc: could not store the identity of {}: {e}", login.host);
-                        }
-                    }
-                    Ok(collected)
-                }
-                Err(e) => Err((e.to_string(), error_kind(&e))),
-            },
-            Err(e) => Err((e.to_string(), StatsErrorKind::Other)),
+    pub async fn read_stats(&self, app: &AppHandle, device_id: i64) -> MachineStatsEntry {
+        let turn = self.reading.lock().unwrap().entry(device_id).or_default().clone();
+        let _one_at_a_time = turn.lock().await;
+
+        // Look the machine up only now: it may have been edited or removed
+        // while this reading waited its turn.
+        let device = match app.state::<Inventory>().get(device_id) {
+            Ok(d) if wants_stats(&d) => d,
+            _ => {
+                self.forget(device_id);
+                return MachineStatsEntry::empty(device_id);
+            }
         };
+        let prev_ticks = self.stats.lock().unwrap().get(&device_id).and_then(|s| s.ticks);
+        let login = login_for(app, &device).await;
+        let outcome = match &login {
+            Ok(login) => {
+                // A machine reached for the first time has its identity stored
+                // before anything else happens, so a later change is noticed.
+                // The exception is a machine with a stored password: its
+                // identity waits for the owner's approval (`NewHost`), or for
+                // a key login that gets in without the password.
+                let (first_app, has_password) = (app.clone(), login.password.is_some());
+                let first_use = move |key: &HostKey| {
+                    if !has_password {
+                        remember(&first_app, device_id, key);
+                    }
+                };
+                stats::collect(login, device.os, prev_ticks, &first_use).await
+            }
+            Err(e) => Err(SshError::Other(e.to_string())),
+        };
+        if let (Ok(collected), Ok(login)) = (&outcome, &login) {
+            if login.known_key.is_none() {
+                remember(app, device_id, &collected.host_key);
+            }
+        }
+        let pinned = app.state::<Inventory>().host_key(device_id).ok().flatten().map(|k| k.fingerprint);
 
         let mut known = self.stats.lock().unwrap();
         let state = known
-            .entry(device.id)
-            .or_insert_with(|| StatsState { entry: MachineStatsEntry::empty(device.id), ticks: None });
+            .entry(device_id)
+            .or_insert_with(|| StatsState { entry: MachineStatsEntry::empty(device_id), ticks: None });
+        let entry = &mut state.entry;
+        entry.pinned_fingerprint = pinned;
+        entry.offered_key = None;
+        entry.expected_fingerprint = None;
         match outcome {
             Ok(collected) => {
                 state.ticks = collected.cpu_ticks;
-                state.entry = MachineStatsEntry {
-                    device_id: device.id,
-                    stats: Some(collected.stats),
-                    collected_at: Some(now()),
-                    error: None,
-                    error_kind: None,
-                };
+                entry.stats = Some(collected.stats);
+                entry.collected_at = Some(now());
+                entry.error = None;
+                entry.error_kind = None;
+                entry.paused = false;
             }
-            Err((message, kind)) => {
+            Err(e) => {
                 // Keep the last good reading on screen next to the error.
                 state.ticks = None;
-                state.entry.error = Some(message);
-                state.entry.error_kind = Some(kind);
+                entry.error = Some(e.to_string());
+                entry.error_kind = Some(error_kind(&e));
+                // A machine that turned the login away isn't tried again by
+                // the timer: repeated failed logins get this PC locked out by
+                // tools like fail2ban, and nothing changes until the owner
+                // does something.
+                entry.paused = matches!(e, SshError::AuthFailed(_) | SshError::NewHost(_));
+                match e {
+                    SshError::NewHost(key) => entry.offered_key = Some(OfferedKey::from(&key)),
+                    SshError::HostKeyChanged { expected, got } => {
+                        entry.offered_key = Some(OfferedKey::from(&got));
+                        entry.expected_fingerprint = Some(expected.fingerprint);
+                    }
+                    _ => {}
+                }
             }
         }
-        state.entry.clone()
+        entry.clone()
     }
+}
+
+fn remember(app: &AppHandle, device_id: i64, key: &HostKey) {
+    if let Err(e) = app.state::<Inventory>().remember_host_key(device_id, key) {
+        eprintln!("home-cc: could not store the identity of device {device_id}: {e}");
+    }
+}
+
+/// Hand-added devices whose address is a name: where each one is right now,
+/// so the scan recognises them instead of adding them a second time.
+async fn named_devices(app: &AppHandle, found: &[Found]) -> Result<HashMap<String, i64>> {
+    let targets: Vec<Target> = app
+        .state::<Inventory>()
+        .list()?
+        .into_iter()
+        .filter(|d| d.mac.is_none() && d.host.parse::<std::net::IpAddr>().is_err())
+        .map(|d| Target { device_id: d.id, host: d.host, mac: None })
+        .collect();
+    if targets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let own_ip = found.iter().find(|f| f.is_self).map(|f| f.ip.clone());
+    let mut named: HashMap<String, i64> = HashMap::new();
+    let mut shared: Vec<String> = Vec::new();
+    for (device_id, place) in net::locate(targets).await {
+        let ip = match place {
+            Located::At(ip) => ip.to_string(),
+            Located::Own => match &own_ip {
+                Some(ip) => ip.clone(),
+                None => continue,
+            },
+        };
+        // Two names for one address: can't tell which device it is.
+        if named.insert(ip.clone(), device_id).is_some() {
+            shared.push(ip);
+        }
+    }
+    for ip in shared {
+        named.remove(&ip);
+    }
+    Ok(named)
 }
 
 /// Gather what is needed to log in: stored identity, key file and secrets.
 async fn login_for(app: &AppHandle, device: &Device) -> Result<Login> {
     let inv = app.state::<Inventory>();
     let settings = inv.settings()?;
-    let known_key = inv.host_key(&device.host, device.ssh_port)?;
+    let known_key = inv.host_key(device.id)?;
     let device_id = device.id;
     // The keychain can be slow to answer, so keep it off the async threads.
     // If it can't be read at all (locked, or no keychain service running),
