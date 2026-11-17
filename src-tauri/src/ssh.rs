@@ -74,8 +74,9 @@ pub enum SshError {
     )]
     HostKeyChanged { expected: HostKey, got: HostKey },
     /// A first connection (no identity stored) that could only get in with the stored
-    /// password. The password was not sent: the owner has to approve the identity in
-    /// here first, and it then comes back in as [`Login::known_key`].
+    /// password, to a server that takes passwords. The password was not sent: the owner
+    /// has to approve the identity in here first, and it then comes back in as
+    /// [`Login::known_key`].
     #[error(
         "This is the first connection to this machine, so the stored password was not sent. Approve this \
          machine's identity ({}) first.",
@@ -161,9 +162,12 @@ impl std::fmt::Debug for Session {
 /// identity the server showed, before anything is offered to it, so the caller has it
 /// even if the login or what follows then fails. Key files and the agent are then tried
 /// as usual: they give the server nothing it could use elsewhere. The stored password is
-/// not sent. If nothing else gets in and a password is stored, this fails with
-/// [`SshError::NewHost`]; the password gets its turn once the owner has approved the
-/// identity and it comes back in `login.known_key`.
+/// not sent. If nothing else gets in and the password is all that is left to try (one
+/// is stored and the server takes passwords), this fails with [`SshError::NewHost`]; the
+/// password gets its turn once the owner has approved the identity and it comes back in
+/// `login.known_key`. If the password would have had no turn anyway (the server takes
+/// keys only, or closed the connection first), approving would change nothing, so the
+/// failure is [`SshError::AuthFailed`] as on any other connection.
 ///
 /// What `first_use` may do with the identity depends on [`Login::has_password`], because
 /// an identity in `login.known_key` counts as approved by the owner, wherever it came
@@ -233,18 +237,19 @@ pub async fn connect(
         }
     };
     if !logged_in {
-        let password_stored = login.has_password();
-        let windows_server = server_version.contains("Windows");
-        let message = auth_message(host, user, &auth.tried, password_stored, windows_server);
-        say_goodbye(&handle).await;
-        // A stored password was held back from an identity nobody has approved. It may
-        // well be what gets in, so ask for the approval instead of calling the login
-        // failed.
-        return Err(if login.known_key.is_none() && password_stored {
+        // The stored password would have been sent, and was held back only because nobody
+        // has approved this identity. It may well be what gets in, so ask for the
+        // approval instead of calling the login failed. Where the password had no turn
+        // anyway (the server takes keys only, or hung up first) approving would change
+        // nothing, so that is a failed login like any other, with its advice.
+        let error = if auth.tried.contains(&Tried::PasswordWithheld) {
             SshError::NewHost(host_key)
         } else {
-            SshError::AuthFailed(message)
-        });
+            let windows_server = server_version.contains("Windows");
+            SshError::AuthFailed(auth_message(host, user, &auth.tried, login.has_password(), windows_server))
+        };
+        say_goodbye(&handle).await;
+        return Err(error);
     }
     Ok(Session { handle, host: host.to_string(), host_key, server_version })
 }
@@ -645,7 +650,8 @@ enum Tried {
     /// The key file was left out because the server allows only a few tries.
     KeyNotTried(String),
     PasswordRefused,
-    /// A password is stored but was not sent, because the server's identity is new.
+    /// A password is stored and the server would have been sent it, but its identity is
+    /// new, so it was held back. The login then ends as [`SshError::NewHost`].
     PasswordWithheld,
     /// A password is stored but the server takes keys only.
     PasswordNotTaken,
@@ -936,15 +942,22 @@ impl<'a> Auth<'a> {
             self.tried.push(Tried::CutOff);
             return false;
         }
-        let password = match password_to_send(login) {
-            Password::Send(password) => password,
-            Password::Withheld => {
-                self.tried.push(Tried::PasswordWithheld);
-                return false;
-            }
-            Password::NotStored => return false,
+        let stored = password_to_send(login);
+        if stored == Password::NotStored {
+            return false;
+        }
+        // Whether the server would be sent the password at all comes first, so that
+        // "held back" is only ever said of a server that takes passwords.
+        let plain = self.allows(MethodKind::Password);
+        if !plain && !self.allows(MethodKind::KeyboardInteractive) {
+            self.tried.push(Tried::PasswordNotTaken);
+            return false;
+        }
+        let Password::Send(password) = stored else {
+            self.tried.push(Tried::PasswordWithheld);
+            return false;
         };
-        let logged_in = if self.allows(MethodKind::Password) {
+        let logged_in = if plain {
             match self.handle.authenticate_password(self.user, password).await {
                 Ok(result) => self.accepted(result),
                 Err(_) => {
@@ -952,11 +965,8 @@ impl<'a> Auth<'a> {
                     return false;
                 }
             }
-        } else if self.allows(MethodKind::KeyboardInteractive) {
-            self.typed_password(password).await
         } else {
-            self.tried.push(Tried::PasswordNotTaken);
-            return false;
+            self.typed_password(password).await
         };
         if !logged_in {
             self.tried.push(Tried::PasswordRefused);
@@ -1220,6 +1230,8 @@ fn auth_message(
                 "The key file {name} was not tried, because that machine allows only a few attempts: choose \
                  it as the key file in Settings."
             )),
+            // Not shown as things stand, because `connect` answers with `NewHost` instead.
+            // Kept true, so the sentence is right if that ever changes.
             Tried::PasswordWithheld => notes.push(
                 "The stored password was not sent, because this is the first connection to this machine."
                     .into(),
@@ -2032,6 +2044,43 @@ mod tests {
             other => panic!("expected a failed login, got {other:?}"),
         }
         assert_eq!(server.attempts(), ["none", "password not the password"]);
+    }
+
+    /// Approving the identity is asked for only where it would let the password
+    /// through. A machine that would not be sent the password anyway gets the ordinary
+    /// login failure, with its advice, on a first connection as on any other.
+    #[tokio::test]
+    async fn first_connection_asks_for_approval_only_if_the_password_would_be_sent() {
+        // Takes no passwords in either form ("hostbased" stands in for keys here: with
+        // keys on offer the SSH agent of whoever runs the tests would be asked).
+        let keys_only = test_server::start(&[MethodKind::HostBased]).await;
+        // Offers nothing to carry on with, as when a machine ends the login early.
+        let hangs_up = test_server::start(&[]).await;
+        let cases = [
+            (&keys_only, "This machine does not take passwords, only keys."),
+            (&hangs_up, "The machine closed the connection before everything could be tried."),
+        ];
+        for (server, advice) in cases {
+            let mut login = server.login();
+            login.password = Some(PASSWORD.into());
+            let first_use = FirstUse::new(server);
+            match connect(&login, &|key: &HostKey| first_use.call(key)).await {
+                Err(SshError::AuthFailed(m)) => {
+                    assert_eq!(m, format!("Could not log in to 127.0.0.1 as jim. {advice}"));
+                }
+                other => panic!("expected a failed login, got {other:?}"),
+            }
+            first_use.assert_called_once_before_the_login();
+            assert_eq!(server.attempts(), ["none"]);
+
+            // With the identity stored the outcome is the same: approving changes nothing.
+            login.known_key = Some(server.host_key.clone());
+            match connect(&login, &never).await {
+                Err(SshError::AuthFailed(m)) => assert!(m.ends_with(advice), "{m}"),
+                other => panic!("expected a failed login, got {other:?}"),
+            }
+            assert_eq!(server.attempts(), ["none", "none"]);
+        }
     }
 
     /// The rule for callers in the notes on [`connect`], followed over several
