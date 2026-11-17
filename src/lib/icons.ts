@@ -11,6 +11,12 @@ export const icons = {
   chevron: "M9.5 6l6 6-6 6",
   /** A folder: the group a machine is in. */
   folder: "M3.5 6.5h6l2 2h9v10h-17z",
+  /** A table column sorted lowest first, highest first, or not yet (both arrows). */
+  sortUp: "M12 19V5M6.5 10.5 12 5l5.5 5.5",
+  sortDown: "M12 5v14M6.5 13.5 12 19l5.5-5.5",
+  sortBoth: "M8 9.5l4-4 4 4M8 14.5l4 4 4-4",
+  /** A cross: clear what was typed. */
+  clear: "M6.5 6.5l11 11M17.5 6.5l-11 11",
   /** Six dots: a handle to drag something by. */
   grip: "M8 6a1 1 0 1 0 2 0a1 1 0 1 0-2 0M14 6a1 1 0 1 0 2 0a1 1 0 1 0-2 0M8 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M14 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M8 18a1 1 0 1 0 2 0a1 1 0 1 0-2 0M14 18a1 1 0 1 0 2 0a1 1 0 1 0-2 0",
 };
