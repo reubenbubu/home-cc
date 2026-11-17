@@ -16,7 +16,7 @@ For everyday use, build locally instead (see below).
 
 ## Running from source
 
-You need Node.js 22+, Rust (stable), and the Tauri system packages:
+You need Node.js 22.18 or newer, Rust (stable), and the Tauri system packages:
 
 - **Windows:** Microsoft C++ Build Tools and WebView2 (already on Windows 11).
 - **Linux (Debian/Ubuntu):**
@@ -34,6 +34,7 @@ npm run tauri build   # make an installer for this system
 
 ```sh
 npm run check                                   # type-check the screens
+npm test                                        # front-end tests
 cargo test --manifest-path src-tauri/Cargo.toml # back-end tests
 ```
 
@@ -43,8 +44,8 @@ To run the same checks as GitHub Actions without using its minutes (needs
 Docker; nothing else has to be installed for the build itself):
 
 ```sh
-npm run ci         # type-check, back-end tests, then build the Linux packages
-npm run ci:check   # type-check and back-end tests only
+npm run ci         # type-check, tests, then build the Linux packages
+npm run ci:check   # type-check and tests only
 ```
 
 The `.deb` and `.AppImage` land in `ci/out/`. The first run downloads and
@@ -66,5 +67,16 @@ Windows machine.
   listed in `src/lib/modules.ts`. Theme colours are in `src/app.css`.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
+    `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH
+    identities) keep their tables in the same file.
   - `secrets.rs` – passwords and tokens, kept in the system keychain.
+  - `net/` – finding the home network, scanning it, naming devices and
+    checking they are up.
+  - `ssh.rs`, `stats.rs` – SSH logins, and the machine stats read over them.
+  - `monitor.rs` – the background timers for status checks and stats.
   - `commands.rs` – everything the screens can ask the back end to do.
+- `src-tauri/examples/` – small command-line programs for trying the network
+  and SSH code by itself, for example
+  `cargo run --manifest-path src-tauri/Cargo.toml --example net_scan`.
+- `tools/` – `screenshots.mjs` (pictures of every screen at each monitor size,
+  using sample data) and `build_oui.py` (refreshes the list of device makers).

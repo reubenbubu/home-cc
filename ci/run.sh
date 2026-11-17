@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local CI, run inside the container (see ci/compose.yml).
-#   check  - type-check the screens and run the Rust tests
+#   check  - type-check the screens and run the front-end and Rust tests
 #   all    - the above, then build the Linux packages into ci/out/ (default)
 set -euo pipefail
 

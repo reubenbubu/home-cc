@@ -30,9 +30,11 @@ Not goals for now:
 - **Back end:** Rust. All network work (SSH, Docker, Proxmox, scanning) happens here.
 - **Screens:** TypeScript with Svelte,
   plus xterm.js for terminals.
-- **Secrets:** passwords, SSH keys and API tokens are stored in the operating
-  system's keychain (Windows Credential Manager, or the Linux Secret Service),
-  never in plain config files.
+- **Secrets:** passwords, SSH key passphrases and API tokens are stored in the
+  operating system's keychain (Windows Credential Manager, or the Linux Secret
+  Service), never in plain config files. SSH private keys stay where they
+  already are, in the owner's own key files or SSH agent; the app only stores
+  the path of the key file.
 - **Settings and inventory:** a local SQLite file in the user's app data folder.
 
 Rust libraries:
@@ -108,6 +110,11 @@ part of the first version.
 
 Done when: turning a machine off shows it as down within one timer period, and
 turning it on shows it as up again.
+
+One exception: a machine that never answers ping (many Windows PCs, whose
+firewall drops it) is judged by whether the network still knows its hardware
+address. That information lags by up to about 45 seconds, so such a machine
+can take one more timer period to show as down.
 
 ### 5.3 Machines: PCs and VMs
 
@@ -192,7 +199,12 @@ The app must work well on all three and when moved between them.
 
 - Anything that deletes or stops things (remove container, cleanup, force stop
   VM, roll back snapshot) asks for confirmation first.
-- Secrets live only in the OS keychain.
+- Secrets live only in the OS keychain (SSH private keys stay in the owner's
+  own files or SSH agent; see section 2).
+- A machine reached over SSH is remembered by its identity (host key). If the
+  identity later changes, nothing is sent to it until the owner has seen the
+  old and new fingerprints and approved. A stored password is never sent to a
+  machine whose identity the owner hasn't approved.
 - The app talks only to machines on the home network that the owner has added
   or approved.
 
