@@ -126,7 +126,7 @@
         </select>
       </label>
       <!-- The option's text can't hold the address's hostname as a field of its own: it is shown here. -->
-      {#if picked}<span class="picked-at small"><Address host={picked.host} known={picked.hostname} /></span>{/if}
+      {#if picked}<span class="picked-at small"><Address host={picked.host} known={picked.hostname} stack /></span>{/if}
       <button class="btn primary" type="submit" disabled={!picked}>Open terminal</button>
     </form>
   </header>
@@ -254,8 +254,9 @@
   /* The terminal takes all the height the window gives it. */
   .term-page { display: flex; flex-direction: column; height: 100%; min-height: 24rem; }
   .page-head { margin-bottom: 0.9rem; }
-  .opener { flex: 1 1 22rem; justify-content: flex-end; min-width: 0; flex-wrap: nowrap; }
-  .pick { flex: 0 1 26rem; min-width: 0; }
+  /* In a narrow window the button goes under the machine, not the address out of sight. */
+  .opener { flex: 1 1 22rem; justify-content: flex-end; min-width: 0; flex-wrap: wrap; row-gap: 0.5rem; }
+  .pick { flex: 1 1 12rem; max-width: 26rem; min-width: 0; }
   .opener .btn { flex: none; }
   .term-page :global(.clip) { margin-bottom: 0.75rem; }
 
@@ -268,7 +269,7 @@
   .where { display: flex; align-items: baseline; gap: 0 0.6rem; min-width: 0; max-width: 100%; margin: 0 0 0.55rem auto; }
   .where .user { margin-right: -0.6rem; flex: none; }
   .where .command { min-width: 0; color: var(--text-soft); }
-  .picked-at { display: flex; align-self: center; min-width: 0; flex: 0 1 auto; color: var(--text-soft); }
+  .picked-at { display: flex; align-self: center; flex: none; max-width: 100%; color: var(--text-soft); line-height: 1.25; }
   .tab {
     display: flex;
     align-items: center;
