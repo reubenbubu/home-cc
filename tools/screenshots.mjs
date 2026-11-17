@@ -2764,7 +2764,10 @@ async function checkFlows(browser, url) {
         await type.selectOption("handheld");
         await expectValue(user, "", "the SSH user of a new handheld");
         await form.getByText("A phone, tablet or handheld console isn't one of the machines").waitFor();
+        // Its stats are never read, so the form doesn't say how they are.
+        if (await form.getByText("To read stats, home-cc logs in").count()) throw new Error("the form for a handheld says how its stats are read");
         await type.selectOption("pc");
+        await form.getByText("To read stats, home-cc logs in").waitFor();
         await expectValue(user, "sam", "the SSH user after going back from Handheld to PC");
         await user.fill("root");
         await type.selectOption("appliance");
