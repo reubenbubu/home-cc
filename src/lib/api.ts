@@ -29,6 +29,8 @@ export interface Device {
   firstSeen: number;
   /** Unix seconds of the last answer to a scan or ping. */
   lastSeen: number | null;
+  /** The group the owner put it in on the Machines screen, or none. A scan never changes it. */
+  group: string | null;
 }
 
 export interface DeviceInput {
@@ -41,6 +43,8 @@ export interface DeviceInput {
   notes?: string;
   /** Not given (or null): left as it is. An empty string clears it. */
   mac?: string | null;
+  /** Group name. Not given (or null): left as it is. An empty string takes the machine out of its group. */
+  group?: string | null;
 }
 
 export interface Settings {
@@ -347,6 +351,10 @@ export const api = {
   listDevices: () => invoke<Device[]>("list_devices"),
   addDevice: (input: DeviceInput) => invoke<Device>("add_device", { input }),
   updateDevice: (id: number, input: DeviceInput) => invoke<Device>("update_device", { id, input }),
+  /** Puts one machine in a group ("" for none) and changes nothing else about it. */
+  setDeviceGroup: (id: number, group: string) => invoke<Device>("set_device_group", { id, group }),
+  /** Renames a group on every device in it; an empty `to` takes them all out of it. Gives how many changed. */
+  renameGroup: (from: string, to: string) => invoke<number>("rename_group", { from, to }),
   removeDevice: (id: number) => invoke<void>("remove_device", { id }),
   setSecret: (key: string, value: string) => invoke<void>("set_secret", { key, value }),
   hasSecret: (key: string) => invoke<boolean>("has_secret", { key }),

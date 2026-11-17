@@ -23,6 +23,7 @@ import type {
   StatsErrorKind,
   Subnet,
 } from "../api";
+import { foldGroup } from "../arrange";
 import { terminalCommands } from "./terminal";
 import { dockerMock } from "./docker";
 // Proxmox
@@ -140,6 +141,7 @@ export function installMock() {
       reviewed: true,
       firstSeen: start - 40 * DAY,
       lastSeen: start - 8,
+      group: null,
       pattern,
       ...more,
     };
@@ -176,6 +178,17 @@ export function installMock() {
   for (const name of ["NAS", "Pi-hole 1"]) {
     const d = devices.find((x) => x.name === name);
     if (d) d.access = "password";
+  }
+  // Groups on the Machines screen: the Proxmox host with its containers, and the NAS PC with the VMs it
+  // runs. The rest are in no group. "?nogroups" in the address: no machine is in a group.
+  if (!query.has("nogroups")) {
+    const groups: [string, string[]][] = [
+      ["Proxmox lab", ["Proxmox", "Pi-hole 1", "Pi-hole 2", "Monitoring"]],
+      ["NAS PC", ["NAS", "Homelab VM", "Dev VM"]],
+    ];
+    for (const [group, names] of groups) {
+      for (const d of devices) if (names.includes(d.name)) d.group = group;
+    }
   }
   const idOf = (name: string) => devices.find((d) => d.name === name)?.id ?? -1;
 
@@ -704,6 +717,33 @@ export function installMock() {
     }
     const mac = input.mac?.trim();
     if (mac && mac.replace(/[^0-9a-f]/gi, "").length !== 12) throw "Hardware address should look like aa:bb:cc:dd:ee:ff";
+    if (input.group != null) tidyGroup(input.group);
+  }
+
+  /** A group name as the back end stores it (inventory.rs tidy_group): trimmed, one space between words,
+   *  at most 40 characters. Null for none. */
+  function tidyGroup(name: string): string | null {
+    const tidy = name.split(/\s+/).filter(Boolean).join(" ");
+    if (!tidy) return null;
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(tidy)) throw "A group name can't contain tabs or other invisible characters";
+    if ([...tidy].length > 40) throw "A group name can be at most 40 characters long";
+    return tidy;
+  }
+
+  /** The spelling of a group that already has this name in other letter case, as the back end does it:
+   *  typing "nas pc" puts a machine in "NAS PC". Letter case is taken out with the back end's own rule
+   *  (foldGroup), not a looser one, so the screens can't be shown working here and fail in the app. */
+  function storedSpelling(name: string, exceptId: number | null, exceptGroup: string | null): string {
+    const others = devices.filter((d) => d.id !== exceptId && d.group && d.group !== exceptGroup).map((d) => d.group as string);
+    return others.find((g) => g === name) ?? others.find((g) => foldGroup(g) === foldGroup(name)) ?? name;
+  }
+
+  /** The group to store for a device: `typed` not given keeps `current`. */
+  function groupFrom(typed: string | null | undefined, current: string | null, id: number | null): string | null {
+    if (typed == null) return current;
+    const tidy = tidyGroup(typed);
+    return tidy === null ? null : storedSpelling(tidy, id, null);
   }
 
   function normalMac(mac: string | null | undefined): string | null {
@@ -764,6 +804,7 @@ export function installMock() {
         source: "manual",
         firstSeen: nowSecs(),
         lastSeen: null,
+        group: groupFrom(input.group, null, null),
       });
       devices.push(d);
       if (readsStats(d)) entries.set(d.id, blankEntry(d.id));
@@ -800,6 +841,7 @@ export function installMock() {
         vendor,
         hostname,
         reviewed: true,
+        group: groupFrom(input.group, d.group, d.id),
       });
       const e = entries.get(d.id);
       if (!readsStats(d)) entries.delete(d.id);
@@ -807,6 +849,21 @@ export function installMock() {
       // An edit ends a pause.
       else if (e.paused) entries.set(d.id, { ...e, paused: false });
       return publicDevice(d);
+    },
+    set_device_group: ({ id, group }: { id: number; group: string }) => {
+      const d = find(id);
+      d.group = groupFrom(group, d.group, d.id);
+      return publicDevice(d);
+    },
+    rename_group: ({ from, to }: { from: string; to: string }) => {
+      const old = tidyGroup(from);
+      if (old === null) throw "Say which group to rename";
+      const tidy = tidyGroup(to);
+      const next = tidy === null ? null : storedSpelling(tidy, null, old);
+      const members = devices.filter((d) => d.group === old);
+      if (members.length === 0) throw `Not found: group "${old}"`;
+      for (const d of members) d.group = next;
+      return members.length;
     },
     remove_device: ({ id }: { id: number }) => {
       find(id);

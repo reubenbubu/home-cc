@@ -57,6 +57,7 @@ export function deviceDetails(d: Device): Details {
     "SSH port": d.sshUser ? d.sshPort : null,
     "Resolved hostname": names.describe(d.host, d.hostname),
     Maker: d.vendor,
+    Group: d.group,
   };
 }
 

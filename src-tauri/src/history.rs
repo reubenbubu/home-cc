@@ -130,6 +130,7 @@ mod tests {
             ssh_port: None,
             notes: String::new(),
             mac: None,
+            group: None,
         };
         inv.add(input).unwrap().id
     }

@@ -138,6 +138,20 @@ can take one more timer period to show as down.
 - The machine cards can be put in any order: drag a card by the grip in its
   header, or use the arrow keys on that grip. The order is remembered on this
   PC; new machines go at the end, and "Reset order" goes back to name order.
+- Machines can be put in groups the owner names ("Proxmox lab", say): with the
+  Group field in a machine's form (which suggests the groups there are), or
+  with the group menu on its card. The cards show under a heading per group
+  (name and count), groups in name order, machines in no group last under
+  "Other machines". Each group can be collapsed, remembered on this PC.
+  Rename changes the name on every machine in the group; a name another group
+  already has (in any letter case) joins the two. Ungroup asks first, then
+  takes the machines out of it. A card is moved only among its own group's
+  cards; the saved order is one list for all cards, and a card that joins a
+  group goes at its end. The group is kept with the machine in the back end
+  and a scan never changes it. A machine set to Ignore (or made a phone, say)
+  keeps its group and comes back in it; Rename and Ungroup change it too, and
+  say so. A machine's open form only sends its group when the owner changed
+  that field, so it never undoes a group given meanwhile from the card.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.

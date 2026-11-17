@@ -27,6 +27,20 @@ export function differs<T>(value: T, saved: T | undefined): boolean {
   return saved === undefined || !sameValues(value, saved);
 }
 
+/** A form kept from before, opened again: what the owner changed stays, and every field they left as it was
+ *  takes what is saved now, in case it was changed elsewhere meanwhile (a machine put in a group with its
+ *  card's menu, say). `base` is what was saved when the draft was typed. A field the owner changed and that
+ *  was also changed elsewhere keeps the owner's value. */
+export function rebased<T extends object>(draft: T, base: T, now: T): T {
+  const out = { ...draft } as Record<string, unknown>;
+  const b = base as Record<string, unknown>;
+  const n = now as Record<string, unknown>;
+  for (const k of new Set([...Object.keys(out), ...Object.keys(n)])) {
+    if (sameValues(out[k], b[k])) out[k] = n[k];
+  }
+  return out as T;
+}
+
 /** A file being edited when the owner left the screen. */
 export interface FileDraft {
   path: string;

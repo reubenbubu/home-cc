@@ -225,6 +225,7 @@ mod tests {
                 ssh_port: Some(22),
                 notes: String::new(),
                 mac: None,
+                group: None,
             })
             .unwrap();
         (inv, d)
@@ -288,6 +289,7 @@ mod tests {
                     ssh_port: Some(22),
                     notes: String::new(),
                     mac: None,
+                    group: None,
                 },
             )
             .unwrap();

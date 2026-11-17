@@ -35,6 +35,19 @@ class DeviceStore {
     return device;
   }
 
+  async setGroup(id: number, group: string): Promise<Device> {
+    const device = await api.setDeviceGroup(id, group);
+    await this.load();
+    return device;
+  }
+
+  /** An empty `to` takes every machine out of the group. */
+  async renameGroup(from: string, to: string): Promise<number> {
+    const changed = await api.renameGroup(from, to);
+    await this.load();
+    return changed;
+  }
+
   async remove(id: number) {
     await api.removeDevice(id);
     await this.load();

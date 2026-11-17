@@ -1,7 +1,7 @@
 // Run with "npm test" (Node reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { differs, draftFor, fileOnReturn, replacesFileDraft, sameValues } from "./drafts.ts";
+import { differs, draftFor, fileOnReturn, rebased, replacesFileDraft, sameValues } from "./drafts.ts";
 
 test("the same values, looking inside lists and objects", () => {
   assert.ok(sameValues("a", "a"));
@@ -56,4 +56,17 @@ test("a file's draft is used for every read of that file, and isn't overwritten 
   assert.ok(replacesFileDraft({ ...edited, text: edited.original }, other));
   assert.ok(replacesFileDraft(edited, { ...edited, text: "a: 3\n" }));
   assert.ok(replacesFileDraft(undefined, other));
+});
+
+test("a form kept from before takes what was changed elsewhere in the fields the owner left alone", () => {
+  const base = { name: "Printer", notes: "", group: "", sshPort: 22 };
+  const draft = { name: "Printer", notes: "by the stairs", group: "", sshPort: 22 };
+  // Put in a group with its card's menu while the form was kept: the group follows, the notes stay.
+  assert.deepEqual(rebased(draft, base, { ...base, group: "Office" }), { ...draft, group: "Office" });
+  // The owner typed a group too: theirs is kept.
+  assert.deepEqual(rebased({ ...draft, group: "Lab" }, base, { ...base, group: "Office" }).group, "Lab");
+  // Nothing changed elsewhere: the draft as it was.
+  assert.deepEqual(rebased(draft, base, base), draft);
+  // A field the saved machine has now and the draft didn't know about.
+  assert.deepEqual(rebased({ name: "a" }, { name: "a" }, { name: "b", group: "G" }), { name: "b", group: "G" });
 });
