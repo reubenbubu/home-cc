@@ -17,6 +17,8 @@ import { containerKey, keptSelection, shownHosts, stackKey } from "./logic";
 
 /** The open host is read again this often while the screen is open. */
 export const REFRESH_SECS = 15;
+/** Every host is read again this often while the Overview screen is open. */
+export const OVERVIEW_SECS = 60;
 /** Looks for Docker going on at once. */
 const PROBES_AT_ONCE = 3;
 
@@ -158,6 +160,33 @@ class DockerStore {
         if (!stopped) await this.#statsIfFine(id);
       }
       if (!stopped) timer = setTimeout(() => round(true), REFRESH_SECS * 1000);
+    };
+    void round(true);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
+  /** For the Overview screen: every host with a Docker tab, read now and then every OVERVIEW_SECS while the
+   *  window is in view. Looks for Docker on machines due a look first, as the Docker screen does. Reads are
+   *  `auto`, so a host whose login was turned away waits for the owner. Returns a function that stops. */
+  watchAll(): () => void {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const readAll = (onlyUnread: boolean) =>
+      Promise.all(
+        this.shown.filter((h) => !onlyUnread || !this.overviews.has(h.deviceId)).map((h) => this.read(h.deviceId, true)),
+      );
+    const round = async (first: boolean) => {
+      if (!document.hidden) {
+        if (first || !this.loaded) await this.loadHosts();
+        // Hosts already known are read straight away. Looking for Docker on the other machines can take a
+        // while; what it finds is read as soon as that is done.
+        const found = first ? this.probeDue().then(() => (stopped ? undefined : readAll(true))) : undefined;
+        if (!stopped) await Promise.all([readAll(false), found]);
+      }
+      if (!stopped) timer = setTimeout(() => round(false), OVERVIEW_SECS * 1000);
     };
     void round(true);
     return () => {

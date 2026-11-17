@@ -15,6 +15,9 @@
   import ScanStatus from "$lib/components/ScanStatus.svelte";
   import Sparkline from "$lib/components/Sparkline.svelte";
   import StatusDot from "$lib/components/StatusDot.svelte";
+  import DockerSummary from "$lib/components/docker/DockerSummary.svelte";
+  import { summarise } from "$lib/docker/logic";
+  import { docker } from "$lib/docker/store.svelte";
 
   const byName = (a: Device, b: Device) => a.name.localeCompare(b.name, undefined, { numeric: true });
   const shown = $derived(devices.list.filter((d) => d.kind !== "ignore"));
@@ -81,6 +84,23 @@
         if (used != null && used > settings.value.diskWarnPct) {
           warn.push({ key: `disk-${d.id}-${i}`, text: `${d.name}: disk ${disk.mount} is ${pct(used)} full`, href });
         }
+      }
+    }
+    // Docker hosts (read by the Containers panel): a host that can't be read, and containers that need a look.
+    for (const h of docker.shown) {
+      const name = devices.byId.get(h.deviceId)?.name ?? `Device ${h.deviceId}`;
+      if (h.problem) {
+        warn.push({ key: `docker-${h.deviceId}`, text: `${name}: Docker couldn't be read`, href: "/docker" });
+        continue;
+      }
+      const o = docker.overviews.get(h.deviceId);
+      if (!o) continue;
+      const attention = summarise(o).attention;
+      for (const a of attention.slice(0, 3)) {
+        warn.push({ key: `docker-${h.deviceId}-${a.name}`, text: `${name}: ${a.name} ${a.why}`, href: "/docker" });
+      }
+      if (attention.length > 3) {
+        warn.push({ key: `docker-${h.deviceId}-more`, text: `${name}: ${attention.length - 3} more containers need a look`, href: "/docker" });
       }
     }
     return [...down, ...warn];
@@ -260,7 +280,7 @@
     </section>
     <section class="panel">
       <h2 class="section-title">Containers</h2>
-      <p class="muted">Docker containers from each host will show here once the Docker module is in.</p>
+      <DockerSummary />
     </section>
   </aside>
 </div>

@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  containerAttention,
   containerKey,
   commandShown,
   defaultPick,
@@ -23,6 +24,7 @@ import {
   stateText,
   stateTone,
   stripAnsi,
+  summarise,
 } from "./logic.ts";
 
 const container = (more = {}) => ({
@@ -198,4 +200,40 @@ test("a container's terminal looks for docker where the Docker module does, and 
   assert.equal(commandShown(command), "docker exec -it web sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
   assert.equal(commandShown("pct enter 101"), "pct enter 101");
   assert.equal(commandShown('PATH="$PATH:/x" docker ps'), 'PATH="$PATH:/x" docker ps');
+});
+
+test("the Overview counts a host's containers and points at the ones that need a look", () => {
+  const stack = (name, containers) => ({ name, workingDir: null, configFiles: [], containers });
+  const o = {
+    deviceId: 1,
+    readAt: 0,
+    stacks: [
+      stack("media", [
+        container({ name: "jellyfin" }),
+        container({ name: "sonarr", health: "unhealthy" }),
+        container({ name: "radarr", state: "exited", exitCode: 0 }),
+        container({ name: "prowlarr", state: "exited", exitCode: 143 }),
+      ]),
+      stack("home", [container({ name: "zigbee", state: "restarting", exitCode: 1, project: "home" })]),
+      stack("nextcloud", []),
+    ],
+    others: [
+      container({ name: "backup", state: "exited", exitCode: 2, project: null }),
+      container({ name: "old", state: "dead", project: null }),
+    ],
+  };
+  const s = summarise(o);
+  assert.equal(s.containers, 7);
+  assert.equal(s.running, 2, "unhealthy still counts as running");
+  assert.equal(s.stacks, 2, "a stack that is down isn't counted");
+  assert.deepEqual(
+    s.attention.map((a) => `${a.name}: ${a.why}`),
+    ["backup: stopped with an error (exit 2)", "old: is dead", "sonarr: is unhealthy", "zigbee: keeps restarting (exit 1)"],
+  );
+});
+
+test("a container stopped on purpose doesn't need a look", () => {
+  for (const exitCode of [0, 137, 143, null]) assert.equal(containerAttention(container({ state: "exited", exitCode })), null, String(exitCode));
+  assert.equal(containerAttention(container({ state: "exited", exitCode: 1 })), "stopped with an error (exit 1)");
+  assert.equal(containerAttention(container({ state: "running", health: "starting" })), null);
 });

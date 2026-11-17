@@ -1068,6 +1068,21 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "the Overview's Containers panel reads every Docker host by itself and opens one on the Docker screen",
+      path: "/",
+      async run(page) {
+        const panel = page.locator("section.panel", { has: page.getByRole("heading", { name: "Containers" }) });
+        await panel.getByText("Homelab VM").waitFor();
+        await panel.getByText(/\d+ running · \d+ stacks?/).first().waitFor({ timeout: 10000 });
+        await panel.getByText("zigbee2mqtt").waitFor();
+        await page.getByRole("link", { name: /Homelab VM: \S*zigbee2mqtt\S* keeps restarting/ }).waitFor();
+        if (await panel.getByText("once the Docker module is in").count()) throw new Error("the old placeholder is still there");
+        await panel.getByRole("button", { name: /Dev VM/ }).click();
+        await page.waitForURL("**/docker");
+        await page.getByRole("tab", { name: /Dev VM/, selected: true }).waitFor();
+      },
+    },
+    {
       what: "Docker: an open cleanup moves to the host tab picked next, and an open log closes",
       path: "/docker",
       async run(page) {

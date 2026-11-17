@@ -1,6 +1,6 @@
 // The Docker screen's small decisions, kept free of Svelte and the back end so
 // they can be tested with plain Node (logic.test.mjs).
-import type { CleanupPick, CleanupPreview, Container, DockerHost, Port, Stack } from "./api";
+import type { CleanupPick, CleanupPreview, Container, DockerHost, Overview, Port, Stack } from "./api";
 
 export type Tone = "ok" | "warn" | "bad" | "idle";
 
@@ -265,4 +265,45 @@ export function commandShown(command: string): string {
 export function baseName(path: string): string {
   const parts = path.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? path;
+}
+
+/** A container on a host that the owner should look at, and why, in a few words. */
+export interface ContainerAttention {
+  name: string;
+  stack: string | null;
+  why: string;
+}
+
+/** One host's containers in a few numbers, for the Overview screen. */
+export interface HostSummary {
+  containers: number;
+  running: number;
+  /** Compose stacks with at least one container. */
+  stacks: number;
+  attention: ContainerAttention[];
+}
+
+/** Why a container needs a look, said so it follows its name ("zigbee keeps restarting"), or null if it is fine. */
+export function containerAttention(c: Container): string | null {
+  if (c.health === "unhealthy") return "is unhealthy";
+  if (c.state === "restarting") return c.exitCode ? `keeps restarting (exit ${c.exitCode})` : "keeps restarting";
+  if (c.state === "dead") return "is dead";
+  if (c.state === "exited" && c.exitCode != null && !NORMAL_STOP.includes(c.exitCode)) return `stopped with an error (exit ${c.exitCode})`;
+  return null;
+}
+
+export function summarise(o: Overview): HostSummary {
+  const all = [...o.stacks.flatMap((s) => s.containers), ...o.others];
+  const attention: ContainerAttention[] = [];
+  for (const c of all) {
+    const why = containerAttention(c);
+    if (why) attention.push({ name: c.name, stack: c.project, why });
+  }
+  attention.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return {
+    containers: all.length,
+    running: all.filter((c) => c.state === "running").length,
+    stacks: o.stacks.filter((s) => s.containers.length > 0).length,
+    attention,
+  };
 }
