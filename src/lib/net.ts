@@ -44,6 +44,23 @@ export function isThisPc(host: string, markedSelf: boolean | undefined, anySelf:
   return !anySelf && own.has(host.trim());
 }
 
+/** Whether a device's SSH login reaches something this PC passes connections on to (a VM, WSL, a
+ *  container behind a forwarded port) rather than this PC itself: an SSH user with a port other than 22,
+ *  or on a loopback host. Such a device is read over SSH, never as this PC. Same rule as the back end's
+ *  `ssh_leads_elsewhere` (localstats.rs). */
+export function sshLeadsElsewhere(d: { host: string; sshUser: string | null; sshPort: number }): boolean {
+  if (!d.sshUser?.trim()) return false;
+  if (d.sshPort !== 22) return true;
+  const host = d.host.trim().replace(/\.$/, "").replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  return (
+    /^127\.\d+\.\d+\.\d+$/.test(host) ||
+    host === "::1" ||
+    host.startsWith("::ffff:127.") ||
+    host === "localhost" ||
+    host.endsWith(".localhost")
+  );
+}
+
 /** What the edit form sends for the hardware address: null to leave the stored one as it is (the box
  *  wasn't changed), "" to remove it (the box was emptied), or the new text. */
 export function macToSend(stored: string | null, typed: string): string | null {

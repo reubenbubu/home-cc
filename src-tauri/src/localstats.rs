@@ -15,7 +15,7 @@ use crate::stats::{self, CpuTicks, MachineStats, Reading, StatsError};
 use std::collections::{BTreeSet, HashSet};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,7 +41,7 @@ pub fn this_pc_ids(devices: &[Device]) -> BTreeSet<i64> {
     let by_checks = net::own_devices();
     devices
         .iter()
-        .filter(|d| d.kind != DeviceKind::Ignore)
+        .filter(|d| d.kind != DeviceKind::Ignore && !ssh_leads_elsewhere(d))
         .filter(|d| is_this_pc(&d.host, &own, hostname.as_deref(), by_checks.contains(&d.id)))
         .map(|d| d.id)
         .collect()
@@ -60,6 +60,30 @@ pub async fn this_pc_ids_now(devices: Vec<Device>) -> BTreeSet<i64> {
     tauri::async_runtime::spawn_blocking(move || this_pc_ids(&devices)).await.unwrap_or_default()
 }
 
+/// Whether the device's SSH login reaches something this PC passes connections on to,
+/// rather than this PC itself: a VM, a WSL distro or a container behind a forwarded port
+/// (say 127.0.0.1 port 2222, or this PC's own address port 2222). That is the case when
+/// it has an SSH user and either a port other than 22 or a loopback host. The owner set
+/// that login up on purpose, so such a device keeps being read over SSH, and its system
+/// is never filled in from this PC's. This PC itself, found by a scan or added by its
+/// address or name, needs no SSH user, and one it has on port 22 is simply not used.
+fn ssh_leads_elsewhere(d: &Device) -> bool {
+    d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty()) && (d.ssh_port != 22 || is_loopback(&d.host))
+}
+
+/// A loopback address (127.x, ::1, ::ffff:127.x) or "localhost", as a device's host.
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.');
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_loopback(),
+        Ok(IpAddr::V6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+        Err(_) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost" || host.ends_with(".localhost")
+        }
+    }
+}
+
 /// A device's host (as the owner typed it, or a scan stored it) is this PC when it is
 /// - one of this PC's own addresses (`own`), or a loopback one such as 127.0.0.1 or ::1;
 /// - "localhost", or this PC's own name (`hostname`), with or without a network ending
@@ -70,20 +94,18 @@ pub async fn this_pc_ids_now(devices: Vec<Device>) -> BTreeSet<i64> {
 /// An address is judged by itself alone, never by `by_checks`: that verdict can be from
 /// before the owner pointed the device at another machine.
 fn is_this_pc(host: &str, own: &HashSet<Ipv4Addr>, hostname: Option<&str>, by_checks: bool) -> bool {
+    if is_loopback(host) {
+        return true;
+    }
     let host = host.trim().trim_end_matches('.');
     match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => ip.is_loopback() || own.contains(&ip),
-        Ok(IpAddr::V6(ip)) => {
-            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback() || own.contains(&v4))
-        }
+        Ok(IpAddr::V4(ip)) => own.contains(&ip),
+        Ok(IpAddr::V6(ip)) => ip.to_ipv4_mapped().is_some_and(|v4| own.contains(&v4)),
         Err(_) => {
             let host = host.to_ascii_lowercase();
             let first_part = |name: &str| name.split('.').next().unwrap_or("").to_string();
             let own_name = hostname.map(|n| n.trim().trim_end_matches('.').to_ascii_lowercase()).unwrap_or_default();
-            host == "localhost"
-                || host.ends_with(".localhost")
-                || (!own_name.is_empty() && (host == own_name || first_part(&host) == first_part(&own_name)))
-                || by_checks
+            (!own_name.is_empty() && (host == own_name || first_part(&host) == first_part(&own_name))) || by_checks
         }
     }
 }
@@ -252,8 +274,9 @@ impl RunError {
 /// prints. Blocks until it ends, and stops it if it is still running after `limit`. On
 /// Windows it gets no console window, so nothing flashes up on the screen.
 ///
-/// Stopping it stops that program only. Anything it started itself may run on for a
-/// moment; the stats scripts start only short commands that end by themselves.
+/// Stopping it stops whatever it started too (a `df` stuck on a disk that no longer
+/// answers, say), and so does its ending: nothing is left running to hold its output open
+/// or pile up reading after reading.
 pub fn run(
     program: &str,
     args: &[impl AsRef<str>],
@@ -268,7 +291,9 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     hide_window(&mut command);
+    own_group(&mut command);
     let mut child = command.spawn().map_err(RunError::Failed)?;
+    let mut tree = Tree::of(&child);
 
     if let (Some(mut pipe), Some(input)) = (child.stdin.take(), input) {
         let input = input.to_vec();
@@ -286,6 +311,7 @@ pub fn run(
             Ok(Some(_)) => break,
             Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
             outcome => {
+                tree.kill();
                 child.kill().ok();
                 child.wait().ok();
                 return Err(match outcome {
@@ -296,7 +322,9 @@ pub fn run(
         }
     }
     // It has ended, so its output is complete as soon as the pipes are read to the end.
-    // Something it left running could keep a pipe open: don't wait for that for ever.
+    // Anything it left running is stopped, so it can't keep a pipe open; should something
+    // have slipped out of reach all the same, don't wait for it for ever.
+    tree.kill();
     let wait = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
     Ok(Output {
         stdout: stdout.recv_timeout(wait).unwrap_or_default(),
@@ -344,6 +372,111 @@ fn hide_window(command: &mut Command) {
 
 #[cfg(not(windows))]
 fn hide_window(_command: &mut Command) {}
+
+/// On Unix the program starts a process group of its own, so that it and everything it
+/// starts can be stopped together (see [`Tree`]).
+#[cfg(unix)]
+fn own_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_group(_command: &mut Command) {}
+
+/// The program and everything it starts, to be stopped together: on Unix its process
+/// group, on Windows a job object that it is put in as soon as it has started.
+#[cfg(unix)]
+struct Tree(Option<i32>);
+
+#[cfg(unix)]
+impl Tree {
+    fn of(child: &Child) -> Tree {
+        // The group has the program's own number (`own_group`).
+        Tree(i32::try_from(child.id()).ok().filter(|&pid| pid > 0))
+    }
+
+    /// Stop everything still in the group. Done once, while the group still exists: with
+    /// the program unreaped, or with something it left behind still in the group, its
+    /// number can't have gone to anyone else.
+    fn kill(&mut self) {
+        if let Some(group) = self.0.take() {
+            // SAFETY: kill() only sends a signal; a negative number names a process group.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct Tree(Option<windows::Win32::Foundation::HANDLE>);
+
+#[cfg(windows)]
+impl Tree {
+    /// A job object that stops everything in it when it is closed. Anything PowerShell
+    /// starts joins it too. If one can't be made, only the program itself is stopped.
+    fn of(child: &Child) -> Tree {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        };
+        // SAFETY: plain Win32 calls on a job made here and on the child's own process handle,
+        // which stays valid for as long as `child` exists.
+        unsafe {
+            let Ok(job) = CreateJobObjectW(None, windows::core::PCWSTR::null()) else { return Tree(None) };
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let joined = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .is_ok()
+                && AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())).is_ok();
+            if !joined {
+                CloseHandle(job).ok();
+                return Tree(None);
+            }
+            Tree(Some(job))
+        }
+    }
+
+    /// Stop everything in the job, and let it go.
+    fn kill(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        if let Some(job) = self.0.take() {
+            // SAFETY: `job` is the handle made in `of`, closed only here.
+            unsafe {
+                TerminateJobObject(job, 1).ok();
+                CloseHandle(job).ok();
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Tree {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct Tree;
+
+#[cfg(not(any(unix, windows)))]
+impl Tree {
+    fn of(_child: &Child) -> Tree {
+        Tree
+    }
+
+    fn kill(&mut self) {}
+}
 
 #[cfg(test)]
 mod tests {
@@ -438,6 +571,42 @@ mod tests {
         }
     }
 
+    fn with_ssh(mut d: Device, user: &str, port: u16) -> Device {
+        d.ssh_user = Some(user.into());
+        d.ssh_port = port;
+        d
+    }
+
+    #[test]
+    fn a_login_through_a_forwarded_port_is_not_this_pc() {
+        let hostname = dns_lookup::get_hostname().unwrap();
+        let own_ip = net::own_ips_now().into_iter().find(|ip| !ip.is_loopback()).map(|ip| ip.to_string());
+        let mut port_but_no_user = device(6, "127.0.0.1", DeviceKind::Pc);
+        port_but_no_user.ssh_port = 2222;
+        let mut devices = vec![
+            // A Vagrant VM, a WSL distro, a container published on this PC's own name.
+            with_ssh(device(1, "127.0.0.1", DeviceKind::Pc), "vagrant", 2222),
+            with_ssh(device(2, "localhost", DeviceKind::Pc), "sam", 2222),
+            with_ssh(device(3, &hostname, DeviceKind::Server), "root", 2222),
+            // A login to port 22 of the loopback address: set up on purpose, it may be WSL.
+            with_ssh(device(4, "localhost", DeviceKind::Pc), "sam", 22),
+            // This PC by its name, with an SSH user on the usual port: read here all the same.
+            with_ssh(device(5, &hostname, DeviceKind::Pc), "sam", 22),
+            // Another port but no SSH user: there is no login to lead anywhere.
+            port_but_no_user,
+        ];
+        let mut expected = BTreeSet::from([5, 6]);
+        if let Some(ip) = &own_ip {
+            devices.push(with_ssh(device(7, ip, DeviceKind::Server), "root", 2222));
+            devices.push(with_ssh(device(8, ip, DeviceKind::Pc), "sam", 22));
+            expected.insert(8);
+        }
+        assert_eq!(this_pc_ids(&devices), expected);
+        assert!(!ssh_leads_elsewhere(&with_ssh(device(9, "127.0.0.1", DeviceKind::Pc), " ", 2222)), "a blank user");
+        assert!(ssh_leads_elsewhere(&with_ssh(device(9, "[::1]", DeviceKind::Pc), "sam", 22)));
+        assert!(!ssh_leads_elsewhere(&with_ssh(device(9, "192.168.68.58", DeviceKind::Pc), "sam", 22)));
+    }
+
     #[test]
     fn os_is_filled_in_only_where_still_other() {
         let inv = Inventory::in_memory().unwrap();
@@ -484,6 +653,44 @@ mod tests {
         assert!(matches!(outcome, Err(RunError::TimedOut)), "{outcome:?}");
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         assert!(RunError::TimedOut.explain("sh").contains("took too long"));
+    }
+
+    /// Whether a process is gone (or only a zombie left for its new parent to reap).
+    #[cfg(target_os = "linux")]
+    fn stopped(pid: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Err(_) => return true,
+                Ok(stat) if stat.rsplit(')').next().is_some_and(|rest| rest.trim_start().starts_with(['Z', 'X'])) => {
+                    return true;
+                }
+                Ok(_) if Instant::now() > deadline => return false,
+                Ok(_) => thread::sleep(POLL),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_a_program_started_is_stopped_with_it() {
+        // Too slow: the shell and the command it is waiting on both go.
+        let file = std::env::temp_dir().join(format!("home-cc-stuck-{}", std::process::id()));
+        let script = format!("sleep 30 & echo $! > '{}'; wait", file.display());
+        let started = Instant::now();
+        let outcome = run("/bin/sh", &["-c", &script], None, Duration::from_millis(500));
+        assert!(matches!(outcome, Err(RunError::TimedOut)), "{outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let pid = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(&file).ok();
+        assert!(stopped(pid.trim()), "the sleep it started is still running");
+
+        // Ended, but left something holding its output open: that goes too, and the output
+        // is there at once rather than when the time is up.
+        let started = Instant::now();
+        let out = run("/bin/sh", &["-c", "sleep 30 & echo started"], None, Duration::from_secs(20)).unwrap();
+        assert_eq!(out.stdout, b"started\n");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[cfg(unix)]

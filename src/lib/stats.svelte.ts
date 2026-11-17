@@ -3,6 +3,7 @@
 // are ready.
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { api, errorText, type Device, type MachineStatsEntry } from "./api";
+import { sshLeadsElsewhere } from "./net";
 import { OneAtATime } from "./running";
 import { status } from "./status.svelte";
 
@@ -50,7 +51,7 @@ class StatsStore {
    *  in each entry; before the first one comes in, the screens' own idea of "this PC" stands in. */
   local(d: Device): boolean {
     if (d.kind === "ignore") return false;
-    return this.get(d.id)?.local ?? status.isSelf(d);
+    return this.get(d.id)?.local ?? (status.isSelf(d) && !sshLeadsElsewhere(d));
   }
 
   /** Read one machine now. A failed reading comes back inside the entry; only a refused request ends up in

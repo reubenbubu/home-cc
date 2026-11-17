@@ -16,7 +16,7 @@
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   /** What the refused save sent, as it was then (the form may have been edited since). */
-  let refusedSettings = "";
+  let refusedSettings = $state("");
   let savedNote = $state(false);
   /** Field messages only show once Save has been tried. */
   let tried = $state(false);

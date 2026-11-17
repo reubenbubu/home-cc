@@ -309,10 +309,11 @@ impl Monitor {
     }
 
     /// One entry per machine with an SSH user, and one for this PC, read or
-    /// not. Blocks for a moment (see `localstats::this_pc_ids`).
-    pub fn stats_entries(&self, inv: &Inventory) -> Result<Vec<MachineStatsEntry>> {
+    /// not. Which device is this PC is worked out off the async threads: listing
+    /// the network adapters can take a moment (see `localstats::this_pc_ids`).
+    pub async fn stats_entries(&self, inv: &Inventory) -> Result<Vec<MachineStatsEntry>> {
         let list = inv.list()?;
-        let this_pc = localstats::this_pc_ids(&list);
+        let this_pc = localstats::this_pc_ids_now(list.clone()).await;
         let machines: Vec<Device> = list.into_iter().filter(|d| reads_stats(d, &this_pc)).collect();
         let mut entries = Vec::with_capacity(machines.len());
         for d in &machines {
@@ -429,7 +430,8 @@ impl Monitor {
             }
         };
         // This PC is read here, without SSH, even when it has an SSH user too:
-        // no login is needed, and the numbers are the same.
+        // no login is needed, and the numbers are the same. (A login through a
+        // forwarded port reaches a VM or container, not this PC: that stays SSH.)
         if localstats::is_this_pc_now(&device).await {
             return self.read_local(app, device).await;
         }

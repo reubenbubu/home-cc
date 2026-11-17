@@ -192,9 +192,9 @@ pub fn check_problem(monitor: State<Monitor>) -> Option<String> {
 
 // --- Machine stats ---
 
-#[tauri::command(async)]
-pub fn machine_stats(inv: State<Inventory>, monitor: State<Monitor>) -> Result<Vec<MachineStatsEntry>> {
-    monitor.stats_entries(&inv)
+#[tauri::command]
+pub async fn machine_stats(inv: State<'_, Inventory>, monitor: State<'_, Monitor>) -> Result<Vec<MachineStatsEntry>> {
+    monitor.stats_entries(&inv).await
 }
 
 #[tauri::command]

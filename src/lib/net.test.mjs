@@ -1,7 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isThisPc, macToSend, ownAddresses, repointed, scanRanges } from "./net.ts";
+import { isThisPc, macToSend, ownAddresses, repointed, scanRanges, sshLeadsElsewhere } from "./net.ts";
 
 const subnet = (cidr, name, ownIp, best = false) => ({ cidr, interface: name, ownIp, best });
 const found = (ip, isSelf) => ({ ip, mac: null, vendor: null, hostname: null, looksLikeMesh: false, rttMs: null, isSelf });
@@ -100,4 +100,16 @@ test("another address or another SSH port points the machine elsewhere", () => {
   assert.equal(repointed(stored, "192.168.1", 22), true, "also when the new address is one the back end will refuse");
   // The back end compares the text as typed, so a name in other letters counts as changed there too.
   assert.equal(repointed({ host: "nas.lan", sshPort: 22 }, "NAS.lan", 22), true);
+});
+
+test("an SSH login through a forwarded port leads to a VM or container, not this PC", () => {
+  const d = (host, sshUser, sshPort = 22) => ({ host, sshUser, sshPort });
+  assert.equal(sshLeadsElsewhere(d("127.0.0.1", "vagrant", 2222)), true, "a Vagrant VM");
+  assert.equal(sshLeadsElsewhere(d("localhost", "sam", 2222)), true, "a WSL distro");
+  assert.equal(sshLeadsElsewhere(d("192.168.68.58", "root", 2222)), true, "a container on this PC's own address");
+  assert.equal(sshLeadsElsewhere(d("localhost", "sam")), true, "port 22 of the loopback address, set up on purpose");
+  assert.equal(sshLeadsElsewhere(d("[::1]", "sam")), true);
+  assert.equal(sshLeadsElsewhere(d("192.168.68.58", "sam")), false, "this PC by its address, usual port");
+  assert.equal(sshLeadsElsewhere(d("127.0.0.1", null, 2222)), false, "no SSH user, no login");
+  assert.equal(sshLeadsElsewhere(d("127.0.0.1", "  ", 2222)), false, "a blank user is no user");
 });

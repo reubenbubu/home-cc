@@ -45,7 +45,14 @@ windows = { version = "0.62.2", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    # A job object, so this PC's stats script stops with whatever it started.
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
+
+# Stopping this PC's stats script together with whatever it started (its process group).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Debug builds: keep line numbers for our own code only. Full debug info for
 # every dependency makes the build folder several GB bigger for no gain.
