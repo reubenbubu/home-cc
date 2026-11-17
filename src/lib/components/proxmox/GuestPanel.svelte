@@ -1,17 +1,21 @@
 <script lang="ts">
-  // One VM or container: start, shut down, restart and force stop, and its snapshots (take, roll back,
-  // delete). Force stop, roll back and delete ask first (spec section 7).
+  // One VM or container: start, resume, shut down, restart and force stop, and its snapshots (take, roll
+  // back, delete). Everything that stops it, rolls it back or deletes asks first (spec section 7).
   import { errorText, proxmoxApi, type Device, type ProxmoxGuest, type SnapshotList } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { relTime, share, uptime, usedOfTotal } from "$lib/format";
   import {
-    ACTION_LABELS,
+    actionWords,
     guestId,
     guestKey,
     guestName,
     guestRef,
+    isHibernated,
+    isPaused,
+    lockBlocks,
     lockLabel,
     powerActions,
+    rollbackPlan,
     snapshotNameProblem,
     stateLabel,
     suggestedSnapshotName,
@@ -41,6 +45,7 @@
   const outcome = $derived(proxmox.outcomes.get(key) ?? null);
   const lock = $derived(lockLabel(guest.lock));
   const actions = $derived(powerActions(guest));
+  const hibernated = $derived(isHibernated(guest));
   const ram = $derived(share(guest.memUsed, guest.memTotal));
   const disk = $derived(share(guest.diskUsed, guest.diskTotal));
 
@@ -81,9 +86,9 @@
     if (!guest.template) loadSnapshots(key);
   });
 
-  async function snapshotJob(busyText: string, done: string, job: () => Promise<{ finished: boolean }>) {
+  async function snapshotJob(busyText: string, done: string, job: () => Promise<{ finished: boolean }>, pending?: string) {
     const forKey = key;
-    const ok = await proxmox.act(device.id, ref, busyText, done, job);
+    const ok = await proxmox.act(device.id, ref, busyText, done, job, pending);
     if (forKey === key) await loadSnapshots(forKey);
     return ok;
   }
@@ -101,6 +106,14 @@
       snapNote = "";
       triedName = false;
     }
+  }
+
+  /** Proxmox leaves a guest it stopped to roll back stopped; plan.startAfter starts it again (rollbackPlan). */
+  function rollback(name: string, plan: ReturnType<typeof rollbackPlan>) {
+    const pending = plan.startAfter
+      ? `Proxmox is still rolling back. If ${guestName(guest)} isn't running once it's done, start it here.`
+      : undefined;
+    return snapshotJob("Rolling back…", plan.done, () => proxmoxApi.rollback(device.id, ref, name, plan.startAfter), pending);
   }
 
   /** "Taken 9 days ago, 08/11/2026 06:42", or just the date and time once it is too long ago for "ago". */
@@ -125,7 +138,7 @@
   </header>
 
   <div class="state">
-    <span class="dot {guest.status === 'running' ? 'ok' : guest.template ? 'idle' : guest.status === 'paused' ? 'warn' : 'bad'}" aria-hidden="true"></span>
+    <span class="dot {guest.template ? 'idle' : guest.status === 'running' ? 'ok' : isPaused(guest) || hibernated ? 'warn' : 'bad'}" aria-hidden="true"></span>
     <strong>{stateLabel(guest)}</strong>
     {#if guest.uptimeSecs != null}<span class="muted">up {uptime(guest.uptimeSecs)}</span>{/if}
     {#if lock}<span class="lock">{lock}</span>{/if}
@@ -146,26 +159,42 @@
   {:else}
     <section class="power" aria-label="Power">
       <div class="buttons">
+        <!-- Drawn afresh for another guest, so a first click given for one never carries over to the next.
+             While Proxmox is busy with the guest it refuses all of these (an API token can't skip its lock),
+             except starting a hibernated VM, which is how it is resumed. -->
+        {#key key}
         {#each actions as action (action)}
-          {#if action === "stop"}
+          {@const words = actionWords(guest, action)}
+          {@const held = lockBlocks(guest, action)}
+          {@const title = held ? `Wait until Proxmox is done: ${held}` : undefined}
+          {#if words.confirm}
             <ConfirmButton
-              label={ACTION_LABELS.stop}
-              confirmLabel="Yes, force stop"
-              disabled={!!busy}
-              onconfirm={() => proxmox.power(device.id, ref, "stop")}
+              label={words.label}
+              confirmLabel={words.confirm}
+              disabled={!!busy || !!held}
+              {title}
+              onconfirm={() => proxmox.power(device.id, guest, action)}
             />
           {:else}
-            <button class="btn small" disabled={!!busy || !!guest.lock} onclick={() => proxmox.power(device.id, ref, action)}>
-              {ACTION_LABELS[action]}
+            <button class="btn small" disabled={!!busy || !!held} {title} onclick={() => proxmox.power(device.id, guest, action)}>
+              {words.label}
             </button>
           {/if}
         {/each}
+        {/key}
       </div>
-      {#if actions.includes("stop")}
+      {#if actions.includes("shutdown")}
         <p class="muted small">
           Shut down asks the system inside to close down properly. Force stop is like pulling the plug: anything not
           saved inside is lost.
         </p>
+      {:else if actions.includes("resume")}
+        <p class="muted small">
+          Paused: it is halted where it was, still in memory. Resume carries on from there. Force stop is like pulling
+          the plug: anything not saved inside is lost.
+        </p>
+      {:else if hibernated}
+        <p class="muted small">Hibernated: its memory is saved to disk. Resume starts it again where it left off.</p>
       {/if}
       {#if busy}<p class="muted small" role="status">{busy}</p>{/if}
     </section>
@@ -214,6 +243,7 @@
       {:else}
         <ul class="list">
           {#each newestFirst as s (s.name)}
+            {@const plan = rollbackPlan(guest, s)}
             <li>
               <div class="snap-head">
                 <span class="mono name ellipsis" title={s.name}>{s.name}</span>
@@ -226,10 +256,9 @@
                 {#key s.name}
                   <ConfirmButton
                     label="Roll back"
-                    confirmLabel="Yes, roll back"
+                    confirmLabel={plan.confirm}
                     disabled={!!busy}
-                    onconfirm={() =>
-                      snapshotJob("Rolling back…", `Rolled back to "${s.name}".`, () => proxmoxApi.rollback(device.id, ref, s.name))}
+                    onconfirm={() => rollback(s.name, plan)}
                   />
                   <ConfirmButton
                     label="Delete"
@@ -247,6 +276,14 @@
           Rolling back puts {guestName(guest)} back as it was when the snapshot was taken: everything changed since is
           lost. Deleting a snapshot leaves {guestName(guest)} as it is now.
         </p>
+        {#if guest.status === "running" || isPaused(guest)}
+          <p class="muted small">
+            {guestName(guest)} is running. To roll back to a snapshot without RAM, Proxmox stops it, and home-cc starts
+            it again afterwards.{snaps.snapshots.some((s) => s.withRam) ? " A snapshot with RAM brings it back running as it was then." : ""}
+          </p>
+        {:else if snaps.snapshots.some((s) => s.withRam)}
+          <p class="muted small">A snapshot with RAM brings {guestName(guest)} back running as it was then.</p>
+        {/if}
       {/if}
     </section>
   {/if}

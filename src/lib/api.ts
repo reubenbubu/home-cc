@@ -331,7 +331,7 @@ export interface ProxmoxGuest {
   /** Empty if it has none. */
   name: string;
   node: string;
-  /** "running", "stopped" or "paused". */
+  /** "running", "stopped" or "paused" (Proxmox may give others, such as "suspended" or "io-error"). */
   status: string;
   /** A template can't be started. */
   template: boolean;
@@ -389,8 +389,9 @@ export interface GuestRef {
   vmid: number;
 }
 
-/** start, shutdown (asks the guest's system), reboot, stop (pulls the plug: confirm first). */
-export type PowerAction = "start" | "shutdown" | "reboot" | "stop";
+/** start (also resumes a hibernated VM), resume (a paused one), shutdown (asks the guest's system), reboot,
+ *  stop (pulls the plug). Shut down, restart and force stop are confirmed first. */
+export type PowerAction = "start" | "resume" | "shutdown" | "reboot" | "stop";
 
 export interface ProxmoxSnapshot {
   name: string;
@@ -433,8 +434,10 @@ export const proxmoxApi = {
   /** withRam only applies to VMs. */
   takeSnapshot: (deviceId: number, guest: GuestRef, name: string, description: string, withRam: boolean) =>
     invoke<TaskOutcome>("proxmox_take_snapshot", { deviceId, guest, name, description, withRam }),
-  rollback: (deviceId: number, guest: GuestRef, name: string) =>
-    invoke<TaskOutcome>("proxmox_rollback", { deviceId, guest, name }),
+  /** Proxmox stops a running guest to roll it back to a snapshot without RAM, and leaves it stopped;
+   *  startAfter starts it again once the rollback is done. */
+  rollback: (deviceId: number, guest: GuestRef, name: string, startAfter: boolean) =>
+    invoke<TaskOutcome>("proxmox_rollback", { deviceId, guest, name, startAfter }),
   deleteSnapshot: (deviceId: number, guest: GuestRef, name: string) =>
     invoke<TaskOutcome>("proxmox_delete_snapshot", { deviceId, guest, name }),
 };

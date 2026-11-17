@@ -51,10 +51,29 @@ export function lockLabel(lock: string | null): string | null {
     clone: "Being copied",
     create: "Being created",
     disk: "Disk being changed",
-    suspending: "Pausing",
-    suspended: "Paused to disk",
+    suspending: "Hibernating",
+    suspended: "Hibernated",
   };
   return words[lock] ?? `Busy (${lock})`;
+}
+
+/** Hibernated (Hibernate in Proxmox, or "qm suspend --todisk"): stopped, with its memory saved to disk. Proxmox
+ *  locks it as "suspended", and starting it is how it is resumed. */
+export function isHibernated(g: ProxmoxGuest): boolean {
+  return g.lock === "suspended";
+}
+
+/** Paused, or put to sleep by its own system: halted where it was, but still in memory. Resume carries on. */
+export function isPaused(g: ProxmoxGuest): boolean {
+  return g.status === "paused" || g.status === "suspended";
+}
+
+/** What Proxmox is busy with that holds back `action`, in words, or null when nothing does. A hibernated VM's
+ *  lock doesn't hold back Start: starting is what resumes it. */
+export function lockBlocks(g: ProxmoxGuest, action: PowerAction): string | null {
+  if (!g.lock) return null;
+  if (action === "start" && isHibernated(g)) return null;
+  return lockLabel(g.lock);
 }
 
 /** The power buttons that make sense for a guest as it is, in the order they are shown. */
@@ -63,8 +82,10 @@ export function powerActions(g: ProxmoxGuest): PowerAction[] {
   switch (g.status) {
     case "running":
       return ["shutdown", "reboot", "stop"];
+    // Proxmox won't shut down a paused VM ("VM is paused - cannot shutdown"): it has to be resumed first.
     case "paused":
-      return ["shutdown", "stop"];
+    case "suspended":
+      return ["resume", "stop"];
     case "stopped":
       return ["start"];
     default:
@@ -73,20 +94,73 @@ export function powerActions(g: ProxmoxGuest): PowerAction[] {
   }
 }
 
-export const ACTION_LABELS: Record<PowerAction, string> = {
+const LABELS: Record<PowerAction, string> = {
   start: "Start",
+  resume: "Resume",
   shutdown: "Shut down",
   reboot: "Restart",
   stop: "Force stop",
 };
 
-/** Shown on the button while Proxmox works on it. */
-export const ACTION_BUSY: Record<PowerAction, string> = {
+/** Shown on the guest while Proxmox works on it. */
+const BUSY: Record<PowerAction, string> = {
   start: "Starting…",
+  resume: "Resuming…",
   shutdown: "Shutting down…",
   reboot: "Restarting…",
   stop: "Stopping…",
 };
+
+/** Shown once Proxmox is done. */
+const DONE: Record<PowerAction, string> = {
+  start: "Started.",
+  resume: "Resumed.",
+  shutdown: "Shut down.",
+  reboot: "Restarted.",
+  stop: "Stopped.",
+};
+
+/** The second click's label for an action that stops the guest, which asks first (spec section 7). Null for
+ *  one that only starts it. */
+const CONFIRM: Record<PowerAction, string | null> = {
+  start: null,
+  resume: null,
+  shutdown: "Yes, shut down",
+  reboot: "Yes, restart",
+  stop: "Yes, force stop",
+};
+
+/** The words for one power action on this guest: its button, its second click (null when it needs none), and
+ *  what shows while Proxmox works on it and once it is done. Starting a hibernated VM is called resuming it. */
+export function actionWords(
+  g: ProxmoxGuest,
+  action: PowerAction,
+): { label: string; confirm: string | null; busy: string; done: string } {
+  const as: PowerAction = action === "start" && isHibernated(g) ? "resume" : action;
+  return { label: LABELS[as], confirm: CONFIRM[as], busy: BUSY[as], done: DONE[as] };
+}
+
+/** What rolling `g` back to `snap` does to whether it runs, and so what the owner is asked and told:
+ *  - The snapshot has RAM: Proxmox brings it back running as it was then, even if it is stopped now.
+ *  - It is running and the snapshot has no RAM: Proxmox stops it to roll back and leaves it stopped, so
+ *    home-cc starts it again afterwards (startAfter). */
+export function rollbackPlan(
+  g: ProxmoxGuest,
+  snap: { name: string; withRam: boolean },
+): { startAfter: boolean; confirm: string; done: string } {
+  const on = g.status === "running" || isPaused(g);
+  if (snap.withRam) {
+    return {
+      startAfter: false,
+      confirm: on ? "Yes, roll back" : "Yes, roll back and start",
+      done: `Rolled back to "${snap.name}", running as it was then.`,
+    };
+  }
+  if (on) {
+    return { startAfter: true, confirm: "Yes, roll back and restart", done: `Rolled back to "${snap.name}" and started again.` };
+  }
+  return { startAfter: false, confirm: "Yes, roll back", done: `Rolled back to "${snap.name}".` };
+}
 
 /** Why a snapshot name won't do, or null when it is fine. The same rules as Proxmox's. */
 export function snapshotNameProblem(name: string): string | null {

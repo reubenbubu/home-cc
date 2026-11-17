@@ -64,6 +64,7 @@ pub fn add_device(inv: State<Inventory>, monitor: State<Monitor>, input: DeviceI
 pub fn update_device(
     inv: State<Inventory>,
     monitor: State<Monitor>,
+    proxmox: State<crate::proxmox::Proxmox>,
     id: i64,
     input: DeviceInput,
 ) -> Result<Device> {
@@ -74,6 +75,11 @@ pub fn update_device(
         != (&device.host, device.ssh_port, &device.ssh_user, device.os)
     {
         monitor.forget(id);
+    }
+    // Proxmox: another address is another server, so its certificate is
+    // checked as at first contact (as Inventory::update does for SSH).
+    if !before.host.eq_ignore_ascii_case(&device.host) {
+        proxmox.address_changed(&inv, id)?;
     }
     monitor.wake();
     Ok(device)

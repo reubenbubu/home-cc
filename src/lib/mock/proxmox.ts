@@ -5,7 +5,9 @@
 //   ?pvecert     first contact: the certificate must be approved
 //   ?pvechanged  the certificate isn't the approved one
 //   ?pvenotoken  no API token yet
+//   ?pvenosecret a token ID is saved, but its secret isn't in the keychain
 //   ?pveperm     the token lacks permissions
+//   ?pvestates   homeassistant is paused and win11-test is hibernated
 import type {
   GuestRef,
   PowerAction,
@@ -37,7 +39,7 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
   const start = nowSecs();
   let tokenId: string | null = query.has("pvenotoken") ? null : "root@pam!homecc";
   let port = 8006;
-  if (!query.has("pvenotoken")) secrets.add(tokenKey(proxmoxId));
+  if (!query.has("pvenotoken") && !query.has("pvenosecret")) secrets.add(tokenKey(proxmoxId));
   /** The approved certificate, and the one the host shows. */
   let pinned: string | null = query.has("pvecert") ? null : PRINT_A;
   const shown = query.has("pvechanged") ? PRINT_B : PRINT_A;
@@ -69,12 +71,24 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
     guest(101, "lxc", "pihole1", { cpuCount: 1, memTotal: 0.5 * GB, diskTotal: 4 * GB, tags: ["dns"] }),
     guest(102, "lxc", "pihole2", { cpuCount: 1, memTotal: 0.5 * GB, diskTotal: 4 * GB, tags: ["dns"] }),
     guest(103, "lxc", "monitoring", { cpuCount: 2, memTotal: 4 * GB, diskTotal: 32 * GB, tags: ["prometheus", "grafana"] }),
-    guest(110, "qemu", "homeassistant", { cpuCount: 2, memTotal: 4 * GB, diskTotal: 32 * GB, lock: query.has("awkward") ? "backup" : null }),
-    guest(120, "qemu", "win11-test", { status: "stopped", cpuCount: 4, memTotal: 8 * GB, diskTotal: 64 * GB }),
+    guest(110, "qemu", "homeassistant", {
+      status: query.has("pvestates") ? "paused" : "running",
+      cpuCount: 2,
+      memTotal: 4 * GB,
+      diskTotal: 32 * GB,
+      lock: query.has("awkward") ? "backup" : null,
+    }),
+    guest(120, "qemu", "win11-test", {
+      status: "stopped",
+      cpuCount: 4,
+      memTotal: 8 * GB,
+      diskTotal: 64 * GB,
+      lock: query.has("pvestates") ? "suspended" : null,
+    }),
     guest(9000, "qemu", "debian-12-template", { status: "stopped", template: true, cpuCount: 2, memTotal: 2 * GB, diskTotal: 3 * GB }),
   ];
   const ages: Record<number, number> = { 101: 14 * 86400 + 3600, 102: 14 * 86400 + 3500, 103: 6 * 86400, 110: 2 * 86400 + 7200 };
-  for (const g of guests) since.set(g.vmid, g.status === "running" ? start - (ages[g.vmid] ?? 3600) : null);
+  for (const g of guests) since.set(g.vmid, g.status !== "stopped" ? start - (ages[g.vmid] ?? 3600) : null);
 
   const snapshots = new Map<number, { list: ProxmoxSnapshot[]; current: string | null }>([
     [
@@ -273,10 +287,16 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
       ready(deviceId);
       const g = find(ref);
       if (g.template) throw `Proxmox tried to ${action} VM ${g.vmid}, but it failed: you can't start a vm if it's a template`;
+      // Proxmox lets a hibernated VM ("suspended" lock) start: that is how it is resumed.
+      if (g.lock && !(action === "start" && g.lock === "suspended")) throw `VM ${g.vmid} is locked (${g.lock}) (HTTP 500)`;
+      if ((action === "shutdown" || action === "reboot") && g.status === "paused") throw `VM ${g.vmid} is paused - cannot ${action} (HTTP 500)`;
       await sleep(action === "shutdown" ? 2200 : 1400);
       if (action === "start") {
         g.status = "running";
+        g.lock = null;
         since.set(g.vmid, nowSecs());
+      } else if (action === "resume") {
+        g.status = "running";
       } else if (action === "reboot") {
         since.set(g.vmid, nowSecs());
       } else {
@@ -307,7 +327,7 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
       snapshots.set(g.vmid, s);
       return { finished: true };
     },
-    proxmox_rollback: async ({ deviceId, guest: ref, name }: { deviceId: number; guest: GuestRef; name: string }) => {
+    proxmox_rollback: async ({ deviceId, guest: ref, name, startAfter }: { deviceId: number; guest: GuestRef; name: string; startAfter: boolean }) => {
       ready(deviceId);
       const g = find(ref);
       const s = snapshots.get(g.vmid);
@@ -315,12 +335,19 @@ export function proxmoxMock(ctx: Context, proxmoxId: number) {
       if (!s || !snap) throw `snapshot '${name}' does not exist (HTTP 500)`;
       await sleep(1800);
       s.current = name;
+      // As Proxmox does: a snapshot with RAM comes back running; without, a running guest is stopped to
+      // roll back and left stopped.
       if (snap.withRam) {
         g.status = "running";
         since.set(g.vmid, nowSecs());
-      } else if (g.kind === "qemu") {
+      } else {
         g.status = "stopped";
         since.set(g.vmid, null);
+        if (startAfter) {
+          await sleep(1200);
+          g.status = "running";
+          since.set(g.vmid, nowSecs());
+        }
       }
       return { finished: true };
     },

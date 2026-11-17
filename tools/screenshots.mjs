@@ -98,6 +98,7 @@ const SCREENS = [
   { name: "proxmox-cert-changed", path: "/proxmox?pvechanged", ready: ".alert", before: (page) => page.getByText("different certificate").waitFor() },
   { name: "proxmox-setup", path: "/proxmox?pvenotoken", ready: "form", before: (page) => page.getByText("How to make a token").waitFor() },
   { name: "proxmox-permission", path: "/proxmox?pveperm", ready: ".alert", before: (page) => page.getByText("Privilege Separation").waitFor() },
+  { name: "proxmox-states", path: "/proxmox?pvestates", ready: "table", before: (page) => page.getByText("Hibernated").first().waitFor() },
   // --- end Proxmox ---
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
@@ -594,6 +595,66 @@ async function checkFlows(browser, url) {
         if (!(await row.getByText("Running").isVisible())) throw new Error("the first click on Force stop already stopped it");
         await panel.getByRole("button", { name: "Yes, force stop" }).click();
         await row.getByText("Stopped").waitFor();
+      },
+    },
+    {
+      what: "Proxmox: shut down asks first, also in the list",
+      path: "/proxmox",
+      async run(page) {
+        const row = page.locator("tbody tr", { hasText: "pihole2" });
+        await row.getByRole("button", { name: "Shut down", exact: true }).click();
+        await row.getByRole("button", { name: "Yes, shut down" }).waitFor();
+        if (!(await row.getByText("Running").isVisible())) throw new Error("the first click on Shut down already shut it down");
+        await row.getByRole("button", { name: "Cancel" }).click();
+        await row.getByRole("button", { name: "Shut down", exact: true }).waitFor();
+
+        await page.getByRole("button", { name: "Manage pihole2" }).click();
+        const panel = page.getByRole("complementary");
+        await panel.getByRole("button", { name: "Restart" }).click();
+        await panel.getByRole("button", { name: "Yes, restart" }).waitFor();
+        // Another guest's panel doesn't inherit the first click.
+        await page.getByRole("button", { name: "Manage pihole1" }).click();
+        await panel.getByText("pihole1", { exact: true }).waitFor();
+        if (await panel.getByRole("button", { name: "Yes, restart" }).count()) throw new Error("a first click carried over to another guest");
+      },
+    },
+    {
+      what: "Proxmox: rolling a running VM back to a snapshot without RAM starts it again",
+      path: "/proxmox",
+      async run(page) {
+        await page.getByRole("button", { name: "Manage homeassistant" }).click();
+        const panel = page.getByRole("complementary");
+        const snap = panel.locator("li", { hasText: "after_setup" });
+        await snap.getByRole("button", { name: "Roll back" }).click();
+        await snap.getByRole("button", { name: "Yes, roll back and restart" }).click();
+        await panel.getByText('Rolled back to "after_setup" and started again.').waitFor();
+        await page.locator("tbody tr", { hasText: "homeassistant" }).getByText("Running").waitFor();
+      },
+    },
+    {
+      what: "Proxmox: a paused VM and a hibernated VM can be resumed",
+      path: "/proxmox?pvestates",
+      async run(page) {
+        const paused = page.locator("tbody tr", { hasText: "homeassistant" });
+        await paused.getByText("Paused").waitFor();
+        if (await paused.getByRole("button", { name: "Shut down" }).count()) throw new Error("Shut down is offered for a paused VM");
+        await paused.getByRole("button", { name: "Resume" }).click();
+        await paused.getByText("Running").waitFor();
+
+        const hibernated = page.locator("tbody tr", { hasText: "win11-test" });
+        await hibernated.getByText("Hibernated").waitFor();
+        const resume = hibernated.getByRole("button", { name: "Resume" });
+        if (await resume.isDisabled()) throw new Error("a hibernated VM's Resume is held back by its lock");
+        await resume.click();
+        await hibernated.getByText("Running").waitFor();
+      },
+    },
+    {
+      what: "Proxmox: a token whose secret is missing says so",
+      path: "/proxmox?pvenosecret",
+      async run(page) {
+        await page.getByText("How to make a token").waitFor();
+        await page.getByRole("alert").filter({ hasText: "secret isn't stored" }).waitFor();
       },
     },
     // --- end Proxmox ---

@@ -80,6 +80,7 @@ pub async fn proxmox_take_snapshot(
     px.take_snapshot(&inv, device_id, &guest, &name, &description, with_ram).await
 }
 
+/// With `start_after`, a guest Proxmox stopped to roll back is started again.
 #[tauri::command]
 pub async fn proxmox_rollback(
     inv: State<'_, Inventory>,
@@ -87,8 +88,9 @@ pub async fn proxmox_rollback(
     device_id: i64,
     guest: GuestRef,
     name: String,
+    start_after: bool,
 ) -> Result<TaskOutcome> {
-    px.rollback(&inv, device_id, &guest, &name).await
+    px.rollback(&inv, device_id, &guest, &name, start_after).await
 }
 
 #[tauri::command]

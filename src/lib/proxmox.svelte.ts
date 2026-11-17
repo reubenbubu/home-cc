@@ -8,11 +8,12 @@ import {
   secretKeys,
   type GuestRef,
   type PowerAction,
+  type ProxmoxGuest,
   type ProxmoxOverview,
   type ProxmoxSettings,
   type ProxmoxStatus,
 } from "./api";
-import { ACTION_BUSY, guestKey } from "./proxmox";
+import { actionWords, guestKey, guestRef } from "./proxmox";
 import { OneAtATime } from "./running";
 
 /** Seconds between readings while the screen is open. */
@@ -132,18 +133,23 @@ class ProxmoxStore {
     }
   }
 
-  /** Runs a change on one guest, showing `busyText` on it meanwhile, then reads the host again. */
-  async act(deviceId: number, guest: GuestRef, busyText: string, done: string, job: () => Promise<{ finished: boolean }>) {
+  /** Runs a change on one guest, showing `busyText` on it meanwhile, then reads the host again. `pending` is
+   *  shown when Proxmox is still at it once home-cc stops waiting. */
+  async act(
+    deviceId: number,
+    guest: GuestRef,
+    busyText: string,
+    done: string,
+    job: () => Promise<{ finished: boolean }>,
+    pending = "Proxmox is still working on it. The list shows the result when it's done.",
+  ) {
     const key = guestKey(guest);
     if (this.busy.has(key)) return false;
     this.busy.set(key, busyText);
     this.outcomes.delete(key);
     try {
       const outcome = await job();
-      this.outcomes.set(key, {
-        ok: true,
-        text: outcome.finished ? done : "Proxmox is still working on it. The list shows the result when it's done.",
-      });
+      this.outcomes.set(key, { ok: true, text: outcome.finished ? done : pending });
       return true;
     } catch (e) {
       this.outcomes.set(key, { ok: false, text: errorText(e) });
@@ -154,14 +160,10 @@ class ProxmoxStore {
     }
   }
 
-  power(deviceId: number, guest: GuestRef, action: PowerAction) {
-    const done: Record<PowerAction, string> = {
-      start: "Started.",
-      shutdown: "Shut down.",
-      reboot: "Restarted.",
-      stop: "Stopped.",
-    };
-    return this.act(deviceId, guest, ACTION_BUSY[action], done[action], () => proxmoxApi.power(deviceId, guest, action));
+  power(deviceId: number, guest: ProxmoxGuest, action: PowerAction) {
+    const ref = guestRef(guest);
+    const words = actionWords(guest, action);
+    return this.act(deviceId, ref, words.busy, words.done, () => proxmoxApi.power(deviceId, ref, action));
   }
 }
 

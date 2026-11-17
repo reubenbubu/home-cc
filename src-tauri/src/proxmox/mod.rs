@@ -140,7 +140,11 @@ impl GuestRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PowerAction {
+    /// Also resumes a hibernated VM: Proxmox lets a VM locked "suspended"
+    /// start, and starting it is how it comes back.
     Start,
+    /// Carries on with a paused VM or container.
+    Resume,
     /// Asks the guest's own system to shut down.
     Shutdown,
     Reboot,
@@ -152,6 +156,7 @@ impl PowerAction {
     fn as_str(self) -> &'static str {
         match self {
             PowerAction::Start => "start",
+            PowerAction::Resume => "resume",
             PowerAction::Shutdown => "shutdown",
             PowerAction::Reboot => "reboot",
             PowerAction::Stop => "stop",
@@ -332,6 +337,12 @@ impl Proxmox {
     }
 
     pub fn save_settings(&self, inv: &Inventory, device_id: i64, token_id: &str, port: u16) -> Result<ProxmoxSettings> {
+        self.store_settings(inv, device_id, token_id, port)?;
+        self.settings(inv, device_id)
+    }
+
+    /// save_settings without reading them back (which asks the keychain).
+    fn store_settings(&self, inv: &Inventory, device_id: i64, token_id: &str, port: u16) -> Result<()> {
         let token_id = token_id.trim();
         if !token_id.is_empty() {
             check_token_id(token_id).map_err(Error::Invalid)?;
@@ -339,8 +350,23 @@ impl Proxmox {
         if port == 0 {
             return Err(Error::Invalid("The port must be between 1 and 65535. Proxmox uses 8006.".into()));
         }
+        let before = inv.proxmox_host(device_id)?;
+        // A new port drops the approved certificate (store.rs), and what the
+        // old port showed can't be approved for the new one either.
         inv.save_proxmox_host(device_id, Some(token_id).filter(|t| !t.is_empty()), port)?;
-        self.settings(inv, device_id)
+        if before.port != port {
+            self.lock().remove(&device_id);
+        }
+        Ok(())
+    }
+
+    /// The owner gave the device another address: whatever answers there is
+    /// another server as far as home-cc knows, so its certificate is checked
+    /// as at first contact, not reported as changed. The same rule as for an
+    /// SSH server's identity (Inventory::update).
+    pub fn address_changed(&self, inv: &Inventory, device_id: i64) -> Result<()> {
+        self.lock().remove(&device_id);
+        inv.forget_proxmox_certificate(device_id)
     }
 
     /// Reads every node, VM, container and storage the token may see.
@@ -436,6 +462,7 @@ impl Proxmox {
         let ep = self.ready(inv, device_id).await?;
         let verb = match action {
             PowerAction::Start => "start",
+            PowerAction::Resume => "resume",
             PowerAction::Shutdown => "shut down",
             PowerAction::Reboot => "restart",
             PowerAction::Stop => "force stop",
@@ -473,12 +500,31 @@ impl Proxmox {
         self.run_task(device_id, &ep, (Method::POST, &path, &form), &guest.node, &what).await
     }
 
-    pub async fn rollback(&self, inv: &Inventory, device_id: i64, guest: &GuestRef, name: &str) -> Result<TaskOutcome> {
+    /// Rolls a guest back to a snapshot. Proxmox stops a running guest to
+    /// roll it back to a snapshot without RAM and leaves it stopped, so with
+    /// `start_after` it is started again once the rollback is done. That is
+    /// done here as a second step, not with the rollback's own "start"
+    /// option, which older Proxmox versions don't have.
+    pub async fn rollback(
+        &self,
+        inv: &Inventory,
+        device_id: i64,
+        guest: &GuestRef,
+        name: &str,
+        start_after: bool,
+    ) -> Result<TaskOutcome> {
         model::check_snapshot_name(name).map_err(Error::Invalid)?;
         let path = format!("{}/snapshot/{}/rollback", guest.path()?, encode(name));
         let ep = self.ready(inv, device_id).await?;
         let what = format!("roll {} back to \"{name}\"", guest.label());
-        self.run_task(device_id, &ep, (Method::POST, &path, &[]), &guest.node, &what).await
+        let rolled = self.run_task(device_id, &ep, (Method::POST, &path, &[]), &guest.node, &what).await?;
+        // Still rolling back: it can't be started yet. The screen says to start it once it's done.
+        if !start_after || !rolled.finished {
+            return Ok(rolled);
+        }
+        let start = format!("{}/status/start", guest.path()?);
+        let what = format!("start {} again after rolling it back to \"{name}\"", guest.label());
+        self.run_task(device_id, &ep, (Method::POST, &start, &[]), &guest.node, &what).await
     }
 
     pub async fn delete_snapshot(&self, inv: &Inventory, device_id: i64, guest: &GuestRef, name: &str) -> Result<TaskOutcome> {
@@ -567,23 +613,24 @@ mod tests {
         }
     }
 
+    fn input(host: &str) -> crate::inventory::DeviceInput {
+        crate::inventory::DeviceInput {
+            name: "Proxmox".into(),
+            host: host.into(),
+            kind: DeviceKind::Server,
+            os: Os::Proxmox,
+            ssh_user: None,
+            ssh_port: None,
+            notes: String::new(),
+            mac: None,
+        }
+    }
+
     #[test]
     fn an_approval_must_match_what_was_shown() {
         let inv = Inventory::in_memory().unwrap();
         inv.proxmox_init().unwrap();
-        let id = inv
-            .add(crate::inventory::DeviceInput {
-                name: "Proxmox".into(),
-                host: "192.168.68.30".into(),
-                kind: DeviceKind::Server,
-                os: Os::Proxmox,
-                ssh_user: None,
-                ssh_port: None,
-                notes: String::new(),
-                mac: None,
-            })
-            .unwrap()
-            .id;
+        let id = inv.add(input("192.168.68.30")).unwrap().id;
         let px = Proxmox::default();
         let shown = "EC:8E:F3:EE:05:91:6C:C0:58:72:9F:5C:73:34:77:8C:70:80:06:EE:49:B9:77:DA:EC:1C:7A:D0:97:1C:9A:93";
         // Nothing shown yet: nothing to approve.
@@ -597,5 +644,31 @@ mod tests {
         assert_eq!(inv.proxmox_host(id).unwrap().certificate.as_deref(), Some(shown));
         // Used up: approving again needs a new showing.
         assert!(px.trust_certificate(&inv, id, shown).is_err());
+    }
+
+    #[test]
+    fn another_address_or_port_is_a_first_contact_again() {
+        let inv = Inventory::in_memory().unwrap();
+        inv.proxmox_init().unwrap();
+        let id = inv.add(input("192.168.68.30")).unwrap().id;
+        let px = Proxmox::default();
+        let shown = "EC:8E:F3:EE:05:91:6C:C0:58:72:9F:5C:73:34:77:8C:70:80:06:EE:49:B9:77:DA:EC:1C:7A:D0:97:1C:9A:93";
+
+        // A certificate shown at the old address can't be approved for the new one.
+        px.lock().insert(id, shown.into());
+        inv.approve_proxmox_certificate(id, "AB:CD").unwrap();
+        px.address_changed(&inv, id).unwrap();
+        assert_eq!(inv.proxmox_host(id).unwrap().certificate, None);
+        assert!(px.trust_certificate(&inv, id, shown).is_err());
+
+        // Saving the same port keeps the approval and what is waiting for it; another port drops both.
+        inv.approve_proxmox_certificate(id, "AB:CD").unwrap();
+        px.lock().insert(id, shown.into());
+        px.store_settings(&inv, id, "root@pam!homecc", 8006).unwrap();
+        assert_eq!(inv.proxmox_host(id).unwrap().certificate.as_deref(), Some("AB:CD"));
+        assert!(px.lock().contains_key(&id));
+        px.store_settings(&inv, id, "root@pam!homecc", 8443).unwrap();
+        assert_eq!(inv.proxmox_host(id).unwrap().certificate, None);
+        assert!(!px.lock().contains_key(&id));
     }
 }

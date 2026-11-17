@@ -1,10 +1,21 @@
 <script lang="ts">
-  // Every VM and container on a Proxmox host, with its state and what it uses, a quick start or shut down,
-  // and "Manage" for everything else (restart, force stop, snapshots).
+  // Every VM and container on a Proxmox host, with its state and what it uses, a quick start, resume or shut
+  // down (which asks first), and "Manage" for everything else (restart, force stop, snapshots).
   import type { ProxmoxGuest } from "$lib/api";
   import { bytes, pct, uptime, usedOfTotal } from "$lib/format";
-  import { ACTION_LABELS, guestKey, guestName, guestRef, kindLabel, lockLabel, stateLabel } from "$lib/proxmox";
+  import {
+    actionWords,
+    guestKey,
+    guestName,
+    isHibernated,
+    isPaused,
+    kindLabel,
+    lockBlocks,
+    lockLabel,
+    stateLabel,
+  } from "$lib/proxmox";
   import { proxmox } from "$lib/proxmox.svelte";
+  import ConfirmButton from "../ConfirmButton.svelte";
 
   let {
     deviceId,
@@ -29,14 +40,16 @@
   function dotClass(g: ProxmoxGuest): string {
     if (g.template) return "idle";
     if (g.status === "running") return "ok";
-    if (g.status === "paused") return "warn";
+    if (isPaused(g) || isHibernated(g)) return "warn";
     return "bad";
   }
 
-  /** The one button worth having in the list: start a stopped guest, shut down a running one. */
-  function quick(g: ProxmoxGuest): "start" | "shutdown" | null {
+  /** The one button worth having in the list: start a stopped guest (or resume a hibernated one), resume a
+   *  paused one, shut down a running one. */
+  function quick(g: ProxmoxGuest): "start" | "resume" | "shutdown" | null {
     if (g.template) return null;
     if (g.status === "stopped") return "start";
+    if (isPaused(g)) return "resume";
     if (g.status === "running") return "shutdown";
     return null;
   }
@@ -88,7 +101,12 @@
               <td class="c-id mono">{g.vmid}</td>
               <td class="c-name">
                 <span class="name ellipsis" title={guestName(g)}>{guestName(g)}</span>
-                {#if lock}<span class="lock small" title="Proxmox is busy with it: {g.lock}">{lock}</span>{/if}
+                {#if lock}
+                  <span
+                    class="lock small"
+                    title={isHibernated(g) ? "Its memory is saved to disk. Resume starts it again where it left off." : `Proxmox is busy with it: ${g.lock}`}
+                  >{lock}</span>
+                {/if}
                 {#if g.tags.length}<span class="tags muted small ellipsis" title={g.tags.join(", ")}>{g.tags.join(" · ")}</span>{/if}
               </td>
               <td class="c-type">{kindLabel(g)}</td>
@@ -120,14 +138,22 @@
                   {#if busy}
                     <span class="muted small busy">{busy}</span>
                   {:else if action}
-                    <button
-                      class="btn small"
-                      disabled={!!g.lock}
-                      title={g.lock ? `Wait until Proxmox is done: ${lock}` : undefined}
-                      onclick={() => proxmox.power(deviceId, guestRef(g), action)}
-                    >
-                      {ACTION_LABELS[action]}
-                    </button>
+                    {@const words = actionWords(g, action)}
+                    {@const held = lockBlocks(g, action)}
+                    {@const title = held ? `Wait until Proxmox is done: ${held}` : undefined}
+                    {#if words.confirm}
+                      <ConfirmButton
+                        label={words.label}
+                        confirmLabel={words.confirm}
+                        disabled={!!held}
+                        {title}
+                        onconfirm={() => proxmox.power(deviceId, g, action)}
+                      />
+                    {:else}
+                      <button class="btn small" disabled={!!held} {title} onclick={() => proxmox.power(deviceId, g, action)}>
+                        {words.label}
+                      </button>
+                    {/if}
                   {/if}
                   <button class="btn small" aria-label="Manage {guestName(g)}" onclick={() => onselect(g)}>Manage</button>
                 </div>
@@ -174,7 +200,8 @@
   .lock { display: inline-block; margin-top: 0.1rem; color: var(--warn); }
   .tags { display: block; }
   .lock + .tags { display: none; }
-  .row-actions { display: flex; gap: 0.4rem; justify-content: flex-end; align-items: center; }
+  /* Wraps while a shut down waits for its second click, which takes more room than the column has. */
+  .row-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; align-items: center; padding-block: 0.2rem; }
   .busy { white-space: nowrap; }
 
   /* Narrower: the least needed columns go first. */

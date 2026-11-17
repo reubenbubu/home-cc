@@ -61,13 +61,17 @@ impl Inventory {
         Ok(row.unwrap_or_default())
     }
 
-    /// Saves the token ID and port. The approved certificate is kept: it
-    /// belongs to the host, not to the token.
+    /// Saves the token ID and port. A new token keeps the approved
+    /// certificate: it belongs to the host, not to the token. A new port
+    /// doesn't: whatever answers there is another server as far as home-cc
+    /// knows, so the first-contact check applies again, as it does for an
+    /// SSH server at another port.
     pub fn save_proxmox_host(&self, device_id: i64, token_id: Option<&str>, port: u16) -> Result<()> {
         let stored = self.conn().execute(
             "INSERT INTO proxmox_hosts (device_id, token_id, port)
              SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM devices WHERE id = ?1)
-             ON CONFLICT (device_id) DO UPDATE SET token_id = excluded.token_id, port = excluded.port",
+             ON CONFLICT (device_id) DO UPDATE SET token_id = excluded.token_id, port = excluded.port,
+             certificate = CASE WHEN proxmox_hosts.port = excluded.port THEN proxmox_hosts.certificate END",
             params![device_id, token_id, port],
         )?;
         if stored == 0 {
@@ -87,6 +91,13 @@ impl Inventory {
         if stored == 0 {
             return Err(Error::NotFound(format!("device {device_id}")));
         }
+        Ok(())
+    }
+
+    /// Forgets the approved certificate, so the next contact is a first
+    /// contact again. For when the device's address changes.
+    pub fn forget_proxmox_certificate(&self, device_id: i64) -> Result<()> {
+        self.conn().execute("UPDATE proxmox_hosts SET certificate = NULL WHERE device_id = ?1", [device_id])?;
         Ok(())
     }
 }
@@ -127,12 +138,24 @@ mod tests {
             HostConfig { token_id: Some("root@pam!homecc".into()), port: 8006, certificate: Some("AB:CD".into()) }
         );
         // A new token keeps the approved certificate; a new approval keeps the token.
-        inv.save_proxmox_host(id, Some("homecc@pve!screen"), 8443).unwrap();
+        inv.save_proxmox_host(id, Some("homecc@pve!screen"), 8006).unwrap();
+        assert_eq!(inv.proxmox_host(id).unwrap().certificate.as_deref(), Some("AB:CD"));
         inv.approve_proxmox_certificate(id, "EF:01").unwrap();
         assert_eq!(
             inv.proxmox_host(id).unwrap(),
-            HostConfig { token_id: Some("homecc@pve!screen".into()), port: 8443, certificate: Some("EF:01".into()) }
+            HostConfig { token_id: Some("homecc@pve!screen".into()), port: 8006, certificate: Some("EF:01".into()) }
         );
+        // Another port is another server: its certificate is checked afresh.
+        inv.save_proxmox_host(id, Some("homecc@pve!screen"), 8443).unwrap();
+        assert_eq!(
+            inv.proxmox_host(id).unwrap(),
+            HostConfig { token_id: Some("homecc@pve!screen".into()), port: 8443, certificate: None }
+        );
+        // So is another address.
+        inv.approve_proxmox_certificate(id, "EF:01").unwrap();
+        inv.forget_proxmox_certificate(id).unwrap();
+        assert_eq!(inv.proxmox_host(id).unwrap().certificate, None);
+        assert_eq!(inv.proxmox_host(id).unwrap().token_id.as_deref(), Some("homecc@pve!screen"));
 
         inv.remove(id).unwrap();
         assert_eq!(inv.proxmox_host(id).unwrap(), HostConfig::default());

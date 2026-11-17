@@ -6,6 +6,7 @@
     confirmLabel,
     onconfirm,
     disabled = false,
+    title,
   }: {
     label: string;
     confirmLabel: string;
@@ -13,6 +14,8 @@
     onconfirm: () => unknown;
     /** Holds back both steps: nothing can be started, and a first click already given can't be completed. */
     disabled?: boolean;
+    /** A tooltip on the first button, such as why it is held back. */
+    title?: string;
   } = $props();
 
   let armed = $state(false);
@@ -33,5 +36,5 @@
   <button type="button" class="btn small danger" onclick={go} disabled={busy || disabled}>{confirmLabel}</button>
   <button type="button" class="btn small" onclick={() => (armed = false)} disabled={busy}>Cancel</button>
 {:else}
-  <button type="button" class="btn small" onclick={() => (armed = true)} {disabled}>{label}</button>
+  <button type="button" class="btn small" onclick={() => (armed = true)} {disabled} {title}>{label}</button>
 {/if}

@@ -33,8 +33,12 @@
   const reading = $derived(proxmox.reading.has(device.id));
   const kind = $derived(status?.errorKind ?? null);
   const askCert = $derived((kind === "newCert" || kind === "certChanged") && !!status?.offeredFingerprint);
-  /** Readings are on screen, but the latest try failed. */
-  const stale = $derived(!!good && !!status && !status.overview);
+  /** Readings are on screen, but the latest try failed: Proxmox's answer was an error, or no answer could be
+   *  asked for (readError, in which case status still holds the last answer). */
+  const stale = $derived(!!good && (!!readError || (!!status && !status.overview)));
+  /** A token ID is saved but its secret isn't in the keychain (lost with a keychain reset, say): the form shows,
+   *  and this says why. Without a token ID the form says enough by itself. */
+  const missingSecret = $derived(kind === "noToken" && !!proxmox.settings.get(device.id)?.tokenId);
 
   let setupOpen = $state(false);
   const showSetup = $derived(setupOpen || kind === "noToken");
@@ -98,6 +102,9 @@
     </span>
   </div>
 
+  {#if missingSecret && status?.error}
+    <Problem problem={problem(`Reading Proxmox host "${device.name}" through its API`, status.error)} tone="warn" />
+  {/if}
   {#if showSetup}
     <HostSetup {device} {problem} onclose={kind === "noToken" ? undefined : () => (setupOpen = false)} />
   {/if}
