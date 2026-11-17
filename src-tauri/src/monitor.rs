@@ -714,6 +714,7 @@ mod tests {
             reviewed: true,
             first_seen: 0,
             last_seen: None,
+            group: None,
         }
     }
 

@@ -550,6 +550,7 @@ mod tests {
             reviewed: true,
             first_seen: 0,
             last_seen: None,
+            group: None,
         }
     }
 
@@ -620,6 +621,7 @@ mod tests {
                 ssh_port: None,
                 notes: String::new(),
                 mac: None,
+                group: None,
             })
             .unwrap()
             .id

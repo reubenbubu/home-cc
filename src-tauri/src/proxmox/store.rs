@@ -117,6 +117,7 @@ mod tests {
             ssh_port: None,
             notes: String::new(),
             mac: None,
+            group: None,
         })
         .unwrap()
         .id

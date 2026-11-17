@@ -55,6 +55,8 @@ pub fn run() {
             commands::list_devices,
             commands::add_device,
             commands::update_device,
+            commands::set_device_group,
+            commands::rename_group,
             commands::remove_device,
             commands::set_secret,
             commands::has_secret,

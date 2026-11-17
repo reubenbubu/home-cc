@@ -15,13 +15,28 @@
     type DeviceKind,
     type Os,
   } from "$lib/api";
-  import { arrange, keyMove, moveItem, slotAt, type Box } from "$lib/arrange";
+  import {
+    arrange,
+    compareGroups,
+    GROUP_MAX,
+    keyMove,
+    moveItem,
+    sameGroup,
+    sections,
+    slotAt,
+    tidyGroup,
+    toEndOfGroup,
+    type Box,
+    type Section,
+  } from "$lib/arrange";
   import { icons } from "$lib/icons";
   import { isIpv4, isIpv6 } from "$lib/lookups";
   import { macToSend, repointed } from "$lib/net";
-  import { machineOrder } from "$lib/order.svelte";
+  import { collapsedGroups, machineOrder, NO_GROUP } from "$lib/order.svelte";
+  import { status } from "$lib/status.svelte";
   import Address from "$lib/components/Address.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
+  import GroupMenu from "$lib/components/GroupMenu.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import KeySetup from "$lib/components/KeySetup.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
@@ -29,7 +44,17 @@
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
 
-  const blank = (): DeviceInput => ({ name: "", host: "", kind: "vm", os: "linux", sshUser: "", sshPort: 22, notes: "", mac: "" });
+  const blank = (): DeviceInput => ({
+    name: "",
+    host: "",
+    kind: "vm",
+    os: "linux",
+    sshUser: "",
+    sshPort: 22,
+    notes: "",
+    mac: "",
+    group: "",
+  });
 
   let editing = $state<number | "new" | null>(null);
   let form = $state<DeviceInput>(blank());
@@ -56,6 +81,7 @@
           sshUser: form.sshUser,
           sshPort: form.sshPort,
           mac: form.mac,
+          group: form.group,
           notes: form.notes ? "(written, not included)" : "",
         }),
         "A password was typed": !!password,
@@ -81,6 +107,7 @@
     formError = null;
     password = "";
     hasPassword = false;
+    renaming = null;
     editing = id;
     if (typeof id === "number") {
       api.hasSecret(secretKeys.sshPassword(id)).then(
@@ -102,7 +129,27 @@
   }
 
   function startEdit(d: Device) {
-    open(d.id, { name: d.name, host: d.host, kind: d.kind, os: d.os, sshUser: d.sshUser ?? "", sshPort: d.sshPort, notes: d.notes, mac: d.mac ?? "" });
+    return open(d.id, {
+      name: d.name,
+      host: d.host,
+      kind: d.kind,
+      os: d.os,
+      sshUser: d.sshUser ?? "",
+      sshPort: d.sshPort,
+      notes: d.notes,
+      mac: d.mac ?? "",
+      group: d.group ?? "",
+    });
+  }
+
+  /** "New group…" in a card's group menu: the machine's form, with the Group field ready to type in. */
+  async function newGroupFor(d: Device) {
+    await startEdit(d);
+    const field = document.getElementById("machine-group");
+    if (field instanceof HTMLInputElement) {
+      field.focus();
+      field.select();
+    }
   }
 
   // Links from other screens: /machines?add=1 and /machines?edit=<id>.
@@ -123,13 +170,26 @@
     }
   });
 
+  /** Saves the form's machine. One that changed group goes to the end of its new group. */
+  async function updateMachine(id: number, input: DeviceInput): Promise<Device> {
+    const groupBefore = devices.byId.get(id)?.group ?? null;
+    const saved = await devices.update(id, input);
+    if ((saved.group ?? null) !== groupBefore) joinedGroup(saved);
+    return saved;
+  }
+
   async function save(e: SubmitEvent) {
     e.preventDefault();
     saving = true;
     formError = null;
     try {
       // The hardware address: nothing when the box wasn't touched (kept), "" when it was emptied (removed).
-      const input = { ...form, sshPort: Number(form.sshPort) || 22, mac: macToSend(stored.mac, form.mac ?? "") };
+      const input = {
+        ...form,
+        sshPort: Number(form.sshPort) || 22,
+        mac: macToSend(stored.mac, form.mac ?? ""),
+        group: tidyGroup(form.group ?? ""),
+      };
       let saved: Device;
       if (typeof editing === "number") {
         const id = editing;
@@ -145,7 +205,7 @@
           hasPassword = true;
           password = "";
           try {
-            saved = await devices.update(id, input);
+            saved = await updateMachine(id, input);
           } catch (err) {
             formError = formProblem("devices", "Saving a machine with a new password", `The new password was stored, but the rest wasn't saved: ${errorText(err)}`);
             return;
@@ -155,7 +215,7 @@
           // login at once, and with the old address still saved it would be offered to the machine this
           // entry is moving away from. Saved first, home-cc forgets the identity it had approved, and
           // sends no password before the owner has approved what answers at the new place.
-          saved = await devices.update(id, input);
+          saved = await updateMachine(id, input);
           if (password && !(await storePassword(saved))) return;
         }
       } else if (editing === "new") {
@@ -236,22 +296,44 @@
   // Linux don't handle the same way. Only the grip starts a move, so buttons, text and approvals in a
   // card work as before.
 
+  // Groups: each group of cards has its own heading and its own grid, and a card is only ever dragged or
+  // moved with the keys among the cards of its own group. The saved order is one list for every card;
+  // each group shows its cards in that order (see arrange.ts). A card goes to another group with the
+  // group menu on the card or the Group field in the form.
+
   /** The cards in the order the owner chose. */
   const ordered = $derived(machineOrder.arrange(machines));
-  /** While a card is being dragged: which one, and the order the cards would have if it were let go now. */
-  let drag = $state<{ id: number; order: number[] } | null>(null);
-  /** The cards as drawn: while dragging, with the dragged card's place showing where it would land. */
-  const cards = $derived(drag ? arrange(machines, drag.order) : ordered);
-  const customised = $derived(ordered.some((m, i) => m.id !== machines[i]?.id));
+  /** The cards under their groups: the groups by name, then the machines in no group. */
+  const groupsShown = $derived(sections(ordered));
+  /** Whether any machine has a group. Without one the cards show as before, with no headings. */
+  const grouped = $derived(groupsShown.some((s) => s.group !== null));
+  /** Every group name, in heading order: the suggestions for the form's Group field and the card menu. */
+  const groupNames = $derived(groupsShown.flatMap((s) => (s.group === null ? [] : [s.group])));
+  const keyOf = (s: Section<Device>) => s.group ?? NO_GROUP;
+  const sectionOf = (key: string) => groupsShown.find((s) => keyOf(s) === key);
+  /** The card order differs from name order within some group. */
+  const customised = $derived(
+    groupsShown.flatMap((s) => s.items.map((m) => m.id)).join() !==
+      sections(machines).flatMap((s) => s.items.map((m) => m.id)).join(),
+  );
+  /** While a card is being dragged: which one, its group, and the order that group's cards would have if
+   *  it were let go now. */
+  let drag = $state<{ id: number; key: string; order: number[] } | null>(null);
+  /** A group's cards as drawn: while one of them is dragged, with its place showing where it would land. */
+  const cardsOf = (s: Section<Device>) => (drag && drag.key === keyOf(s) ? arrange(s.items, drag.order) : s.items);
   /** The lifted copy of the dragged card that follows the pointer, in the grid's own pixels. */
   let ghost = $state<Box | null>(null);
   let ghostCopy: HTMLElement | null = null;
-  let cardsEl = $state<HTMLElement>();
+  /** The grid of the group whose card is being dragged. */
+  let dragGrid: HTMLElement | null = null;
+  let mainEl = $state<HTMLElement>();
   /** Said by screen readers after a card has moved. */
   let said = $state("");
+  /** A problem with a group: putting a card in one, or taking the machines out of one. */
+  let groupError = $state<ProblemInfo | null>(null);
 
   /** A press on a grip, which becomes a drag once the pointer has moved a little. */
-  let press: { id: number; pointerId: number; x: number; y: number; slot: HTMLElement } | null = null;
+  let press: { id: number; key: string; pointerId: number; x: number; y: number; slot: HTMLElement } | null = null;
   /** The pointer's last place on screen, and where on the card it took hold (in the grid's pixels). */
   let pointer = { x: 0, y: 0 };
   let hold = { x: 0, y: 0 };
@@ -264,47 +346,187 @@
     const ids = devices.list.map((d) => d.id);
     untrack(() => machineOrder.keepOnly(ids));
   });
+  // The same for collapsed groups: a group that has gone is forgotten, so a new one of that name starts open.
+  $effect(() => {
+    if (!devices.loaded || devices.error) return;
+    const names = groupNames;
+    untrack(() => collapsedGroups.keepOnly(names));
+  });
 
   const allIds = () => devices.list.map((d) => d.id);
   const nameOf = (id: number) => devices.byId.get(id)?.name ?? "The card";
   const quick = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180);
+  const machinesText = (n: number) => (n === 1 ? "1 machine" : `${n} machines`);
 
   function tell(text: string) {
     // The same words twice in a row are only read out again if they are new to the page.
     said = said === text ? `${text} ` : text;
   }
 
-  function tellPlace(id: number, to: number, from: number, count: number) {
-    if (to !== from) tell(`${nameOf(id)} moved to place ${to + 1} of ${count}.`);
-    else tell(`${nameOf(id)} is already ${to === 0 ? "first" : to === count - 1 ? "last" : `at place ${to + 1} of ${count}`}.`);
+  function tellPlace(id: number, key: string, to: number, from: number, count: number) {
+    const among = grouped && key !== NO_GROUP ? ` in ${key}` : "";
+    if (to !== from) tell(`${nameOf(id)} moved to place ${to + 1} of ${count}${among}.`);
+    else tell(`${nameOf(id)} is already ${to === 0 ? "first" : to === count - 1 ? "last" : `at place ${to + 1} of ${count}`}${among}.`);
   }
 
-  async function focusGrip(id: number) {
+  async function focusOn(selector: string) {
     await tick();
-    cardsEl?.querySelector<HTMLElement>(`[data-move="${id}"]`)?.focus();
+    mainEl?.querySelector<HTMLElement>(selector)?.focus();
+  }
+  const focusGrip = (id: number) => focusOn(`[data-move="${id}"]`);
+
+  /** Saves the order after one group's cards were put in the order `order`; the other groups stay as they are. */
+  function saveGroupOrder(key: string, order: number[]) {
+    const all = groupsShown.flatMap((s) => (keyOf(s) === key ? order : s.items.map((m) => m.id)));
+    machineOrder.set(all, allIds());
   }
 
-  function moveByKey(e: KeyboardEvent, id: number) {
+  function moveByKey(e: KeyboardEvent, id: number, key: string) {
     if (drag || press || e.ctrlKey || e.metaKey || e.shiftKey) return;
-    const order = ordered.map((m) => m.id);
+    const order = sectionOf(key)?.items.map((m) => m.id) ?? [];
     const from = order.indexOf(id);
     const to = keyMove(e.key, from, order.length);
     if (to === null || from < 0) return;
     // Also keeps Alt+Left from going back a screen.
     e.preventDefault();
-    if (to !== from) machineOrder.set(moveItem(order, from, to), allIds());
-    tellPlace(id, to, from, order.length);
+    if (to !== from) saveGroupOrder(key, moveItem(order, from, to));
+    tellPlace(id, key, to, from, order.length);
     // Moving the card can take the focus off its grip.
     focusGrip(id);
   }
 
   function resetOrder() {
-    const first = machines[0]?.id;
+    const first = sections(machines)[0]?.items[0]?.id;
     machineOrder.reset();
-    tell("The cards are back in name order.");
+    tell(grouped ? "The cards in each group are back in name order." : "The cards are back in name order.");
     // The button goes away, so the focus goes to the first card's grip.
     if (first != null) focusGrip(first);
   }
+
+  /** A machine has just been put in another group. It is shown (its group is opened), and if the cards
+   *  have an order of the owner's it goes at the end of its new group, rather than wherever its old place
+   *  happens to fall among those cards. */
+  function joinedGroup(d: Device) {
+    if (d.group) collapsedGroups.set(d.group, false);
+    if (!machineOrder.saved.includes(d.id)) return;
+    const shown = groupsShown.flatMap((s) => s.items.map((m) => m.id));
+    const members = groupsShown.find((s) => s.group === (d.group ?? null))?.items.map((m) => m.id) ?? [];
+    machineOrder.set(toEndOfGroup(shown, d.id, members), allIds());
+  }
+
+  /** From the group menu on a card. */
+  async function pickGroup(d: Device, group: string) {
+    groupError = null;
+    try {
+      const saved = await devices.setGroup(d.id, group);
+      joinedGroup(saved);
+      tell(saved.group ? `${saved.name} is now in ${saved.group}.` : `${saved.name} is no longer in a group.`);
+      // The card has moved to another heading, so the focus goes with it.
+      focusOn(`[data-group-menu="${d.id}"]`);
+    } catch (err) {
+      groupError = {
+        area: "devices",
+        what: `Putting "${d.name}" in a group from its card on the Machines screen`,
+        error: `Couldn't change the group of "${d.name}": ${errorText(err)}`,
+        details: { ...deviceDetails(d), "Group picked": group || "no group" },
+      };
+    }
+  }
+
+  /** Takes every machine out of a group. Asked first, by the Ungroup button. */
+  async function ungroup(group: string) {
+    groupError = null;
+    const count = sectionOf(group)?.items.length ?? 0;
+    try {
+      await devices.renameGroup(group, "");
+      collapsedGroups.set(group, false);
+      if (renaming === group) renaming = null;
+      tell(`${group} is gone: its ${machinesText(count)} moved to Other machines.`);
+    } catch (err) {
+      groupError = {
+        area: "devices",
+        what: `Taking the machines out of the group "${group}" on the Machines screen`,
+        error: `Couldn't ungroup ${group}: ${errorText(err)}`,
+        details: { Group: group, "Machines in it": count },
+      };
+    }
+  }
+
+  // Renaming a group: the side form shows a box for the new name instead of a machine's details.
+
+  /** The group being renamed, while the form shows that. */
+  let renaming = $state<string | null>(null);
+  let newName = $state("");
+  let renameError = $state<ProblemInfo | null>(null);
+  const typedName = $derived(tidyGroup(newName));
+  /** Another group the typed name would put the machines with. */
+  const renameJoins = $derived(renaming === null ? null : sameGroup(typedName, groupNames.filter((g) => g !== renaming)));
+
+  async function startRename(group: string) {
+    editing = null;
+    password = "";
+    renameError = null;
+    newName = group;
+    renaming = group;
+    await tick();
+    formEl?.scrollIntoView({ block: "nearest" });
+    const field = document.getElementById("group-new-name");
+    if (field instanceof HTMLInputElement) {
+      field.focus();
+      field.select();
+    }
+  }
+
+  async function rename(e: SubmitEvent) {
+    e.preventDefault();
+    const from = renaming;
+    if (from === null) return;
+    renameError = null;
+    const to = typedName;
+    const problem = (error: string): ProblemInfo => ({
+      area: "devices",
+      what: `Renaming the group "${from}" on the Machines screen`,
+      error,
+      details: { Group: from, "Name typed": newName, "Machines in it": sectionOf(from)?.items.length ?? 0 },
+    });
+    if (!to) {
+      renameError = problem('A group needs a name. To take the machines out of it, use "Ungroup" by its heading.');
+      return;
+    }
+    if (to === from) {
+      renaming = null;
+      return;
+    }
+    saving = true;
+    try {
+      // Read first: once the machines are saved, the old name is gone (and the screen forgets whether it
+      // was collapsed) and the new one is taken.
+      const joins = renameJoins;
+      const into = joins ?? to;
+      const wasCollapsed = collapsedGroups.has(from);
+      await devices.renameGroup(from, to);
+      // A renamed group stays collapsed; one that joined another group takes that group's state.
+      if (wasCollapsed && !joins) collapsedGroups.set(into, true);
+      renaming = null;
+      tell(joins ? `The machines in ${from} joined ${into}.` : `${from} is now called ${into}.`);
+      focusOn(`[data-group-toggle="${CSS.escape(into)}"]`);
+    } catch (err) {
+      renameError = problem(`Couldn't rename ${from}: ${errorText(err)}`);
+    } finally {
+      saving = false;
+    }
+  }
+
+  /** What the form's Group field will do, said under it. */
+  const groupHint = $derived.by(() => {
+    const typed = tidyGroup(form.group ?? "");
+    if (!typed) return "";
+    const joins = sameGroup(typed, groupNames);
+    if (joins === null) return `A new group: ${typed} gets a heading of its own on this screen.`;
+    const others = sectionOf(joins)?.items.filter((m) => m.id !== editing).length ?? 0;
+    if (others === 0) return "";
+    return `Shown with the ${others === 1 ? "other machine" : `${others} other machines`} in ${joins}.`;
+  });
 
   /** Where a point on screen is in the grid's own pixels, which differ when the window is zoomed. */
   function inGrid(grid: HTMLElement, x: number, y: number) {
@@ -313,11 +535,11 @@
     return { x: (x - r.left) / scale, y: (y - r.top) / scale };
   }
 
-  function grab(e: PointerEvent, id: number) {
+  function grab(e: PointerEvent, id: number, key: string) {
     if (e.button !== 0 || drag || press) return;
     const slot = (e.currentTarget as HTMLElement).closest<HTMLElement>(".slot");
     if (!slot) return;
-    press = { id, pointerId: e.pointerId, x: e.clientX, y: e.clientY, slot };
+    press = { id, key, pointerId: e.pointerId, x: e.clientX, y: e.clientY, slot };
     pointer = { x: e.clientX, y: e.clientY };
     // So letting go is still heard when it happens outside the window. The grip can lose this hold
     // while the cards shuffle round (the page moves it), which is fine: the window still hears the
@@ -352,8 +574,12 @@
   }
 
   function lift(p: NonNullable<typeof press>) {
-    if (!cardsEl) return;
-    const at = inGrid(cardsEl, p.x, p.y);
+    // The card moves within its own group's grid.
+    const grid = p.slot.parentElement;
+    const section = sectionOf(p.key);
+    if (!grid || !section) return;
+    dragGrid = grid;
+    const at = inGrid(grid, p.x, p.y);
     const { offsetLeft: x, offsetTop: y, offsetWidth: w, offsetHeight: h } = p.slot;
     hold = { x: at.x - x, y: at.y - y };
     // A still copy of the card is what the pointer carries; the card's own place shows where it will land.
@@ -361,32 +587,34 @@
     ghostCopy = copy instanceof HTMLElement ? copy : null;
     ghostCopy?.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
     ghost = { x, y, w, h };
-    drag = { id: p.id, order: cards.map((m) => m.id) };
+    drag = { id: p.id, key: p.key, order: section.items.map((m) => m.id) };
     getSelection()?.removeAllRanges();
     document.documentElement.classList.add("moving-card");
-    scroller = scrollerOf(cardsEl);
+    scroller = scrollerOf(grid);
     scrollFrame = requestAnimationFrame(autoScroll);
   }
 
   /** Moves the copy with the pointer, and the dragged card's place to the card under it. */
   function follow() {
-    if (!drag || !cardsEl || !ghost) return;
-    const at = inGrid(cardsEl, pointer.x, pointer.y);
+    const grid = dragGrid;
+    const section = drag && sectionOf(drag.key);
+    if (!drag || !grid || !ghost || !section) return;
+    const at = inGrid(grid, pointer.x, pointer.y);
     // Kept inside the grid, so it never makes the screen wider or longer than it is.
     const inside = (v: number, room: number) => Math.max(0, Math.min(v, room));
     ghost = {
       ...ghost,
-      x: inside(at.x - hold.x, cardsEl.offsetWidth - ghost.w),
-      y: inside(at.y - hold.y, cardsEl.offsetHeight - ghost.h),
+      x: inside(at.x - hold.x, grid.offsetWidth - ghost.w),
+      y: inside(at.y - hold.y, grid.offsetHeight - ghost.h),
     };
     // Where the cards are laid out, not where a sliding card happens to be drawn at this moment.
-    const slots = [...cardsEl.querySelectorAll<HTMLElement>(":scope > .slot")];
+    const slots = [...grid.querySelectorAll<HTMLElement>(":scope > .slot")];
     const to = slotAt(
       slots.map((s) => ({ x: s.offsetLeft, y: s.offsetTop, w: s.offsetWidth, h: s.offsetHeight })),
       at.x,
       at.y,
     );
-    const now = cards.map((m) => m.id);
+    const now = cardsOf(section).map((m) => m.id);
     const from = now.indexOf(drag.id);
     if (to >= 0 && from >= 0 && to !== from) drag.order = moveItem(now, from, to);
   }
@@ -424,11 +652,12 @@
   function drop() {
     const moved = drag;
     endDrag();
-    if (!moved) return;
-    const before = ordered.map((m) => m.id);
-    const after = arrange(machines, moved.order).map((m) => m.id);
-    if (after.join() !== before.join()) machineOrder.set(after, allIds());
-    tellPlace(moved.id, after.indexOf(moved.id), before.indexOf(moved.id), after.length);
+    const section = moved && sectionOf(moved.key);
+    if (!moved || !section) return;
+    const before = section.items.map((m) => m.id);
+    const after = arrange(section.items, moved.order).map((m) => m.id);
+    if (after.join() !== before.join()) saveGroupOrder(moved.key, after);
+    tellPlace(moved.id, moved.key, after.indexOf(moved.id), before.indexOf(moved.id), after.length);
     focusGrip(moved.id);
   }
 
@@ -458,92 +687,153 @@
     drag = null;
     ghost = null;
     ghostCopy = null;
+    dragGrid = null;
     scroller = null;
   }
 
   onDestroy(endDrag);
 </script>
 
-<!-- The grip that moves a card. Only there when there are two cards or more. -->
-{#snippet grip(m: Device, i: number)}
-  {#if cards.length > 1}
+<!-- The grip that moves a card among the cards of its group. Only there when the group has two cards or more. -->
+{#snippet grip(m: Device, i: number, s: Section<Device>)}
+  {#if s.items.length > 1}
     <button
       class="grip"
       type="button"
       data-move={m.id}
-      aria-label="Move {m.name}, place {i + 1} of {cards.length}"
+      aria-label="Move {m.name}, place {i + 1} of {s.items.length}{grouped && s.group ? ` in ${s.group}` : ''}"
       aria-describedby="move-hint"
       title="Drag to move this card"
-      onpointerdown={(e) => grab(e, m.id)}
-      onkeydown={(e) => moveByKey(e, m.id)}
+      onpointerdown={(e) => grab(e, m.id, keyOf(s))}
+      onkeydown={(e) => moveByKey(e, m.id, keyOf(s))}
     >
       <Icon path={icons.grip} size={16} />
     </button>
   {/if}
 {/snippet}
 
+<!-- One machine's card, or what shows when it can't be drawn. -->
+{#snippet card(m: Device, i: number, s: Section<Device>)}
+  <!-- A reading this card can't draw must not take the other machines down with it. -->
+  <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
+    <MachineCard device={m} onedit={startEdit}>
+      {#snippet handle()}{@render grip(m, i, s)}{/snippet}
+      {#snippet tools()}
+        <GroupMenu device={m} groups={groupNames} onpick={(g) => pickGroup(m, g)} onnew={() => newGroupFor(m)} />
+      {/snippet}
+    </MachineCard>
+    {#snippet failed(error, reset)}
+      <article class="panel broken" role="alert">
+        <header class="broken-head">
+          {@render grip(m, i, s)}
+          <h3 class="ellipsis" title={m.name}>{m.name}</h3>
+        </header>
+        <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
+        <Problem
+          problem={{
+            area: "screen",
+            what: `Showing the card for "${m.name}" on the Machines screen, which failed while drawing`,
+            error: errorText(error),
+            details: deviceDetails(m),
+            trace: error instanceof Error ? error.stack : undefined,
+          }}
+          message="What went wrong: {errorText(error)}"
+        />
+        <div class="form-actions">
+          <button class="btn small" onclick={reset}>Try again</button>
+          <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
+        </div>
+      </article>
+    {/snippet}
+  </svelte:boundary>
+{/snippet}
+
 <header class="page-head">
   <h1>Machines</h1>
   <div class="actions">
     {#if customised}
-      <button class="btn small quiet" title="Put the cards back in name order" onclick={resetOrder}>Reset order</button>
+      <button
+        class="btn small quiet"
+        title={grouped ? "Put the cards in each group back in name order" : "Put the cards back in name order"}
+        onclick={resetOrder}>Reset order</button>
     {/if}
     <button class="btn primary" onclick={startAdd}>Add machine</button>
   </div>
 </header>
 
-<div class="layout" class:with-form={editing !== null}>
-  <div class="main">
+<div class="layout" class:with-form={editing !== null || renaming !== null}>
+  <div class="main" bind:this={mainEl}>
     {#if machines.length > 0}
-      <section class="cards" aria-label="Machine stats" bind:this={cardsEl}>
-        {#each cards as m, i (m.id)}
-          <div class="slot" class:landing={drag?.id === m.id} animate:flip={{ duration: quick() }}>
-            <!-- A reading this card can't draw must not take the other machines down with it. -->
-            <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
-              <MachineCard device={m} onedit={startEdit}>
-                {#snippet handle()}{@render grip(m, i)}{/snippet}
-              </MachineCard>
-              {#snippet failed(error, reset)}
-                <article class="panel broken" role="alert">
-                  <header class="broken-head">
-                    {@render grip(m, i)}
-                    <h3 class="ellipsis" title={m.name}>{m.name}</h3>
-                  </header>
-                  <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
-                  <Problem
-                    problem={{
-                      area: "screen",
-                      what: `Showing the card for "${m.name}" on the Machines screen, which failed while drawing`,
-                      error: errorText(error),
-                      details: deviceDetails(m),
-                      trace: error instanceof Error ? error.stack : undefined,
-                    }}
-                    message="What went wrong: {errorText(error)}"
-                  />
-                  <div class="form-actions">
-                    <button class="btn small" onclick={reset}>Try again</button>
-                    <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
+      {#if groupError}<Problem problem={groupError} />{/if}
+      <div class="groups">
+        {#each groupsShown as s, n (keyOf(s))}
+          {@const key = keyOf(s)}
+          {@const title = s.group ?? "Other machines"}
+          {@const closed = grouped && collapsedGroups.has(key)}
+          {@const down = s.items.filter((m) => status.get(m)?.up === false).length}
+          <!-- Named after its group; with no groups at all, the cards show as before, under no heading. -->
+          <section class="group" aria-label={grouped ? title : "Machine stats"}>
+            {#if grouped}
+              <header class="group-head">
+                <h2 class="group-title">
+                  <button
+                    type="button"
+                    class="toggle"
+                    data-group-toggle={key}
+                    aria-expanded={!closed}
+                    aria-controls="group-cards-{n}"
+                    title={closed ? "Show these machines" : "Hide these machines"}
+                    onclick={() => collapsedGroups.set(key, !closed)}
+                  >
+                    <span class="chevron" class:open={!closed}><Icon path={icons.chevron} size={16} /></span>
+                    <span class="ellipsis">{title}</span>
+                    <span class="count">· {s.items.length}</span>
+                  </button>
+                </h2>
+                {#if down > 0}<span class="down small">{down} down</span>{/if}
+                {#if s.group !== null}
+                  {@const group = s.group}
+                  <span class="group-actions">
+                    <button class="btn small quiet" aria-label="Rename the group {group}" onclick={() => startRename(group)}>Rename</button>
+                    <ConfirmButton
+                      label="Ungroup"
+                      confirmLabel="Yes, ungroup"
+                      title="Take the {machinesText(s.items.length)} in {group} out of this group. The machines stay."
+                      onconfirm={() => ungroup(group)}
+                    />
+                  </span>
+                {/if}
+              </header>
+            {/if}
+            {#if !closed}
+              <div class="cards" id="group-cards-{n}">
+                {#each cardsOf(s) as m, i (m.id)}
+                  <div class="slot" class:landing={drag?.id === m.id} animate:flip={{ duration: quick() }}>
+                    {@render card(m, i, s)}
                   </div>
-                </article>
-              {/snippet}
-            </svelte:boundary>
-          </div>
+                {/each}
+                {#if ghost && drag?.key === key}
+                  <div
+                    class="ghost"
+                    style:transform="translate({ghost.x}px, {ghost.y}px)"
+                    style:width="{ghost.w}px"
+                    style:height="{ghost.h}px"
+                    aria-hidden="true"
+                    inert
+                    {@attach (el) => {
+                      if (ghostCopy) el.append(ghostCopy);
+                    }}
+                  ></div>
+                {/if}
+              </div>
+            {/if}
+          </section>
         {/each}
-        {#if ghost}
-          <div
-            class="ghost"
-            style:transform="translate({ghost.x}px, {ghost.y}px)"
-            style:width="{ghost.w}px"
-            style:height="{ghost.h}px"
-            aria-hidden="true"
-            inert
-            {@attach (el) => {
-              if (ghostCopy) el.append(ghostCopy);
-            }}
-          ></div>
-        {/if}
-      </section>
-      <p id="move-hint" class="sr-only">Arrow keys move the card one place earlier or later, Home and End to the start or the end.</p>
+      </div>
+      <p id="move-hint" class="sr-only">
+        Arrow keys move the card one place earlier or later{grouped ? " within its group" : ""}, Home and End to the start or the
+        end. The group menu on the card puts it in another group.
+      </p>
       <p class="sr-only" aria-live="polite">{said}</p>
     {/if}
 
@@ -563,6 +853,7 @@
             <thead>
               <tr>
                 <th class="c-name">Name</th>
+                <th class="c-group">Group</th>
                 <th class="c-ip">Address</th>
                 <th class="c-host">Hostname</th>
                 <th class="c-type">Type</th>
@@ -576,6 +867,7 @@
               {#each rows as d (d.id)}
                 <tr class:selected={editing === d.id}>
                   <td class="c-name name" title={d.name}>{d.name}</td>
+                  <td class="c-group muted" title={d.group ?? "In no group"}>{d.group ?? "–"}</td>
                   <td class="c-ip mono muted" title={d.host}>
                     <Address host={d.host} part="ip" />
                     <!-- Stands in for the Hostname column when the table is too narrow for it. -->
@@ -622,6 +914,22 @@
           </select>
         </label>
       </div>
+      <!-- The same name puts machines together under one heading. The names there are come up as suggestions. -->
+      <label>Group (optional)
+        <input
+          id="machine-group"
+          bind:value={form.group}
+          list="group-names"
+          maxlength={GROUP_MAX}
+          placeholder="Proxmox lab"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </label>
+      <datalist id="group-names">
+        {#each groupNames as name (name)}<option value={name}></option>{/each}
+      </datalist>
+      {#if groupHint}<p class="hint under">{groupHint}</p>{/if}
       <label>Hardware address (optional)
         <input class="mono" bind:value={form.mac} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false" />
       </label>
@@ -692,6 +1000,26 @@
         <button class="btn" type="button" onclick={() => (editing = null)}>Cancel</button>
       </div>
     </form>
+  {:else if renaming !== null}
+    {@const count = sectionOf(renaming)?.items.length ?? 0}
+    <form class="panel form" onsubmit={rename} bind:this={formEl}>
+      <h2 class="section-title">Rename group</h2>
+      <label>New name for {renaming}
+        <input id="group-new-name" bind:value={newName} maxlength={GROUP_MAX} autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="hint under">
+        {#if renameJoins}
+          {renameJoins} already exists: the {machinesText(count)} in {renaming} join it.
+        {:else}
+          Changes the group of the {machinesText(count)} in it.
+        {/if}
+      </p>
+      {#if renameError}<Problem problem={renameError} />{/if}
+      <div class="form-actions">
+        <button class="btn primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Rename"}</button>
+        <button class="btn" type="button" onclick={() => (renaming = null)}>Cancel</button>
+      </div>
+    </form>
   {/if}
 </div>
 
@@ -723,6 +1051,36 @@
   }
   @container (min-width: 230rem) {
     .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  }
+
+  /* A heading per group, with the group's cards under it. */
+  .groups { display: flex; flex-direction: column; gap: 1.1rem; min-width: 0; }
+  .group { display: flex; flex-direction: column; gap: 0.55rem; min-width: 0; }
+  .group-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem 0.75rem; min-width: 0; }
+  .group-title { display: flex; flex: 0 1 auto; min-width: 0; margin: 0; font-size: 1.12rem; font-weight: 600; }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    min-height: 2.25rem;
+    margin-left: -0.35rem;
+    padding: 0 0.6rem 0 0.25rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    font-weight: inherit;
+    cursor: pointer;
+  }
+  .toggle:hover { background: var(--panel-raised); }
+  .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .chevron { display: inline-grid; flex: none; color: var(--muted); transition: transform 0.15s; }
+  .chevron.open { transform: rotate(90deg); }
+  .count { flex: none; color: var(--muted); font-weight: 500; white-space: nowrap; }
+  .down { color: var(--bad); font-weight: 600; white-space: nowrap; }
+  .group-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-left: auto; }
+  @media (prefers-reduced-motion: reduce) {
+    .chevron { transition: none; }
   }
 
   /* Each card fills its place, so the cards in a row stay the same height. */
@@ -782,6 +1140,7 @@
   tr.selected td { background: var(--panel-raised); }
   td.mono { font-size: 0.92rem; }
   .name { font-weight: 600; }
+  .c-group { width: 9.5rem; }
   .c-ip { width: 10rem; }
   .c-host { width: 11rem; }
   .c-type { width: 7.5rem; }
@@ -798,6 +1157,10 @@
   }
   @container (max-width: 72rem) {
     .c-notes { display: none; }
+  }
+  /* The cards above show the groups, so the column gives way before the system does. */
+  @container (max-width: 69rem) {
+    .c-group { display: none; }
   }
   @container (max-width: 66rem) {
     .c-os { display: none; }

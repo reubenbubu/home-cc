@@ -21,8 +21,14 @@
   import StatusDot from "./StatusDot.svelte";
   import type { Snippet } from "svelte";
 
-  /** `handle`: the grip the screen puts at the start of the header, to move the card by. */
-  let { device, onedit, handle }: { device: Device; onedit: (d: Device) => void; handle?: Snippet } = $props();
+  /** `handle`: the grip the screen puts at the start of the header, to move the card by. `tools`: more
+   *  buttons from the screen, put before Edit (the group menu). */
+  let {
+    device,
+    onedit,
+    handle,
+    tools,
+  }: { device: Device; onedit: (d: Device) => void; handle?: Snippet; tools?: Snippet } = $props();
 
   const s = $derived(status.get(device));
   const entry = $derived(stats.get(device.id));
@@ -128,6 +134,7 @@
           <Icon path={icons.terminal} size={16} />
         </button>
       {/if}
+      {@render tools?.()}
       <button class="icon-btn" aria-label="Edit {device.name}" title="Edit" onclick={() => onedit(device)}>
         <Icon path={icons.edit} size={16} />
       </button>

@@ -112,6 +112,9 @@ pub struct Device {
     pub first_seen: i64,
     /// Unix seconds of the last answer to a scan or ping.
     pub last_seen: Option<i64>,
+    /// The group the owner put it in on the Machines screen ("Proxmox lab",
+    /// say), or none. Only the owner sets it: a scan never changes it.
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +165,47 @@ pub struct DeviceInput {
     /// See [`Inventory::update`] for what a changed `host` does to it.
     #[serde(default)]
     pub mac: Option<String>,
+    /// Group name. Left as it is when not given (the Network screen doesn't
+    /// send one); empty takes the device out of its group.
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// The longest group name, in characters.
+pub const GROUP_MAX_CHARS: usize = 40;
+
+/// A group name as it is stored: trimmed, with runs of spaces made one, so
+/// "Proxmox  lab " and "Proxmox lab" are the same group. None for an empty
+/// name, which means no group.
+pub fn tidy_group(name: &str) -> Result<Option<String>> {
+    let tidy = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if tidy.is_empty() {
+        return Ok(None);
+    }
+    if tidy.chars().any(char::is_control) {
+        return Err(Error::Invalid("A group name can't contain tabs or other invisible characters".into()));
+    }
+    if tidy.chars().count() > GROUP_MAX_CHARS {
+        return Err(Error::Invalid(format!("A group name can be at most {GROUP_MAX_CHARS} characters long")));
+    }
+    Ok(Some(tidy))
+}
+
+/// The spelling to store for a group name: that of a group that already
+/// exists with the same name in other letter case, so typing "proxmox lab"
+/// puts the machine with the ones in "Proxmox lab". The device `except_id`
+/// and the devices in `except_group` don't count (the only machine in a group
+/// retyped, or a group renamed to fix its letter case).
+fn spelled_as_stored(db: &Connection, name: String, except_id: Option<i64>, except_group: Option<&str>) -> Result<String> {
+    let stored: Option<String> = db
+        .query_row(
+            "SELECT group_name FROM devices WHERE group_name = ?1 COLLATE NOCASE
+             AND id IS NOT ?2 AND group_name IS NOT ?3 ORDER BY group_name = ?1 DESC, id LIMIT 1",
+            params![name, except_id, except_group],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(stored.unwrap_or(name))
 }
 
 impl DeviceInput {
@@ -188,6 +232,9 @@ impl DeviceInput {
             if normalize_mac(&mac).is_none() {
                 return Err(Error::Invalid("Hardware address should look like aa:bb:cc:dd:ee:ff".into()));
             }
+        }
+        if let Some(group) = &self.group {
+            tidy_group(group)?;
         }
         Ok(())
     }
@@ -251,8 +298,12 @@ CREATE TABLE ssh_host_keys (
 );
 ";
 
+/// Added for machine groups. Applied when the column is missing, rather than
+/// by user_version, so it can't clash with another change that numbers itself.
+const GROUP_COLUMN: &str = "ALTER TABLE devices ADD COLUMN group_name TEXT;";
+
 const COLUMNS: &str = "id, name, host, kind, os, ssh_user, ssh_port, notes, \
-     mac, vendor, hostname, source, reviewed, first_seen, last_seen";
+     mac, vendor, hostname, source, reviewed, first_seen, last_seen, group_name";
 
 pub fn now() -> i64 {
     std::time::SystemTime::now()
@@ -305,6 +356,12 @@ impl Inventory {
         if current.is_none() {
             conn.execute_batch(&format!("BEGIN; DROP TABLE IF EXISTS ssh_host_keys; {HOST_KEYS_TABLE} COMMIT;"))?;
         }
+        let grouped: Option<i64> = conn
+            .query_row("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'group_name'", [], |r| r.get(0))
+            .optional()?;
+        if grouped.is_none() {
+            conn.execute_batch(GROUP_COLUMN)?;
+        }
         Ok(Self { conn: Mutex::new(conn), purged: AtomicI64::new(i64::MIN) })
     }
 
@@ -332,9 +389,13 @@ impl Inventory {
         input.validate()?;
         let id = {
             let conn = self.conn.lock().unwrap();
+            let group = match input.group.as_deref().map(tidy_group).transpose()?.flatten() {
+                Some(name) => Some(spelled_as_stored(&conn, name, None, None)?),
+                None => None,
+            };
             conn.execute(
-                "INSERT INTO devices (name, host, kind, os, ssh_user, ssh_port, notes, mac, first_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO devices (name, host, kind, os, ssh_user, ssh_port, notes, mac, first_seen, group_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     input.name.trim(),
                     input.host.trim(),
@@ -345,6 +406,7 @@ impl Inventory {
                     input.notes,
                     clean(input.mac).and_then(|m| normalize_mac(&m)),
                     now(),
+                    group,
                 ],
             )?;
             conn.last_insert_rowid()
@@ -396,11 +458,17 @@ impl Inventory {
             // says which hardware this is.
             let keep_vendor = mac == old_mac;
             let keep_hostname = !moved || mac.is_some();
+            // The group: not given keeps it, empty takes the device out of it.
+            let group = match input.group.as_deref().map(tidy_group).transpose()? {
+                Some(Some(name)) => Some(Some(spelled_as_stored(&tx, name, Some(id), None)?)),
+                other => other,
+            };
             tx.execute(
                 // Saving a device counts as the owner having looked at it.
                 "UPDATE devices SET name = ?1, host = ?2, kind = ?3, os = ?4,
                  ssh_user = ?5, ssh_port = ?6, notes = ?7, mac = ?8,
                  vendor = CASE WHEN ?9 THEN vendor END, hostname = CASE WHEN ?10 THEN hostname END,
+                 group_name = CASE WHEN ?12 THEN ?13 ELSE group_name END,
                  reviewed = 1
                  WHERE id = ?11",
                 params![
@@ -415,6 +483,8 @@ impl Inventory {
                     keep_vendor,
                     keep_hostname,
                     id,
+                    group.is_some(),
+                    group.flatten(),
                 ],
             )?;
             if moved || i64::from(port) != old_port {
@@ -423,6 +493,43 @@ impl Inventory {
             tx.commit()?;
         }
         self.get(id)
+    }
+
+    /// Puts one device in a group (or, with an empty name, in none), and
+    /// changes nothing else about it.
+    pub fn set_group(&self, id: i64, group: &str) -> Result<Device> {
+        {
+            let conn = self.conn.lock().unwrap();
+            let group = match tidy_group(group)? {
+                Some(name) => Some(spelled_as_stored(&conn, name, Some(id), None)?),
+                None => None,
+            };
+            if conn.execute("UPDATE devices SET group_name = ?1 WHERE id = ?2", params![group, id])? == 0 {
+                return Err(Error::NotFound(format!("device {id}")));
+            }
+        }
+        self.get(id)
+    }
+
+    /// Gives every device in the group `from` the group `to` instead, or no
+    /// group when `to` is empty. A name that another group already has (in
+    /// any letter case) joins the two. Says how many devices changed.
+    pub fn rename_group(&self, from: &str, to: &str) -> Result<usize> {
+        let Some(from) = tidy_group(from)? else {
+            return Err(Error::Invalid("Say which group to rename".into()));
+        };
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let to = match tidy_group(to)? {
+            Some(name) => Some(spelled_as_stored(&tx, name, None, Some(&from))?),
+            None => None,
+        };
+        let changed = tx.execute("UPDATE devices SET group_name = ?1 WHERE group_name = ?2", params![to, from])?;
+        tx.commit()?;
+        if changed == 0 {
+            return Err(Error::NotFound(format!("group \"{from}\"")));
+        }
+        Ok(changed)
     }
 
     pub fn remove(&self, id: i64) -> Result<()> {
@@ -649,6 +756,7 @@ fn row_to_device(row: &rusqlite::Row) -> rusqlite::Result<Device> {
         reviewed: row.get(12)?,
         first_seen: row.get(13)?,
         last_seen: row.get(14)?,
+        group: row.get(15)?,
     })
 }
 
@@ -666,6 +774,7 @@ mod tests {
             ssh_port: None,
             notes: String::new(),
             mac: None,
+            group: None,
         }
     }
 
@@ -743,6 +852,158 @@ mod tests {
         assert!(matches!(inv.add(input(" ", "1.2.3.4")), Err(Error::Invalid(_))));
         assert!(matches!(inv.add(input("x", "")), Err(Error::Invalid(_))));
         assert!(matches!(inv.add(input("x", "bad host")), Err(Error::Invalid(_))));
+    }
+
+    fn in_group(name: &str, host: &str, group: &str) -> DeviceInput {
+        DeviceInput { group: Some(group.into()), ..input(name, host) }
+    }
+
+    fn group_of(inv: &Inventory, id: i64) -> Option<String> {
+        inv.get(id).unwrap().group
+    }
+
+    #[test]
+    fn a_group_is_saved_kept_and_cleared() {
+        let inv = Inventory::in_memory().unwrap();
+        let d = inv.add(in_group("pve", "192.168.68.30", "  Proxmox   lab ")).unwrap();
+        assert_eq!(d.group.as_deref(), Some("Proxmox lab"), "trimmed, with one space between words");
+        assert_eq!(inv.add(input("nas", "192.168.68.10")).unwrap().group, None);
+
+        // Not given (as the Network screen saves): kept.
+        let mut renamed = input("Proxmox", "192.168.68.30");
+        renamed.group = None;
+        inv.update(d.id, renamed).unwrap();
+        assert_eq!(group_of(&inv, d.id).as_deref(), Some("Proxmox lab"));
+        // Another name moves it; an empty or blank one takes it out of the group.
+        inv.update(d.id, in_group("Proxmox", "192.168.68.30", "NAS PC")).unwrap();
+        assert_eq!(group_of(&inv, d.id).as_deref(), Some("NAS PC"));
+        inv.update(d.id, in_group("Proxmox", "192.168.68.30", "   ")).unwrap();
+        assert_eq!(group_of(&inv, d.id), None);
+
+        // What the screens send and get back.
+        let sent: DeviceInput =
+            serde_json::from_str(r#"{"name":"pve","host":"192.168.68.30","kind":"server","os":"proxmox"}"#).unwrap();
+        assert_eq!(sent.group, None);
+        let sent: DeviceInput = serde_json::from_str(
+            r#"{"name":"pve","host":"192.168.68.30","kind":"server","os":"proxmox","group":"Proxmox lab"}"#,
+        )
+        .unwrap();
+        let back = serde_json::to_value(inv.update(d.id, sent).unwrap()).unwrap();
+        assert_eq!(back["group"], "Proxmox lab");
+        let none = serde_json::to_value(inv.get(inv.list().unwrap()[0].id).unwrap()).unwrap();
+        assert_eq!(none["group"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_typed_group_joins_the_one_with_the_same_name_in_other_letter_case() {
+        let inv = Inventory::in_memory().unwrap();
+        let a = inv.add(in_group("pve", "192.168.68.30", "Proxmox lab")).unwrap().id;
+        let b = inv.add(in_group("pihole", "192.168.68.31", "proxmox LAB")).unwrap().id;
+        assert_eq!(group_of(&inv, b).as_deref(), Some("Proxmox lab"));
+        let c = inv.add(input("dev", "192.168.68.22")).unwrap().id;
+        inv.update(c, in_group("dev", "192.168.68.22", "PROXMOX lab")).unwrap();
+        assert_eq!(group_of(&inv, c).as_deref(), Some("Proxmox lab"));
+        inv.set_group(c, "proxmox Lab").unwrap();
+        assert_eq!(group_of(&inv, c).as_deref(), Some("Proxmox lab"));
+
+        // The only machine in a group can change its letter case.
+        let nas = inv.add(in_group("nas", "192.168.68.10", "nas pc")).unwrap().id;
+        inv.update(nas, in_group("nas", "192.168.68.10", "NAS PC")).unwrap();
+        assert_eq!(group_of(&inv, nas).as_deref(), Some("NAS PC"));
+        inv.set_group(nas, "Nas Pc").unwrap();
+        assert_eq!(group_of(&inv, nas).as_deref(), Some("Nas Pc"));
+        assert_eq!(group_of(&inv, a).as_deref(), Some("Proxmox lab"));
+    }
+
+    #[test]
+    fn rejects_bad_group_names() {
+        let inv = Inventory::in_memory().unwrap();
+        let longest = "é".repeat(GROUP_MAX_CHARS);
+        let d = inv.add(in_group("pve", "192.168.68.30", &longest)).unwrap();
+        assert_eq!(d.group.as_deref(), Some(longest.as_str()), "counted in characters, not bytes");
+        let too_long = "x".repeat(GROUP_MAX_CHARS + 1);
+        assert!(matches!(inv.add(in_group("a", "192.168.68.31", &too_long)), Err(Error::Invalid(_))));
+        assert!(matches!(inv.update(d.id, in_group("pve", "192.168.68.30", &too_long)), Err(Error::Invalid(_))));
+        assert!(matches!(inv.set_group(d.id, "lab\u{7}"), Err(Error::Invalid(_))));
+        assert!(matches!(inv.rename_group(&longest, &too_long), Err(Error::Invalid(_))));
+        // Nothing was changed by the refused ones.
+        assert_eq!(group_of(&inv, d.id).as_deref(), Some(longest.as_str()));
+        assert!(matches!(inv.set_group(999, "lab"), Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn setting_a_group_changes_nothing_else() {
+        let inv = Inventory::in_memory().unwrap();
+        let mut typed = input("nas", "192.168.68.10");
+        typed.mac = Some(MAC_A.into());
+        let before = inv.add(typed).unwrap();
+        let after = inv.set_group(before.id, " NAS  PC ").unwrap();
+        assert_eq!(after, Device { group: Some("NAS PC".into()), ..before.clone() });
+        assert_eq!(inv.set_group(before.id, "").unwrap(), before);
+    }
+
+    #[test]
+    fn renaming_a_group_changes_every_machine_in_it() {
+        let inv = Inventory::in_memory().unwrap();
+        let a = inv.add(in_group("pve", "192.168.68.30", "Proxmox")).unwrap().id;
+        let b = inv.add(in_group("pihole", "192.168.68.31", "Proxmox")).unwrap().id;
+        let c = inv.add(in_group("nas", "192.168.68.10", "NAS PC")).unwrap().id;
+        let d = inv.add(input("laptop", "192.168.68.95")).unwrap().id;
+        let groups = |inv: &Inventory| [a, b, c, d].map(|id| group_of(inv, id));
+
+        assert_eq!(inv.rename_group("Proxmox", " Proxmox  lab").unwrap(), 2);
+        assert_eq!(groups(&inv), [Some("Proxmox lab".into()), Some("Proxmox lab".into()), Some("NAS PC".into()), None]);
+        // Only the letter case.
+        assert_eq!(inv.rename_group("Proxmox lab", "proxmox lab").unwrap(), 2);
+        assert_eq!(group_of(&inv, a).as_deref(), Some("proxmox lab"));
+        // Given the name of another group, they join it under its spelling.
+        assert_eq!(inv.rename_group("NAS PC", "PROXMOX LAB").unwrap(), 1);
+        assert_eq!(groups(&inv), [Some("proxmox lab".into()), Some("proxmox lab".into()), Some("proxmox lab".into()), None]);
+        // An empty name ungroups.
+        assert_eq!(inv.rename_group("proxmox lab", "").unwrap(), 3);
+        assert_eq!(groups(&inv), [None, None, None, None]);
+
+        assert!(matches!(inv.rename_group("Nothing here", "x"), Err(Error::NotFound(_))));
+        assert!(matches!(inv.rename_group(" ", "x"), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn a_scan_never_changes_a_group() {
+        let inv = Inventory::in_memory().unwrap();
+        let id = scan_one(&inv, found("192.168.68.30", Some(MAC_A), Some("pve")));
+        assert_eq!(group_of(&inv, id), None, "a scan never puts a device in a group");
+        inv.set_group(id, "Proxmox lab").unwrap();
+        // Seen again by its hardware address at another address, and by address alone.
+        scan(&inv, &[found("192.168.68.35", Some(MAC_A), Some("pve2"))], 200);
+        assert_eq!(inv.get(id).unwrap().host, "192.168.68.35");
+        scan(&inv, &[found("192.168.68.35", None, None)], 300);
+        assert_eq!(group_of(&inv, id).as_deref(), Some("Proxmox lab"));
+    }
+
+    #[test]
+    fn adds_the_group_column_to_a_database_without_it() {
+        // As every build before machine groups left it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA} {SCHEMA_V2} {HOST_KEYS_TABLE}
+             INSERT INTO devices (name, host, kind, os, ssh_user, mac, hostname, first_seen, last_seen)
+                 VALUES ('nas', '192.168.68.10', 'server', 'windows', 'admin', '{MAC_A}', 'NAS', 5, 9);
+             PRAGMA user_version = 2;"
+        ))
+        .unwrap();
+        let inv = Inventory::from_conn(conn).unwrap();
+        let d = inv.list().unwrap().remove(0);
+        assert_eq!(
+            (d.name.as_str(), d.ssh_user.as_deref(), d.mac.as_deref(), d.hostname.as_deref(), d.last_seen, d.group),
+            ("nas", Some("admin"), Some(MAC_A), Some("NAS"), Some(9), None),
+        );
+        inv.set_group(d.id, "NAS PC").unwrap();
+
+        // Opening again leaves the column and what is in it alone.
+        let inv = Inventory::from_conn(inv.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(group_of(&inv, d.id).as_deref(), Some("NAS PC"));
+        let version: i64 = inv.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
     }
 
     fn found(ip: &str, mac: Option<&str>, hostname: Option<&str>) -> Found {

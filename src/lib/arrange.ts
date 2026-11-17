@@ -89,6 +89,84 @@ export function slotAt(boxes: Box[], x: number, y: number): number {
   return best;
 }
 
+// Groups: the owner can give machines a group name ("Proxmox lab"), and the cards are then shown under a
+// heading per group. The saved order above is kept per card for all of them together; each group shows
+// its own cards in that order, so moving a card only ever changes its place among its own group.
+
+/** The longest group name, in characters (GROUP_MAX_CHARS in the back end's inventory.rs). */
+export const GROUP_MAX = 40;
+
+/** A group name as the back end stores it: trimmed, with runs of spaces made one. "" means no group. */
+export function tidyGroup(text: string): string {
+  return text.split(/\s+/).filter(Boolean).join(" ");
+}
+
+/** Group names in the order their headings are shown: alphabetical, ignoring letter case, "Lab 2" before
+ *  "Lab 10". */
+export function compareGroups(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+/** The existing group a typed name puts a machine in: the one with the same name in any letter case (the
+ *  back end stores it under that spelling), or null when it would be a new group. */
+export function sameGroup(typed: string, existing: Iterable<string>): string | null {
+  const name = tidyGroup(typed);
+  if (!name) return null;
+  let match: string | null = null;
+  for (const group of existing) {
+    if (group === name) return group;
+    if (match === null && group.toLocaleLowerCase() === name.toLocaleLowerCase()) match = group;
+  }
+  return match;
+}
+
+/** One heading's worth of cards. `group` is null for the machines in no group. */
+export interface Section<T> {
+  group: string | null;
+  items: T[];
+}
+
+/** The cards, in the order they are shown, sorted under their groups: the groups by name, then the
+ *  machines in no group. Each group keeps the cards in the order they were given. */
+export function sections<T extends { group?: string | null }>(items: T[]): Section<T>[] {
+  const byGroup = new Map<string, T[]>();
+  const loose: T[] = [];
+  for (const item of items) {
+    const group = item.group || null;
+    if (group === null) loose.push(item);
+    else byGroup.set(group, [...(byGroup.get(group) ?? []), item]);
+  }
+  const named = [...byGroup.keys()].sort(compareGroups).map((group) => ({ group, items: byGroup.get(group) ?? [] }));
+  return loose.length > 0 ? [...named, { group: null, items: loose }] : named;
+}
+
+/** The order of every card (`shown`) after the card `id` has joined another group: it goes after the last
+ *  of that group's other cards (`members`), so it shows at the end of the group. With no other cards in
+ *  the group the order stays as it is. */
+export function toEndOfGroup(shown: number[], id: number, members: number[]): number[] {
+  const others = new Set(members.filter((m) => m !== id));
+  const rest = shown.filter((m) => m !== id);
+  let last = -1;
+  rest.forEach((m, i) => {
+    if (others.has(m)) last = i;
+  });
+  if (last < 0) return shown.slice();
+  return [...rest.slice(0, last + 1), id, ...rest.slice(last + 1)];
+}
+
+/** Reads back a saved list of names (the groups that are collapsed). Anything else counts as none. */
+export function parseNames(text: string | null): string[] {
+  if (!text) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((name): name is string => typeof name === "string"))];
+}
+
 /** The new place for a card moved with the keyboard from place `index` of `count`: the arrow keys move
  *  it one place earlier or later (with or without Alt), Home and End to the start or the end. Null for
  *  any other key. */

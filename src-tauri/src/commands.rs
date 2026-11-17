@@ -85,6 +85,20 @@ pub fn update_device(
     Ok(device)
 }
 
+/// Puts one machine in a group ("" for none), leaving everything else about
+/// it as stored. Nothing to read again: a group is only how it is shown.
+#[tauri::command(async)]
+pub fn set_device_group(inv: State<Inventory>, id: i64, group: String) -> Result<Device> {
+    inv.set_group(id, &group)
+}
+
+/// Renames a group on every device in it, or with an empty `to` takes them
+/// all out of it. Gives how many devices changed.
+#[tauri::command(async)]
+pub fn rename_group(inv: State<Inventory>, from: String, to: String) -> Result<usize> {
+    inv.rename_group(&from, &to)
+}
+
 #[tauri::command(async)]
 pub fn remove_device(app: AppHandle, inv: State<Inventory>, monitor: State<Monitor>, id: i64) -> Result<()> {
     inv.remove(id)?;

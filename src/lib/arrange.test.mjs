@@ -1,7 +1,20 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { arrange, keyMove, moveItem, parseOrder, remember, slotAt } from "./arrange.ts";
+import {
+  arrange,
+  compareGroups,
+  keyMove,
+  moveItem,
+  parseNames,
+  parseOrder,
+  remember,
+  sameGroup,
+  sections,
+  slotAt,
+  tidyGroup,
+  toEndOfGroup,
+} from "./arrange.ts";
 
 // In name order, as the Machines screen hands them over.
 const machines = [
@@ -112,4 +125,75 @@ test("arrow keys move a card one place, Home and End to the start and the end", 
   assert.equal(keyMove("ArrowRight", 4, 5), 4);
   assert.equal(keyMove("Enter", 2, 5), null);
   assert.equal(keyMove("a", 2, 5), null);
+});
+
+// Groups. In the order the cards are shown, each with the group the owner gave it.
+const grouped = [
+  { id: 9, group: "Proxmox lab" },
+  { id: 4, group: null },
+  { id: 2, group: "NAS PC" },
+  { id: 31, group: "Proxmox lab" },
+  { id: 7, group: null },
+  { id: 1, group: "NAS PC" },
+  { id: 32, group: "lab 10" },
+  { id: 33, group: "Lab 2" },
+];
+
+test("cards are sorted under their groups by name, keeping their order, with the ungrouped last", () => {
+  const got = sections(grouped).map((s) => [s.group, ids(s.items)]);
+  assert.deepEqual(got, [
+    ["Lab 2", [33]],
+    ["lab 10", [32]],
+    ["NAS PC", [2, 1]],
+    ["Proxmox lab", [9, 31]],
+    [null, [4, 7]],
+  ]);
+});
+
+test("with no groups there is one section, and with no machines none", () => {
+  assert.deepEqual(sections(machines).map((s) => [s.group, ids(s.items)]), [[null, [4, 1, 7, 2, 9]]]);
+  assert.deepEqual(sections([]), []);
+  // An empty name is no group (the back end never stores one, but nothing should break on it).
+  assert.deepEqual(sections([{ id: 1, group: "" }]).map((s) => s.group), [null]);
+});
+
+test("group names sort ignoring letter case, with numbers in number order", () => {
+  assert.deepEqual(["proxmox", "NAS PC", "Lab 10", "lab 2", "Attic"].sort(compareGroups), ["Attic", "lab 2", "Lab 10", "NAS PC", "proxmox"]);
+  // Names that differ only in letter case still get a fixed order.
+  assert.deepEqual(["b", "B"].sort(compareGroups), ["B", "b"]);
+  assert.deepEqual(["B", "b"].sort(compareGroups), ["B", "b"]);
+});
+
+test("a group name is trimmed with one space between words", () => {
+  assert.equal(tidyGroup("  Proxmox \t  lab "), "Proxmox lab");
+  assert.equal(tidyGroup("   "), "");
+});
+
+test("a typed group name joins the group with that name in any letter case", () => {
+  const groups = ["NAS PC", "Proxmox lab", "proxmox LAB"];
+  assert.equal(sameGroup("nas pc", groups), "NAS PC");
+  assert.equal(sameGroup("  NAS   PC ", groups), "NAS PC");
+  assert.equal(sameGroup("proxmox LAB", groups), "proxmox LAB", "the exact spelling first");
+  assert.equal(sameGroup("PROXMOX lab", groups), "Proxmox lab");
+  assert.equal(sameGroup("Attic", groups), null);
+  assert.equal(sameGroup(" ", groups), null);
+});
+
+test("a card that joins a group goes after that group's other cards", () => {
+  // All the cards as shown: Proxmox lab (9, 31), NAS PC (2, 1), then the ungrouped (4, 7).
+  const shown = [9, 31, 2, 1, 4, 7];
+  // 4 has joined NAS PC.
+  assert.deepEqual(toEndOfGroup(shown, 4, [2, 1, 4]), [9, 31, 2, 1, 4, 7]);
+  // 9 has joined NAS PC.
+  assert.deepEqual(toEndOfGroup(shown, 9, [2, 9, 1]), [31, 2, 1, 9, 4, 7]);
+  // 1 is now alone in a new group: nothing to go after.
+  assert.deepEqual(toEndOfGroup(shown, 1, [1]), shown);
+});
+
+test("the collapsed groups read back, and a damaged value counts as none", () => {
+  assert.deepEqual(parseNames('["NAS PC","","NAS PC","Proxmox lab"]'), ["NAS PC", "", "Proxmox lab"]);
+  assert.deepEqual(parseNames('["NAS PC", 3, null]'), ["NAS PC"]);
+  assert.deepEqual(parseNames(null), []);
+  assert.deepEqual(parseNames("{"), []);
+  assert.deepEqual(parseNames('{"NAS PC":true}'), []);
 });
