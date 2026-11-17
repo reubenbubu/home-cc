@@ -278,7 +278,19 @@ pub async fn call<T: Transport>(
             Some(s) if s.fresh(&place) => s,
             _ => login(t, password).await?,
         };
-        let reply = t.send(method.clone(), path, session.sid.as_deref(), body).await.map_err(explain)?;
+        let reply = match t.send(method.clone(), path, session.sid.as_deref(), body).await {
+            Ok(r) => r,
+            Err(e) => {
+                // The request didn't get through (timeout, dropped connection), so Pi-hole still holds the
+                // session: keep it for the next call rather than logging in again and taking another of
+                // Pi-hole's few API seats. A certificate that changed is different: the session isn't sent
+                // anywhere until the owner has looked, and an approval may mean another machine answers.
+                if !matches!(e, ApiError::NewCert { .. } | ApiError::CertChanged { .. }) {
+                    *slot = Some(session);
+                }
+                return Err(explain(e));
+            }
+        };
         if reply.ok() {
             let mut session = session;
             session.used();
@@ -522,6 +534,41 @@ pub(crate) mod tests {
         assert_eq!(err.kind, PiholeErrorKind::Other);
         assert!(err.message.contains("No \"blocking\" boolean in body data (HTTP 400)"), "{}", err.message);
         assert!(slot.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_request_that_does_not_get_through_keeps_the_session() {
+        // Logged in, then the next request times out: the session Pi-hole still holds is used again
+        // instead of a second login taking another API seat.
+        let fake = Fake::new(vec![
+            logged_in("sid-1"),
+            ok(summary()),
+            Err(ApiError::Unreachable("No answer from 192.168.68.31 within 15 seconds".into())),
+            ok(summary()),
+        ]);
+        let mut slot = None;
+        call(&fake, &mut slot, &pw(), Method::GET, "/api/stats/summary", None).await.unwrap();
+        let err = call(&fake, &mut slot, &pw(), Method::GET, "/api/dns/blocking", None).await.unwrap_err();
+        assert_eq!(err.kind, PiholeErrorKind::Unreachable);
+        assert_eq!(slot.as_ref().and_then(|s| s.sid.as_deref()), Some("sid-1"));
+        call(&fake, &mut slot, &pw(), Method::GET, "/api/stats/summary", None).await.unwrap();
+        assert_eq!(
+            fake.asked(),
+            vec![("POST".into(), "/api/auth".into(), None), get("/api/stats/summary"), get("/api/dns/blocking"), get("/api/stats/summary")]
+        );
+
+        // Straight after a login too: the new session isn't lost.
+        let fake = Fake::new(vec![logged_in("sid-1"), Err(ApiError::Other("Connection reset".into())), ok(summary())]);
+        let mut slot = None;
+        assert_eq!(call(&fake, &mut slot, &pw(), Method::GET, "/api/stats/summary", None).await.unwrap_err().kind, PiholeErrorKind::Other);
+        call(&fake, &mut slot, &pw(), Method::GET, "/api/stats/summary", None).await.unwrap();
+        assert_eq!(fake.asked().iter().filter(|(_, p, _)| p == "/api/auth").count(), 1);
+
+        // A certificate that changed mid-way: the session isn't kept for whoever answers after an approval.
+        let fake = Fake::new(vec![logged_in("sid-1"), Err(ApiError::CertChanged { expected: "AA".into(), offered: "BB".into() })]);
+        let mut slot = None;
+        assert_eq!(call(&fake, &mut slot, &pw(), Method::GET, "/api/stats/summary", None).await.unwrap_err().kind, PiholeErrorKind::CertChanged);
+        assert!(slot.is_none());
     }
 
     #[tokio::test]

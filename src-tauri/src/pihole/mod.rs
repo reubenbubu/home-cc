@@ -239,9 +239,12 @@ impl PiHole {
         self.settings_of(device_id, &config)
     }
 
-    /// Ends the session and forgets everything about the Pi-hole: its row and its password.
+    /// Ends the session and forgets everything about the Pi-hole: its row and its password. Done while
+    /// holding the Pi-hole's slot, so a reading waiting behind it can't log in again with what is forgotten.
     pub async fn remove(&self, inv: &Inventory, device_id: i64) -> Result<()> {
-        self.logout(device_id).await;
+        let slot = self.slot(device_id);
+        let mut held = slot.lock().await;
+        end(&mut held).await;
         self.offered().remove(&device_id);
         inv.remove_pihole(device_id)?;
         secrets::delete(&password_key(device_id))?;
@@ -249,14 +252,17 @@ impl PiHole {
     }
 
     /// Saves HTTPS or HTTP, the port and, when one is typed, the password (into the keychain). The session
-    /// made with the old settings is ended first.
+    /// made with the old settings is ended first. The Pi-hole's slot is held throughout, so a reading that
+    /// was waiting reads the new settings and password, never the old ones.
     pub async fn save(&self, inv: &Inventory, device_id: i64, https: bool, port: u16, password: Option<String>) -> Result<PiholeSettings> {
         check_port(port).map_err(Error::Invalid)?;
+        let slot = self.slot(device_id);
+        let mut held = slot.lock().await;
         let (_, before) = self.config(inv, device_id)?;
         let scheme = if https { Scheme::Https } else { Scheme::Http };
         let password = password.filter(|p| !p.is_empty());
         if before.scheme != scheme || before.port != port || password.is_some() {
-            self.logout(device_id).await;
+            end(&mut held).await;
         }
         inv.save_pihole(device_id, scheme, port)?;
         if before.scheme != scheme || before.port != port {
@@ -275,7 +281,9 @@ impl PiHole {
 
     pub async fn remove_password(&self, inv: &Inventory, device_id: i64) -> Result<PiholeSettings> {
         let (_, config) = self.config(inv, device_id)?;
-        self.logout(device_id).await;
+        let slot = self.slot(device_id);
+        let mut held = slot.lock().await;
+        end(&mut held).await;
         secrets::delete(&password_key(device_id))?;
         self.settings_of(device_id, &config)
     }
@@ -302,13 +310,6 @@ impl PiHole {
         });
     }
 
-    /// Ends one Pi-hole's session, if there is one.
-    pub async fn logout(&self, device_id: i64) {
-        let slot = self.slot(device_id);
-        let mut held = slot.lock().await;
-        end(&mut held).await;
-    }
-
     /// Ends every session, for when the app closes. Gives up after a few seconds: they end by themselves.
     pub async fn logout_all(&self) {
         let ids: Vec<i64> = self.slots.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
@@ -326,8 +327,11 @@ impl PiHole {
         tokio::time::timeout(Duration::from_secs(3), all).await.ok();
     }
 
-    /// Reads one Pi-hole.
+    /// Reads one Pi-hole. The settings and password are read once the Pi-hole's slot is held, so a reading
+    /// that waited behind a save uses what was saved.
     pub async fn status(&self, inv: &Inventory, device_id: i64) -> Result<PiholeStatus> {
+        let slot = self.slot(device_id);
+        let mut held = slot.lock().await;
         let (config, ready) = self.prepare(inv, device_id).await?;
         let mut status = PiholeStatus {
             device_id,
@@ -344,8 +348,7 @@ impl PiHole {
         let result = match ready {
             Err(f) => Err(f),
             Ok((ep, pw)) => {
-                let slot = self.slot(device_id);
-                let mut held = slot.lock().await;
+                end_if_elsewhere(&mut held, &ep).await;
                 let r = read_all(&ep, &mut held.session, &pw).await;
                 if held.session.is_some() {
                     held.ep = Some(ep);
@@ -372,10 +375,11 @@ impl PiHole {
     /// Switches blocking on, or off for `timer` seconds (None: until switched on again).
     pub async fn set_blocking(&self, inv: &Inventory, device_id: i64, blocking: bool, timer: Option<u32>) -> Result<Blocking> {
         let body = blocking_body(blocking, timer).map_err(Error::Invalid)?;
-        let (_, ready) = self.prepare(inv, device_id).await?;
-        let (ep, pw) = ready.map_err(|f| Error::Network(f.message))?;
         let slot = self.slot(device_id);
         let mut held = slot.lock().await;
+        let (_, ready) = self.prepare(inv, device_id).await?;
+        let (ep, pw) = ready.map_err(|f| Error::Network(f.message))?;
+        end_if_elsewhere(&mut held, &ep).await;
         let r = auth::call(&ep, &mut held.session, &pw, Method::POST, "/api/dns/blocking", Some(&body)).await;
         if held.session.is_some() {
             held.ep = Some(ep);
@@ -429,6 +433,20 @@ impl PiHole {
 async fn end(held: &mut Slot) {
     if let (Some(session), Some(ep)) = (held.session.take(), held.ep.take()) {
         auth::logout(&ep, &session).await;
+    }
+}
+
+/// Whether the slot holds a session made somewhere other than `ep` (the address, scheme or port changed
+/// since). Such a session is never sent to `ep`.
+fn made_elsewhere(held: &Slot, ep: &Endpoint) -> bool {
+    held.session.as_ref().is_some_and(|s| s.place != ep.key())
+}
+
+/// Before a call at `ep`: logs out of a session made elsewhere, at the place it was made, so it doesn't
+/// hold one of that Pi-hole's few API seats until it times out.
+async fn end_if_elsewhere(held: &mut Slot, ep: &Endpoint) {
+    if made_elsewhere(held, ep) {
+        end(held).await;
     }
 }
 
@@ -541,6 +559,24 @@ mod tests {
         let mut slot = None;
         let err = read_all(&fake, &mut slot, &Password("pw".into())).await.unwrap_err();
         assert_eq!(err.kind, PiholeErrorKind::Auth);
+    }
+
+    #[test]
+    fn a_session_from_an_old_address_scheme_or_port_is_recognised() {
+        let old = Endpoint { host: "192.168.68.31".into(), port: 443, scheme: Scheme::Https, pinned: None };
+        let session = Session {
+            place: old.key(),
+            sid: Some("sid-1".into()),
+            lifetime: Duration::from_secs(1800),
+            until: std::time::Instant::now() + Duration::from_secs(600),
+        };
+        let held = Slot { session: Some(session), ep: Some(old.clone()) };
+        assert!(!made_elsewhere(&held, &old));
+        assert!(!made_elsewhere(&held, &Endpoint { pinned: Some("AB".into()), ..old.clone() }), "approving a certificate keeps the place");
+        assert!(made_elsewhere(&held, &Endpoint { port: 8443, ..old.clone() }));
+        assert!(made_elsewhere(&held, &Endpoint { scheme: Scheme::Http, port: 80, ..old.clone() }));
+        assert!(made_elsewhere(&held, &Endpoint { host: "192.168.68.40".into(), ..old.clone() }));
+        assert!(!made_elsewhere(&Slot::default(), &old), "nothing to end");
     }
 
     #[tokio::test]
