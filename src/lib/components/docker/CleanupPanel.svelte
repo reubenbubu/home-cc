@@ -7,7 +7,7 @@
   import { dockerApi, type CleanupItem, type CleanupPick, type CleanupPreview, type CleanupResult, type DockerHost } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { defaultPick, isUnnamedVolume, offeredKeys, pickTotals, restorePick, type PickDraft } from "$lib/docker/logic";
+  import { cleanupDraftKey, defaultPick, isUnnamedVolume, offeredKeys, pickTotals, restorePick, type PickDraft } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import { bytes, count } from "$lib/format";
   import ConfirmButton from "../ConfirmButton.svelte";
@@ -27,8 +27,8 @@
   const name = $derived(device?.name ?? "this host");
 
   // What the owner ticked or unticked stays while another screen is shown (drafts.svelte.ts), until the
-  // cleanup runs or the panel is closed.
-  const draftKey = untrack(() => `docker-cleanup:${host.deviceId}`);
+  // cleanup runs or the panel is closed, here or by the Docker screen (draftsDroppedWith).
+  const draftKey = untrack(() => cleanupDraftKey(host.deviceId));
   $effect(() => {
     if (preview) drafts.keep<PickDraft>(draftKey, { pick, offered: offeredKeys(preview) }, { pick: defaultPick(preview), offered: offeredKeys(preview) });
   });

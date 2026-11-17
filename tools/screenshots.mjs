@@ -1324,6 +1324,57 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "Drafts: cleanup ticks stay after looking at another screen, and putting the cleanup away from the toolbar lets them go",
+      path: "/docker",
+      async run(page) {
+        const toolbar = page.getByRole("button", { name: "Clean up…" });
+        await toolbar.click();
+        const named = page.getByRole("checkbox", { name: /nextcloud_db/ });
+        const image = page.getByRole("checkbox", { name: /postgres:14/ });
+        await named.waitFor();
+        if (await named.isChecked()) throw new Error("a named volume was ticked to begin with");
+        if (!(await image.isChecked())) throw new Error("an unused image wasn't ticked to begin with");
+        await named.check();
+        await image.uncheck();
+        await awayAndBack(page, "Machines", "Docker");
+        await named.waitFor();
+        if (!(await named.isChecked())) throw new Error("the named volume ticked before lost its tick");
+        if (await image.isChecked()) throw new Error("the image unticked before was ticked again");
+        // Put away with the toolbar button, not its own Close: opened again, it starts from the usual ticks.
+        await toolbar.click();
+        await named.waitFor({ state: "detached" });
+        await toolbar.click();
+        await named.waitFor();
+        if (await named.isChecked()) throw new Error("a named volume ticked earlier came back ticked after the cleanup was put away");
+        if (!(await image.isChecked())) throw new Error("the image didn't get its usual tick after the cleanup was put away");
+      },
+    },
+    {
+      what: "Drafts: a snapshot being written stays after looking at another screen, and Close lets it go",
+      path: "/proxmox",
+      async run(page) {
+        await page.getByRole("button", { name: "Manage homeassistant" }).click();
+        const panel = page.getByRole("complementary");
+        await panel.getByText("after_setup", { exact: true }).waitFor();
+        const name = panel.getByLabel("Name");
+        await name.fill("before_update");
+        await panel.getByLabel("Note (optional)").fill("typed, not taken");
+        await panel.getByLabel(/Include RAM/).check();
+        await awayAndBack(page, "Terminals", "Proxmox");
+        await panel.getByRole("heading", { name: "homeassistant" }).waitFor();
+        await expectValue(name, "before_update", "the snapshot name");
+        await expectValue(panel.getByLabel("Note (optional)"), "typed, not taken", "the snapshot note");
+        if (!(await panel.getByLabel(/Include RAM/).isChecked())) throw new Error("Include RAM lost its tick");
+        await panel.getByRole("button", { name: "Close", exact: true }).click();
+        await page.getByRole("button", { name: "Manage homeassistant" }).click();
+        await panel.getByRole("heading", { name: "homeassistant" }).waitFor();
+        const fresh = await name.inputValue();
+        if (!/^snap_\d{8}_\d{4}$/.test(fresh)) throw new Error(`the name after Close was "${fresh}", not a suggested one`);
+        await expectValue(panel.getByLabel("Note (optional)"), "", "the snapshot note after Close");
+        if (await panel.getByLabel(/Include RAM/).isChecked()) throw new Error("Include RAM kept its tick after Close");
+      },
+    },
+    {
       what: "Drafts: the Machines edit form as typed stays after looking at another screen, and Cancel lets it go",
       path: "/machines",
       async run(page) {

@@ -6,7 +6,7 @@
   import { devices } from "$lib/devices.svelte";
   import { drafts } from "$lib/drafts.svelte";
   import type { Container, Stack } from "$lib/docker/api";
-  import { isLoginProblem, stackOrder } from "$lib/docker/logic";
+  import { draftsDroppedWith, isLoginProblem, stackOrder } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import { docker, REFRESH_SECS } from "$lib/docker/store.svelte";
   import { count, relTime } from "$lib/format";
@@ -29,6 +29,12 @@
   // The log, files, cleanup or hosts panel that was open is open again after another screen was shown.
   let panel = $state<Panel | null>(drafts.get<Panel>("docker-panel") ?? null);
   $effect(() => drafts.remember("docker-panel", panel));
+
+  /** Every change of the side panel comes through here, so a panel put away lets its draft go. */
+  function show(next: Panel | null) {
+    drafts.clear(...draftsDroppedWith(panel, next));
+    panel = next;
+  }
 
   const host = $derived(docker.selected != null ? docker.byId.get(docker.selected) : undefined);
   const device = $derived(host ? devices.byId.get(host.deviceId) : undefined);
@@ -65,12 +71,12 @@
 
   function toggleLogs(c: Container) {
     if (!host) return;
-    panel = panel?.kind === "logs" && panel.container.id === c.id ? null : { kind: "logs", hostId: host.deviceId, container: c };
+    show(panel?.kind === "logs" && panel.container.id === c.id ? null : { kind: "logs", hostId: host.deviceId, container: c });
   }
 
   function toggleFiles(s: Stack) {
     if (!host) return;
-    panel = panel?.kind === "files" && panel.stack.name === s.name && panel.hostId === host.deviceId ? null : { kind: "files", hostId: host.deviceId, stack: s };
+    show(panel?.kind === "files" && panel.stack.name === s.name && panel.hostId === host.deviceId ? null : { kind: "files", hostId: host.deviceId, stack: s });
   }
 
   let stopFollowing: (() => void) | null = null;
@@ -95,12 +101,12 @@
         <button
           class="btn"
           class:on={panel?.kind === "cleanup"}
-          onclick={() => (panel = panel?.kind === "cleanup" && panel.hostId === host?.deviceId ? null : host ? { kind: "cleanup", hostId: host.deviceId } : null)}
+          onclick={() => show(panel?.kind === "cleanup" && panel.hostId === host?.deviceId ? null : host ? { kind: "cleanup", hostId: host.deviceId } : null)}
         >
           Clean up…
         </button>
       {/if}
-      <button class="btn" class:on={panel?.kind === "hosts"} onclick={() => (panel = panel?.kind === "hosts" ? null : { kind: "hosts" })}>
+      <button class="btn" class:on={panel?.kind === "hosts"} onclick={() => show(panel?.kind === "hosts" ? null : { kind: "hosts" })}>
         Docker hosts…
       </button>
     </div>
@@ -142,7 +148,7 @@
               home-cc looks for Docker on every Linux machine that has an SSH user. None of them has Docker, or they couldn't
               be reached. Open <strong>Docker hosts</strong> to see each one, or to mark a machine as a Docker host yourself.
             </p>
-            <div><button class="btn primary" onclick={() => (panel = { kind: "hosts" })}>Docker hosts…</button></div>
+            <div><button class="btn primary" onclick={() => show({ kind: "hosts" })}>Docker hosts…</button></div>
           {/if}
         </div>
       {:else if host}
@@ -225,18 +231,18 @@
     {#if panel}
       <aside class="side">
         {#if panel.kind === "hosts"}
-          <HostsPanel onclose={() => (panel = null)} />
+          <HostsPanel onclose={() => show(null)} />
         {:else if panelHost && panel.kind === "logs" && logsContainer}
           {#key `${panel.hostId}:${panel.container.id}`}
-            <LogsPanel host={panelHost} device={panelDevice} container={logsContainer} onclose={() => (panel = null)} />
+            <LogsPanel host={panelHost} device={panelDevice} container={logsContainer} onclose={() => show(null)} />
           {/key}
         {:else if panelHost && panel.kind === "files"}
           {#key `${panel.hostId}:${panel.stack.name}`}
-            <FilesPanel host={panelHost} device={panelDevice} stack={panel.stack} onclose={() => (panel = null)} />
+            <FilesPanel host={panelHost} device={panelDevice} stack={panel.stack} onclose={() => show(null)} />
           {/key}
         {:else if panelHost && panel.kind === "cleanup"}
           {#key panel.hostId}
-            <CleanupPanel host={panelHost} device={panelDevice} onclose={() => (panel = null)} />
+            <CleanupPanel host={panelHost} device={panelDevice} onclose={() => show(null)} />
           {/key}
         {/if}
       </aside>

@@ -2,7 +2,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  cleanupDraftKey,
   containerKey,
+  draftsDroppedWith,
   commandShown,
   defaultPick,
   offeredKeys,
@@ -209,6 +211,21 @@ test("the owner's cleanup ticks come back on a preview read afresh", () => {
   });
   // No build cache any more: nothing to tick.
   assert.equal(restorePick({ ...draft, pick: { ...draft.pick, buildCache: true } }, { ...after, buildCacheCount: 0 }).buildCache, false);
+});
+
+test("a cleanup put away by the Docker screen lets its ticks go; leaving the screen does not", () => {
+  const cleanup = { kind: "cleanup", hostId: 4 };
+  const key = cleanupDraftKey(4);
+  // The toolbar's "Clean up…" pressed again, or the panel's own Close.
+  assert.deepEqual(draftsDroppedWith(cleanup, null), [key]);
+  // Replaced by the log, files or Docker hosts panel, or by another host's cleanup.
+  assert.deepEqual(draftsDroppedWith(cleanup, { kind: "logs", hostId: 4 }), [key]);
+  assert.deepEqual(draftsDroppedWith(cleanup, { kind: "hosts" }), [key]);
+  assert.deepEqual(draftsDroppedWith(cleanup, { kind: "cleanup", hostId: 5 }), [key]);
+  // The same cleanup stays open; other panels have nothing to let go here.
+  assert.deepEqual(draftsDroppedWith(cleanup, { kind: "cleanup", hostId: 4 }), []);
+  assert.deepEqual(draftsDroppedWith(null, cleanup), []);
+  assert.deepEqual(draftsDroppedWith({ kind: "files", hostId: 4 }, null), []);
 });
 
 test("a terminal into a container names it only as Docker could have", () => {
