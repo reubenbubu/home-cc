@@ -1,7 +1,7 @@
 //! Terminal tabs: a full terminal on a machine, over SSH.
 //!
 //! Each tab is its own SSH connection, made with the same login rules as
-//! everything else (see ssh.rs and `monitor::login_for`: the stored password
+//! everything else (see ssh.rs and `monitor::Prepared::connect`: the stored password
 //! only ever goes to an identity the owner approved). On it the app asks for a
 //! terminal (a PTY, "xterm-256color", at the size of the tab), then starts the
 //! login shell, or a given command such as `docker exec -it web sh`.
@@ -21,7 +21,7 @@
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
 use crate::monitor::{self, Monitor};
-use crate::ssh::{self, HostKey, Session, SshError};
+use crate::ssh::{HostKey, Session, SshError};
 use russh::client::Msg;
 use russh::{ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Pty, Sig};
 use serde::Serialize;
@@ -396,22 +396,20 @@ impl Terminals {
             )));
         }
         let prepared = monitor::login_for(app, &device).await?;
-        let login = prepared.login;
-        let (host, port) = (login.host.clone(), login.port);
+        let (host, port) = (prepared.login.host.clone(), prepared.login.port);
         // A machine reached for the first time has its identity remembered (not approved)
         // before anything is offered to it, as the stats readings do.
         let first_app = app.clone();
         let first_host = host.clone();
         let first_use = move |key: &HostKey| monitor::remember(&first_app, device_id, &first_host, port, key);
-        let session = match ssh::connect(&login, &first_use).await {
+        let session = match prepared.connect(&first_use).await {
             Ok(session) => session,
             Err(e) => {
-                let held_back = prepared.password_held_back && matches!(e, SshError::AuthFailed(_));
-                if held_back || matches!(e, SshError::NewHost(_) | SshError::HostKeyChanged { .. }) {
+                if matches!(e, SshError::NewHost(_) | SshError::HostKeyChanged { .. }) {
                     // Let the Machines screen show this machine's identity for approval.
                     app.state::<Monitor>().retry_login(device_id);
                 }
-                return Err(Error::Invalid(open_error(&name, &e, held_back)));
+                return Err(Error::Invalid(open_error(&name, &e)));
             }
         };
 
@@ -509,10 +507,12 @@ fn binary_bytes(data: &str) -> Result<Vec<u8>> {
 }
 
 /// Why a terminal could not be opened, saying what to do about it.
-fn open_error(name: &str, e: &SshError, password_held_back: bool) -> String {
+fn open_error(name: &str, e: &SshError) -> String {
     match e {
-        SshError::NewHost(_) => new_host_text(name),
-        SshError::AuthFailed(_) if password_held_back => new_host_text(name),
+        SshError::NewHost(_) => format!(
+            "Logging in to {name} needs its stored password, and home-cc only sends that once you have approved \
+             this machine's identity. Approve it on the Machines screen, then open the terminal again."
+        ),
         SshError::HostKeyChanged { .. } => format!(
             "{name}'s identity has changed since home-cc first reached it, so nothing was sent to it. Check the new \
              identity on the Machines screen and approve it there if you expected the change, then open the \
@@ -520,13 +520,6 @@ fn open_error(name: &str, e: &SshError, password_held_back: bool) -> String {
         ),
         other => other.to_string(),
     }
-}
-
-fn new_host_text(name: &str) -> String {
-    format!(
-        "Logging in to {name} needs its stored password, and home-cc only sends that once you have approved this \
-         machine's identity. Approve it on the Machines screen, then open the terminal again."
-    )
 }
 
 // --- Copy and paste ---
@@ -570,7 +563,7 @@ mod tests {
     use russh::keys::{HashAlg, PrivateKey};
     use russh::server::{self, Auth, ChannelOpenHandle};
     use russh::{Channel, ChannelId, MethodKind, MethodSet};
-    use ssh::Login;
+    use crate::ssh::{self, Login};
 
     const USER: &str = "jim";
     const PASSWORD: &str = "correct horse battery";
@@ -1075,14 +1068,13 @@ mod tests {
     #[test]
     fn opening_failures_say_where_to_approve() {
         let key = HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:abc".into() };
-        let text = open_error("NAS", &SshError::NewHost(key.clone()), false);
+        let text = open_error("NAS", &SshError::NewHost(key.clone()));
         assert!(text.contains("Approve it on the Machines screen"), "{text}");
-        let text = open_error("NAS", &SshError::AuthFailed("no".into()), true);
-        assert!(text.contains("Approve it on the Machines screen"), "{text}");
-        let text = open_error("NAS", &SshError::AuthFailed("Nothing worked.".into()), false);
+        // A failed login is only that: where approving would help, the login says NewHost.
+        let text = open_error("NAS", &SshError::AuthFailed("Nothing worked.".into()));
         assert_eq!(text, "Nothing worked.");
         let changed = SshError::HostKeyChanged { expected: key.clone(), got: key };
-        assert!(open_error("NAS", &changed, false).contains("identity has changed"));
+        assert!(open_error("NAS", &changed).contains("identity has changed"));
     }
 
     #[test]

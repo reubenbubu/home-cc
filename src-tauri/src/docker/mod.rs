@@ -21,7 +21,7 @@ mod store;
 use crate::error::{Error, Result};
 use crate::inventory::{Device, DeviceKind, Inventory, Os, now};
 use crate::monitor::{self, Monitor, StatsErrorKind};
-use crate::ssh::{self, ExecOutput, HostKey, Session, SshError};
+use crate::ssh::{ExecOutput, HostKey, Session, SshError};
 use parse::{CleanupPreview, Compose, Container, ContainerStats, Probe, Refusal};
 use scripts::{ContainerAction, StackAction, StackPlace};
 use serde::Serialize;
@@ -388,8 +388,8 @@ impl Docker {
     /// A login problem the machine stats already ran into, so the Docker screen
     /// doesn't knock on the same door again by itself.
     fn stats_login_problem(app: &AppHandle, device_id: i64) -> Option<Problem> {
-        let entries = app.state::<Monitor>().stats_entries(&app.state::<Inventory>()).ok()?;
-        let entry = entries.into_iter().find(|e| e.device_id == device_id && e.paused)?;
+        // Only SSH readings pause, so this PC's own reading never counts here.
+        let entry = app.state::<Monitor>().stats_entry(device_id).filter(|e| e.paused && !e.local)?;
         let kind = match entry.error_kind? {
             StatsErrorKind::NewHost => ProblemKind::NewHost,
             StatsErrorKind::HostKeyChanged => ProblemKind::HostKeyChanged,
@@ -466,29 +466,14 @@ impl Docker {
         }
         self.drop_conn(d.id);
 
-        let (login, password_held_back) =
-            monitor::prepared_login(app, d).await.map_err(|e| Problem::new(ProblemKind::Other, e.to_string()))?;
+        let prepared =
+            monitor::login_for(app, d).await.map_err(|e| Problem::new(ProblemKind::Other, e.to_string()))?;
         // As for the stats: a first identity is remembered straight away, not approved;
-        // the password stays back until the owner has approved it.
-        let shown: Arc<Mutex<Option<HostKey>>> = Arc::default();
-        let (seen, first_app, device_id) = (shown.clone(), app.clone(), d.id);
-        let (host, port) = (login.host.clone(), login.port);
-        let first_use = move |key: &HostKey| {
-            *seen.lock().unwrap() = Some(key.clone());
-            if let Err(e) = first_app.state::<Inventory>().remember_host_key(device_id, &host, port, key) {
-                crate::diag::note(format!("could not store the identity of device {device_id}: {e}"));
-            }
-        };
-        let session = match ssh::connect(&login, &first_use).await {
-            Ok(session) => session,
-            Err(SshError::AuthFailed(_)) if password_held_back => {
-                return Err(ssh_problem(match login.known_key.clone().or_else(|| shown.lock().unwrap().clone()) {
-                    Some(key) => SshError::NewHost(key),
-                    None => SshError::AuthFailed("Could not log in, and the machine did not show an identity to approve.".into()),
-                }));
-            }
-            Err(e) => return Err(ssh_problem(e)),
-        };
+        // the password stays back until the owner has approved it (Prepared::connect).
+        let (first_app, device_id) = (app.clone(), d.id);
+        let (host, port) = (prepared.login.host.clone(), prepared.login.port);
+        let first_use = move |key: &HostKey| monitor::remember(&first_app, device_id, &host, port, key);
+        let session = prepared.connect(&first_use).await.map_err(ssh_problem)?;
         let conn = Arc::new(Conn { session, place: here, last_used: Mutex::new(Instant::now()) });
         self.conns.lock().unwrap().insert(d.id, conn.clone());
         Ok((conn, false))

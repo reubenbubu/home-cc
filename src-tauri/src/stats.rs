@@ -110,6 +110,20 @@ pub async fn collect(
 ) -> Result<Collected, SshError> {
     let deadline = Instant::now() + TOTAL_LIMIT;
     let session = ssh::connect(login, first_use).await?;
+    read(session, login.host.trim(), os, prev, deadline).await
+}
+
+/// Read the stats over a connection that is already logged in, then log out. For a
+/// caller that logs in by its own rules (see `monitor::Prepared::connect`); `deadline`
+/// is when the whole reading, the login included, should be over: normally
+/// [`TOTAL_LIMIT`] from before the login.
+pub async fn read(
+    session: Session,
+    host: &str,
+    os: Os,
+    prev: Option<CpuTicks>,
+    deadline: Instant,
+) -> Result<Collected, SshError> {
     // A machine of unknown type that greets as Windows' own SSH server gets the Windows
     // command straight away: the Linux one could only fail there.
     let windows = match os {
@@ -117,7 +131,6 @@ pub async fn collect(
         Os::Linux | Os::Proxmox => false,
         Os::Other => session.server_version().contains("OpenSSH_for_Windows"),
     };
-    let host = login.host.trim();
     let reading = if windows {
         read_windows(&session, host, deadline).await
     } else {
