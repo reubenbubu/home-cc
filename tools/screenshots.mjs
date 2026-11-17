@@ -541,6 +541,39 @@ async function checkFlows(browser, url) {
         if (!got.title.includes(NAS_MAC)) throw new Error(`the address's tooltip doesn't have the hardware address (it reads "${got.title}")`);
       },
     },
+    {
+      what: "the hostname under the form's address is never the one of an address no longer in the field",
+      path: "/machines",
+      async run(page) {
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        const line = page.locator("form p.resolved");
+        await line.getByText("NAS", { exact: true }).waitFor();
+        await page.getByLabel("Address (IP or hostname)").fill("192.168.68.30");
+        const right = await line.textContent();
+        if (/\bNAS\b/.test(right ?? "")) throw new Error(`the line under 192.168.68.30 reads "${right?.trim()}"`);
+        await line.getByText("pve", { exact: true }).waitFor();
+      },
+    },
+    {
+      what: "on the Overview each Deco mesh node's hostname is shown in full",
+      path: "/",
+      viewport: { width: 1536, height: 864 },
+      scale: 1.25,
+      async run(page) {
+        await page.locator(".mesh-node .hostname").first().waitFor();
+        const got = await page.evaluate(() =>
+          [...document.querySelectorAll(".mesh-node")].map((n) => {
+            const h = n.querySelector(".hostname");
+            return { node: n.querySelector(".card-name")?.textContent?.trim(), text: h?.textContent?.trim() ?? "", whole: !!h && h.scrollWidth <= h.clientWidth };
+          }),
+        );
+        if (got.length === 0) throw new Error("no mesh nodes on the Overview");
+        for (const n of got) {
+          if (!n.text) throw new Error(`${n.node} has no hostname`);
+          if (!n.whole) throw new Error(`${n.node}'s hostname "${n.text}" is cut short`);
+        }
+      },
+    },
   ];
   const problems = [];
   for (const flow of flows) {

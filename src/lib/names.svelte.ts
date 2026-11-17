@@ -5,7 +5,7 @@
 import { SvelteMap } from "svelte/reactivity";
 import { api } from "./api";
 import { devices } from "./devices.svelte";
-import { isIpv4, Lookups, type Answer } from "./lookups";
+import { isIpv4, isIpv6, Lookups, type Answer } from "./lookups";
 import { scan } from "./scan.svelte";
 
 export type HostName =
@@ -15,7 +15,9 @@ export type HostName =
   /** Asked for: nothing on the network gives this address a name. */
   | { kind: "none" }
   | { kind: "failed"; error: string }
-  /** The host is not an IPv4 address (it is already a name), so nothing is looked up. */
+  /** An IPv6 address: only IPv4 addresses are looked up, so its name isn't known. */
+  | { kind: "notLookedUp" }
+  /** The host is not an IP address (it is already a name), so nothing is looked up. */
   | { kind: "notAddress" };
 
 class NameStore {
@@ -35,6 +37,7 @@ class NameStore {
   get(host: string, known?: string | null): HostName {
     if (known) return { kind: "name", name: known };
     const address = host.trim();
+    if (isIpv6(address)) return { kind: "notLookedUp" };
     if (!isIpv4(address)) return { kind: "notAddress" };
     const already = this.#known.get(address);
     if (already) return { kind: "name", name: already };
@@ -56,6 +59,8 @@ class NameStore {
         return "none found";
       case "failed":
         return `couldn't be looked up: ${n.error}`;
+      case "notLookedUp":
+        return "not looked up: only IPv4 addresses are";
       case "notAddress":
         return "not looked up: the address is already a name";
     }

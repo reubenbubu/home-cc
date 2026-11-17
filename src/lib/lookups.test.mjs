@@ -1,7 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BATCH, isIpv4, KEEP_MS, Lookups } from "./lookups.ts";
+import { BATCH, isIpv4, isIpv6, KEEP_MS, Lookups, NOT_YET } from "./lookups.ts";
 
 /** A back end that knows two names, records every request, and answers when told to. */
 function setup() {
@@ -28,6 +28,12 @@ function setup() {
       for (const p of pending.splice(0)) p.resolve(p.addresses.map((address) => ({ address, name: names[address] ?? null })));
       await new Promise((r) => setTimeout(r, 0));
     },
+    /** The back end answers, but didn't get round to `unasked` (a scan held every place). */
+    answerCrowded: async (unasked) => {
+      for (const p of pending.splice(0))
+        p.resolve(p.addresses.map((address) => (unasked.includes(address) ? { address, name: null, retrySoon: true } : { address, name: names[address] ?? null })));
+      await new Promise((r) => setTimeout(r, 0));
+    },
     failAll: async (why) => {
       for (const p of pending.splice(0)) p.reject(why);
       await new Promise((r) => setTimeout(r, 0));
@@ -39,6 +45,11 @@ function setup() {
 test("only IPv4 addresses are looked up", () => {
   for (const yes of ["192.168.68.10", " 10.0.0.1 ", "0.0.0.0", "255.255.255.255"]) assert.ok(isIpv4(yes), yes);
   for (const no of ["nas.lan", "fe80::1", "", "192.168.68", "192.168.68.256", "1.2.3.4.5", "a.b.c.d"]) assert.ok(!isIpv4(no), no);
+});
+
+test("an IPv6 address is told apart from a name, so it is never shown as its own hostname", () => {
+  for (const yes of ["fe80::1a2b", " ::1 ", "[fe80::1]", "fe80::1%eth0", "2001:db8:0:0:0:0:0:1", "::ffff:192.168.68.10"]) assert.ok(isIpv6(yes), yes);
+  for (const no of ["nas.lan", "nas:22", "192.168.68.10", "", "deco-BE85", "cafe::beef.lan"]) assert.ok(!isIpv6(no), no);
 });
 
 test("everything asked for in one moment goes in one request, each address once", async () => {
@@ -116,4 +127,29 @@ test("a failed lookup says so, keeps a name found before, and is tried again lat
   const kept = t.lookups.get("192.168.68.10");
   assert.equal(kept?.name, "nas");
   assert.equal(kept?.error, undefined);
+});
+
+test("an address the back end didn't get round to is not taken as nameless, and is asked about again soon", async () => {
+  const t = setup();
+  t.lookups.get("192.168.68.21");
+  t.lookups.get("192.168.68.99");
+  t.tick();
+  await t.answerCrowded(["192.168.68.21"]);
+  assert.deepEqual(t.lookups.get("192.168.68.21"), { name: null, at: 1_000_000, error: NOT_YET });
+  assert.deepEqual(t.lookups.get("192.168.68.99"), { name: null, at: 1_000_000 }, "the one really asked has no name");
+
+  t.later(KEEP_MS.error);
+  t.lookups.get("192.168.68.21");
+  t.lookups.get("192.168.68.99");
+  t.tick();
+  assert.deepEqual(t.requests.at(-1), ["192.168.68.21"], "well before a real \"no name\" would be asked about again");
+  await t.answerAll();
+  assert.equal(t.lookups.get("192.168.68.21")?.name, "homelab");
+
+  // A name found before stays while a later lookup doesn't get its turn.
+  t.later(KEEP_MS.name);
+  t.lookups.get("192.168.68.21");
+  t.tick();
+  await t.answerCrowded(["192.168.68.21"]);
+  assert.equal(t.lookups.get("192.168.68.21")?.name, "homelab");
 });

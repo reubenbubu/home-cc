@@ -10,10 +10,20 @@ export const BATCH = 256;
  *  stays on screen meanwhile. The back end remembers answers just as long, so asking again is cheap. */
 export const KEEP_MS = { name: 10 * 60_000, none: 2 * 60_000, error: 30_000 };
 
+/** Why an address has no answer when the back end didn't get round to it. */
+export const NOT_YET = "the lookup didn't get its turn, most likely because a scan was busy; it is tried again shortly";
+
 /** Only these are looked up: anything else is already a name, or can't be one. */
 export function isIpv4(text: string): boolean {
   const parts = text.trim().split(".");
   return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
+}
+
+/** An IPv6 address ("fe80::1a2b", "[::1]", "fe80::1%eth0"): an address, not a name, though it isn't looked up.
+ *  A name never has a colon in it, and "host:22" has only one. */
+export function isIpv6(text: string): boolean {
+  const bare = text.trim().replace(/^\[(.*)\]$/, "$1").replace(/%[^%\s]+$/, "");
+  return /^[0-9a-f:.]+$/i.test(bare) && (bare.match(/:/g)?.length ?? 0) >= 2;
 }
 
 /** What the back end said about one address. */
@@ -88,8 +98,15 @@ export class Lookups {
     try {
       const got = await this.#send(addresses);
       const at = this.#now();
-      const byAddress = new Map(got.map((r) => [r.address, r.name]));
-      for (const a of addresses) this.answers.set(a, { name: byAddress.get(a) ?? null, at });
+      const byAddress = new Map(got.map((r) => [r.address, r]));
+      for (const a of addresses) {
+        const r = byAddress.get(a);
+        const before = this.answers.get(a);
+        if (r?.name) this.answers.set(a, { name: r.name, at });
+        // Not asked yet after all: keep a name found before, else say so, and ask again as after an error.
+        else if (r?.retrySoon) this.answers.set(a, before?.name ? { ...before, at } : { name: null, at, error: NOT_YET });
+        else this.answers.set(a, { name: null, at });
+      }
     } catch (e) {
       const at = this.#now();
       const error = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);

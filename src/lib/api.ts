@@ -210,6 +210,9 @@ export interface ResolvedName {
   /** Tidied for showing ("nas.lan" gives "nas"). Null when none was found, and for anything that isn't an
    *  IPv4 address. */
   name: string | null;
+  /** No answer yet for this IPv4 address: its lookup didn't get its turn, most likely because a scan was
+   *  busy. Not "no name": ask again soon. */
+  retrySoon?: boolean;
 }
 
 /** Something the back end ran into by itself, in a timed round. */

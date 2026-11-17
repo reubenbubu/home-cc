@@ -11,7 +11,7 @@ mod netbios;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Semaphore;
@@ -38,21 +38,39 @@ const GENERIC: [&str; 1] = ["pi.hole"];
 /// ("deco-main.lan" becomes "deco-main"). Addresses with no name are left
 /// out. Takes at most about 2.5 seconds. Must run inside the tokio runtime.
 pub async fn discover(ips: &[Ipv4Addr]) -> HashMap<Ipv4Addr, String> {
+    discover_settled(ips).await.names
+}
+
+/// What `discover_settled` found.
+#[derive(Debug, Default, PartialEq)]
+pub struct Discovered {
+    /// As `discover` gives them.
+    pub names: HashMap<Ipv4Addr, String>,
+    /// Addresses with no name whose reverse lookup never got its turn before
+    /// the deadline, because other lookups (a scan's) held every place at the
+    /// gate. "No name" is not known for these, only that nobody asked yet.
+    pub unsettled: HashSet<Ipv4Addr>,
+}
+
+/// `discover`, also saying which addresses were never really asked.
+pub async fn discover_settled(ips: &[Ipv4Addr]) -> Discovered {
     let mut seen = HashSet::new();
     let ips: Vec<Ipv4Addr> = ips.iter().copied().filter(|ip| is_device_address(*ip) && seen.insert(*ip)).collect();
     if ips.is_empty() {
-        return HashMap::new();
+        return Discovered::default();
     }
     // Devices are asked directly only on a home network: never send those
     // questions out to the internet, whatever range was asked for.
     let nearby: Vec<Ipv4Addr> = ips.iter().copied().filter(|ip| is_home_address(*ip)).collect();
     let deadline = Instant::now() + OVERALL;
-    let (reverse, mdns, netbios) = tokio::join!(
+    let ((reverse, started), mdns, netbios) = tokio::join!(
         reverse_dns(&ips, reverse_gate(), deadline, os_reverse_lookup),
         ask_each(&nearby, MDNS_PORT, dns_wire::mdns_query, dns_wire::mdns_host, deadline),
         ask_each(&nearby, NETBIOS_PORT, netbios::status_query, |reply, _| netbios::computer_name(reply), deadline),
     );
-    choose(&ips, &Sources { reverse, mdns, netbios })
+    let names = choose(&ips, &Sources { reverse, mdns, netbios });
+    let unsettled = ips.into_iter().filter(|ip| !started.contains(ip) && !names.contains_key(ip)).collect();
+    Discovered { names, unsettled }
 }
 
 fn is_device_address(ip: Ipv4Addr) -> bool {
@@ -278,7 +296,9 @@ fn os_reverse_lookup(ip: Ipv4Addr) -> Option<String> {
     name.parse::<IpAddr>().is_err().then_some(name)
 }
 
-/// Reverse lookup for every address, returning what arrived by `deadline`.
+/// Reverse lookup for every address, returning what arrived by `deadline`,
+/// and which addresses got a place at the gate by then (their lookup really
+/// started; the others were never asked).
 ///
 /// A lookup that has started cannot be stopped, so its place at the gate
 /// travels into the blocking call and is given back only when the operating
@@ -288,12 +308,15 @@ async fn reverse_dns(
     gate: Arc<Semaphore>,
     deadline: Instant,
     lookup: fn(Ipv4Addr) -> Option<String>,
-) -> HashMap<Ipv4Addr, String> {
+) -> (HashMap<Ipv4Addr, String>, HashSet<Ipv4Addr>) {
+    let started = Arc::new(Mutex::new(HashSet::new()));
     let mut lookups = JoinSet::new();
     for &ip in ips {
         let gate = gate.clone();
+        let started = started.clone();
         lookups.spawn(async move {
             let permit = gate.acquire_owned().await.ok()?;
+            started.lock().unwrap_or_else(|e| e.into_inner()).insert(ip);
             let name = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 lookup(ip)
@@ -312,7 +335,9 @@ async fn reverse_dns(
     // Dropping `lookups` cancels the ones still waiting at the gate. The ones
     // already inside the operating system finish in their own time and then
     // free their place.
-    names
+    drop(lookups);
+    let started = started.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    (names, started)
 }
 
 #[cfg(test)]
@@ -511,6 +536,8 @@ mod tests {
         let started = Instant::now();
         assert!(discover(&[]).await.is_empty());
         assert!(discover(&[Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST]).await.is_empty());
+        // Never asked, but there is nothing to ask: "no name" is the answer, not "unsettled".
+        assert_eq!(discover_settled(&[Ipv4Addr::LOCALHOST]).await, Discovered::default());
         assert!(started.elapsed() < Duration::from_millis(200));
     }
 
@@ -607,7 +634,7 @@ mod tests {
         let ips: Vec<Ipv4Addr> = (1..=48).map(ip).collect();
         let gate = Arc::new(Semaphore::new(4));
         let started = Instant::now();
-        let names = reverse_dns(&ips, gate.clone(), started + Duration::from_millis(1000), slow_lookup).await;
+        let (names, asked) = reverse_dns(&ips, gate.clone(), started + Duration::from_millis(1000), slow_lookup).await;
         assert!(names.is_empty());
         // Back on time, although no lookup had an answer by then.
         assert!(started.elapsed() < Duration::from_millis(1300));
@@ -619,6 +646,9 @@ mod tests {
         assert_eq!(gate.available_permits(), 4);
         // Only lookups that got a place before the deadline ever started.
         assert!(STARTED.load(SeqCst) <= 8, "started {}", STARTED.load(SeqCst));
+        // The ones that got a place are told apart from the ones left waiting at the gate.
+        assert_eq!(asked.len(), STARTED.load(SeqCst));
+        assert!(asked.len() < ips.len(), "asked {}", asked.len());
     }
 
     #[tokio::test]
@@ -629,8 +659,10 @@ mod tests {
         }
         let ips: Vec<Ipv4Addr> = (1..=6).map(ip).collect();
         let gate = Arc::new(Semaphore::new(2));
-        let names = reverse_dns(&ips, gate.clone(), Instant::now() + OVERALL, lookup).await;
+        let (names, asked) = reverse_dns(&ips, gate.clone(), Instant::now() + OVERALL, lookup).await;
         assert_eq!(names, map(&[(1, "device-1.lan"), (3, "device-3.lan"), (5, "device-5.lan")]));
+        // All were really asked, so those without a name have none.
+        assert_eq!(asked, ips.iter().copied().collect());
         assert_eq!(gate.available_permits(), 2);
     }
 

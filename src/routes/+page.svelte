@@ -239,8 +239,9 @@
           {#each meshNodes as n (n.id)}
             <div class="mesh-node">
               <div class="card-name"><StatusDot health={status.health(n)} /><span class="ellipsis" title={n.name}>{n.name}</span></div>
-              <div class="card-top">
-                <Address host={n.host} known={n.hostname} class="muted small" />
+              <div class="card-top mesh-top">
+                <!-- Under the address, so a narrow tile still has room for the whole hostname. -->
+                <Address host={n.host} known={n.hostname} stack class="muted small" />
                 {@render response(n)}
               </div>
               <Sparkline history={status.get(n)?.history ?? []} />
@@ -311,6 +312,7 @@
   .fine :global(svg) { color: var(--ok); }
 
   .mesh { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); gap: 0.6rem; }
+  .mesh-top { align-items: baseline; }
   .mesh-node { padding: 0.75rem; border: 1px solid var(--track); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
 
   .empty { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; }

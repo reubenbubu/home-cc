@@ -35,6 +35,8 @@
         return { text: "no name", tip: "Nothing on the network gives this address a name", quiet: true };
       case "failed":
         return { text: "name unknown", tip: `Couldn't look up the name of this address: ${found.error}`, quiet: true };
+      case "notLookedUp":
+        return { text: "name unknown", tip: "Names are only looked up for IPv4 addresses", quiet: true };
       case "notAddress":
         // Already a name: beside itself it would only repeat, but a Hostname column says it.
         return part === "name" ? { text: host, tip: host, quiet: false } : null;

@@ -15,7 +15,7 @@
     type Os,
   } from "$lib/api";
   import { icons } from "$lib/icons";
-  import { isIpv4 } from "$lib/lookups";
+  import { isIpv4, isIpv6 } from "$lib/lookups";
   import { macToSend, repointed } from "$lib/net";
   import Address from "$lib/components/Address.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
@@ -313,8 +313,11 @@
       <h2 class="section-title">{editing === "new" ? "Add machine" : "Edit machine"}</h2>
       <label>Name <input bind:value={form.name} placeholder="Homelab VM" required /></label>
       <label>Address (IP or hostname) <input class="mono" bind:value={form.host} placeholder="192.168.68.21" required /></label>
-      {#if isIpv4(typedHost)}
-        <p class="hint under resolved">Hostname <Address host={typedHost} part="name" /></p>
+      {#if isIpv4(form.host.trim()) || isIpv6(form.host.trim())}
+        <!-- Only ever the name of the address in the field: while it is being typed, not the last one's. -->
+        <p class="hint under resolved">Hostname
+          {#if typedHost === form.host.trim()}<Address host={typedHost} part="name" />{:else}<span class="pending">looking…</span>{/if}
+        </p>
       {/if}
       <div class="row">
         <label>Type
@@ -471,6 +474,7 @@
   .hint.under { margin-top: -0.55rem; }
   .resolved { display: flex; gap: 0.5rem; min-width: 0; }
   .resolved :global(.address) { color: var(--text-soft); }
+  .resolved .pending { font-style: italic; }
   .pinned { display: flex; flex-direction: column; gap: 0.15rem; }
   /* Small enough for the whole fingerprint to stay on one line in the side-by-side form. */
   .print { color: var(--text-soft); font-size: 0.8rem; overflow-wrap: anywhere; user-select: text; }

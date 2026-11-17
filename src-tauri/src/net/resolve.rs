@@ -4,9 +4,11 @@
 //! so screens ask often and for the same addresses. Answers are remembered
 //! for a while (a name for 10 minutes, "no name" for 2), and an address that
 //! is already being looked up is not asked about a second time: whoever asks
-//! meanwhile waits for that answer.
+//! meanwhile waits for that answer. An address whose lookup never got its
+//! turn (a scan held every place) is not remembered as "no name": the
+//! screen is told to ask again soon.
 
-use super::names;
+use super::names::{self, Discovered};
 use crate::error::{Error, Result};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -37,6 +39,9 @@ pub struct ResolvedName {
     /// Already tidied for showing ("nas.lan" gives "nas"). None when no name
     /// was found, and for anything that isn't an IPv4 address.
     pub name: Option<String>,
+    /// No answer yet, though it is an IPv4 address: its lookup didn't get its
+    /// turn (or broke). Not "no name": ask again soon.
+    pub retry_soon: bool,
 }
 
 /// Names for `addresses`, one answer per address in the same order. Only IPv4
@@ -47,7 +52,7 @@ pub struct ResolvedName {
 pub async fn resolve_names(addresses: Vec<String>) -> Result<Vec<ResolvedName>> {
     static SHARED: OnceLock<Arc<NameCache>> = OnceLock::new();
     let cache = SHARED.get_or_init(|| Arc::new(NameCache::new(FOUND_FOR, NONE_FOR)));
-    cache.resolve(&addresses, |ips| async move { names::discover(&ips).await }).await
+    cache.resolve(&addresses, |ips| async move { names::discover_settled(&ips).await }).await
 }
 
 enum Slot {
@@ -80,7 +85,7 @@ impl NameCache {
     pub(super) async fn resolve<F, Fut>(self: &Arc<Self>, addresses: &[String], lookup: F) -> Result<Vec<ResolvedName>>
     where
         F: FnOnce(Vec<Ipv4Addr>) -> Fut,
-        Fut: Future<Output = HashMap<Ipv4Addr, String>> + Send + 'static,
+        Fut: Future<Output = Discovered> + Send + 'static,
     {
         if addresses.len() > MAX_BATCH {
             return Err(Error::Invalid(format!(
@@ -131,21 +136,22 @@ impl NameCache {
         }
 
         let slots = self.slots();
-        let name_of = |ip: &Option<Ipv4Addr>| match ip.and_then(|ip| slots.get(&ip)) {
-            Some(Slot::Known { name, .. }) => name.clone(),
-            _ => None,
+        let answer = |address: &String, ip: &Option<Ipv4Addr>| {
+            let (name, retry_soon) = match ip.map(|ip| slots.get(&ip)) {
+                None => (None, false),
+                Some(Some(Slot::Known { name, .. })) => (name.clone(), false),
+                Some(_) => (None, true),
+            };
+            ResolvedName { address: address.clone(), name, retry_soon }
         };
-        Ok(addresses
-            .iter()
-            .zip(&wanted)
-            .map(|(address, ip)| ResolvedName { address: address.clone(), name: name_of(ip) })
-            .collect())
+        Ok(addresses.iter().zip(&wanted).map(|(address, ip)| answer(address, ip)).collect())
     }
 }
 
 /// One lookup that is under way. If it ends without an answer (it panicked,
 /// or the runtime shut down), its addresses are let go, so the next request
-/// asks again instead of waiting for ever.
+/// asks again instead of waiting for ever. So are the addresses it never
+/// really asked about.
 struct Unfinished {
     cache: Arc<NameCache>,
     ips: Vec<Ipv4Addr>,
@@ -153,12 +159,16 @@ struct Unfinished {
 }
 
 impl Unfinished {
-    fn finish(mut self, found: HashMap<Ipv4Addr, String>) {
+    fn finish(mut self, found: Discovered) {
         let now = Instant::now();
         {
             let mut slots = self.cache.slots();
             for ip in &self.ips {
-                let name = found.get(ip).cloned();
+                let name = found.names.get(ip).cloned();
+                if name.is_none() && found.unsettled.contains(ip) {
+                    slots.remove(ip);
+                    continue;
+                }
                 let until = now + if name.is_some() { self.cache.found_for } else { self.cache.none_for };
                 slots.insert(*ip, Slot::Known { name, until });
             }
@@ -214,15 +224,26 @@ mod tests {
             Self { asked: Arc::default(), calls: Arc::default(), delay }
         }
 
-        fn lookup(&self) -> impl FnOnce(Vec<Ipv4Addr>) -> std::pin::Pin<Box<dyn Future<Output = HashMap<Ipv4Addr, String>> + Send>> {
+        fn lookup(&self) -> impl FnOnce(Vec<Ipv4Addr>) -> std::pin::Pin<Box<dyn Future<Output = Discovered> + Send>> {
+            self.lookup_crowded(&[])
+        }
+
+        /// The same, but the lookups of `unasked` never get their turn (as during a scan).
+        fn lookup_crowded(&self, unasked: &[&str]) -> impl FnOnce(Vec<Ipv4Addr>) -> std::pin::Pin<Box<dyn Future<Output = Discovered> + Send>> {
             let me = self.clone();
+            let unasked: HashSet<Ipv4Addr> = unasked.iter().map(|a| ip(a)).collect();
             move |ips| {
                 me.calls.fetch_add(1, Ordering::SeqCst);
                 me.asked.lock().unwrap().extend(&ips);
                 Box::pin(async move {
                     tokio::time::sleep(me.delay).await;
                     let known = [("192.168.68.10", "nas"), ("192.168.68.21", "homelab")];
-                    known.into_iter().map(|(a, n)| (ip(a), n.to_string())).filter(|(a, _)| ips.contains(a)).collect()
+                    let names = known
+                        .into_iter()
+                        .map(|(a, n)| (ip(a), n.to_string()))
+                        .filter(|(a, _)| ips.contains(a) && !unasked.contains(a))
+                        .collect();
+                    Discovered { names, unsettled: ips.into_iter().filter(|a| unasked.contains(a)).collect() }
                 })
             }
         }
@@ -328,14 +349,30 @@ mod tests {
         let asked = strings(&["192.168.68.10"]);
         let broken = |ips: Vec<Ipv4Addr>| async move {
             assert!(ips.is_empty(), "the name service fell over (this is part of a test)");
-            HashMap::new()
+            Discovered::default()
         };
         let got = cache.resolve(&asked, broken).await.unwrap();
         assert_eq!(answers(&got), [("192.168.68.10", None)]);
+        assert!(got[0].retry_soon, "the screen is told this is not a real \"no name\"");
         // Not stuck as "being looked up", and the failure isn't taken as "no name".
         let got = cache.resolve(&asked, service.lookup()).await.unwrap();
         assert_eq!(answers(&got), [("192.168.68.10", Some("nas"))]);
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_address_never_really_asked_about_is_not_remembered_as_nameless() {
+        let (cache, service) = (cache(LONG, LONG), Service::new(Duration::ZERO));
+        let asked = strings(&["192.168.68.10", "192.168.68.21", "192.168.68.99", "nas.lan"]);
+        let got = cache.resolve(&asked, service.lookup_crowded(&["192.168.68.21"])).await.unwrap();
+        assert_eq!(answers(&got), [("192.168.68.10", Some("nas")), ("192.168.68.21", None), ("192.168.68.99", None), ("nas.lan", None)]);
+        // Only the address whose lookup never got its turn is to be asked about again soon.
+        assert_eq!(got.iter().map(|r| r.retry_soon).collect::<Vec<_>>(), [false, true, false, false]);
+        // Asked again once the scan is over: only that one is looked up, and now it has its name.
+        let again = cache.resolve(&asked, service.lookup()).await.unwrap();
+        assert_eq!(answers(&again)[1], ("192.168.68.21", Some("homelab")));
+        assert!(again.iter().all(|r| !r.retry_soon));
+        assert_eq!(service.asked(), [ip("192.168.68.10"), ip("192.168.68.21"), ip("192.168.68.21"), ip("192.168.68.99")]);
     }
 
     #[tokio::test]
