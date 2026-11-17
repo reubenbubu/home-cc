@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { OS_LABELS, type Device, type MachineStats, type StatsErrorKind } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { devices, isMachine } from "$lib/devices.svelte";
@@ -6,6 +7,7 @@
   import { icons } from "$lib/icons";
   import { scan } from "$lib/scan.svelte";
   import { settings } from "$lib/settings.svelte";
+  import { silences } from "$lib/silence.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
   import Address from "$lib/components/Address.svelte";
@@ -36,7 +38,19 @@
   const fresh = $derived(shown.filter((d) => !d.reviewed));
 
   const upOf = (list: Device[]) => list.filter((d) => status.health(d) === "up").length;
-  const downOf = (list: Device[]) => list.filter((d) => status.health(d) === "down").length;
+  /** Down, leaving out the machines the owner has silenced (known to be off). */
+  const downOf = (list: Device[]) => list.filter((d) => status.health(d) === "down" && !silences.has(d)).length;
+  const silencedOf = (list: Device[]) => list.filter((d) => status.health(d) === "down" && silences.has(d)).length;
+  /** The status dot's words for a silenced machine, which is still down. */
+  const dotLabel = (d: Device) => (status.health(d) === "down" && silences.has(d) ? "Down, silenced" : undefined);
+
+  // A silence ends when the machine is up again, and one of a machine that was removed is forgotten.
+  $effect(() => {
+    if (!devices.loaded || devices.error || !status.loaded || status.error) return;
+    const list = devices.list;
+    void status.list;
+    untrack(() => silences.keepOnly(list));
+  });
 
   function fullestDisk(st: MachineStats): { mount: string; used: number } | null {
     let best: { mount: string; used: number } | null = null;
@@ -68,7 +82,7 @@
     const warn: Issue[] = [];
     for (const d of [...machines, ...meshNodes]) {
       const href = d.kind === "mesh" ? "/network" : "/machines";
-      if (status.health(d) === "down") {
+      if (status.health(d) === "down" && !silences.has(d)) {
         const seen = status.get(d)?.lastSeen ?? d.lastSeen;
         down.push({ key: `down-${d.id}`, text: `${d.name} is down (last seen ${relTime(seen, clock.now)})`, href });
       }
@@ -122,10 +136,36 @@
   });
 </script>
 
-{#snippet response(d: Device)}
+<!-- A down machine offers Silence, and a silenced one Undo. On a small tile the button is only an icon, so the
+     name keeps its room; its name and title say what it does. -->
+{#snippet response(d: Device, compact = false)}
   {@const s = status.get(d)}
   {#if s && !s.up}
-    <span class="down small">down</span>
+    <span class="response">
+      {#if silences.has(d)}
+        <span class="muted small" title="Left out of Needs attention and the Down count until it is up again">silenced</span>
+        <button
+          class="btn hush"
+          class:icon-only={compact}
+          aria-label="Undo silencing {d.name}"
+          title="Undo: count {d.name} as down again"
+          onclick={() => silences.undo(d)}
+        >
+          {#if compact}<Icon path={icons.undo} size={15} />{:else}Undo{/if}
+        </button>
+      {:else}
+        <span class="down small">down</span>
+        <button
+          class="btn hush"
+          class:icon-only={compact}
+          aria-label="Silence {d.name}"
+          title="Silence: known to be off? Leave it out of Needs attention and the Down count until it is up again"
+          onclick={() => silences.silence(d)}
+        >
+          {#if compact}<Icon path={icons.bellOff} size={15} />{:else}Silence{/if}
+        </button>
+      {/if}
+    </span>
   {:else if s?.up && s.rttMs != null}
     <span class="mono muted small">{ms(s.rttMs)}</span>
   {:else if s?.up && status.isSelf(d)}
@@ -143,7 +183,7 @@
   <article class="panel card">
     <div class="card-top">
       <div class="card-name">
-        <StatusDot health={status.health(m)} />
+        <StatusDot health={status.health(m)} label={dotLabel(m)} />
         <span class="ellipsis" title={m.name}>{m.name}</span>
       </div>
       {@render response(m)}
@@ -187,9 +227,9 @@
 
 {#snippet tile(d: Device)}
   <div class="chip">
-    <StatusDot health={status.health(d)} />
+    <StatusDot health={status.health(d)} label={dotLabel(d)} />
     <span class="ellipsis" title={d.name}>{d.name}</span>
-    {@render response(d)}
+    {@render response(d, true)}
   </div>
 {/snippet}
 
@@ -215,7 +255,9 @@
   <div class="panel stat">
     <div class="muted">Down</div>
     <div class="value mono" class:alarm={downOf(shown) > 0}>{downOf(shown)}</div>
-    <div class="muted small">{downOf(machines) + downOf(meshNodes)} of them machines or mesh nodes</div>
+    <div class="muted small">
+      {downOf(machines) + downOf(meshNodes)} of them machines or mesh nodes{#if silencedOf(shown) > 0}{" "}· {silencedOf(shown)} silenced{/if}
+    </div>
   </div>
   <div class="panel stat">
     <div class="muted">Machines up</div>
@@ -248,10 +290,12 @@
           <div class="kinds">
             {#each kinds as g (g.kind)}
               {@const down = downOf(g.items)}
+              {@const silenced = silencedOf(g.items)}
               <section class="kind" aria-labelledby="kind-{g.kind}" style="--n: {g.items.length}">
                 <h3 class="kind-title" id="kind-{g.kind}">
                   {kindHeading(g.kind, g.items.length)} <span class="muted">· {g.items.length}</span>{#if down > 0}
-                    {" "}<span class="down">· {down} down</span>{/if}
+                    {" "}<span class="down">· {down} down</span>{/if}{#if silenced > 0}
+                    {" "}<span class="muted">· {silenced} silenced</span>{/if}
                 </h3>
                 <div class="auto-grid">
                   {#each g.items as m (m.id)}
@@ -313,11 +357,11 @@
         <div class="mesh">
           {#each meshNodes as n (n.id)}
             <div class="mesh-node">
-              <div class="card-name"><StatusDot health={status.health(n)} /><span class="ellipsis" title={n.name}>{n.name}</span></div>
+              <div class="card-name"><StatusDot health={status.health(n)} label={dotLabel(n)} /><span class="ellipsis" title={n.name}>{n.name}</span></div>
               <div class="card-top mesh-top">
                 <!-- Under the address, so a narrow tile still has room for the whole hostname. -->
                 <Address host={n.host} known={n.hostname} stack class="muted small" />
-                {@render response(n)}
+                {@render response(n, true)}
               </div>
               <Sparkline history={status.get(n)?.history ?? []} />
             </div>
@@ -357,6 +401,11 @@
   .card-name { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; min-width: 0; }
   .down { color: var(--bad); font-weight: 600; flex: none; }
   .card-top .mono, .self { flex: none; white-space: nowrap; }
+  /* "down" or "silenced", and the button that changes which. */
+  .response { display: flex; align-items: center; gap: 0.5rem; flex: none; white-space: nowrap; }
+  /* Hangs over the line a little rather than making it taller than its neighbours' lines. */
+  .hush { min-height: 1.75rem; margin-block: -0.25rem; padding: 0 0.55rem; font-size: 0.85rem; }
+  .hush.icon-only { display: inline-grid; place-items: center; width: 1.9rem; padding: 0; }
   .where { display: flex; align-items: baseline; gap: 0.3rem; min-width: 0; white-space: nowrap; }
   /* The system and type give way before the hostname does. */
   .where .ellipsis { flex: 1 1 0; }

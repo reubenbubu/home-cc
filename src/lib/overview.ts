@@ -23,3 +23,56 @@ export interface KindGroup<T> {
 export function byKind<T extends { kind: DeviceKind }>(items: T[]): KindGroup<T>[] {
   return CARD_KINDS.map((kind) => ({ kind, items: items.filter((d) => d.kind === kind) })).filter((g) => g.items.length > 0);
 }
+
+/** A down machine the owner has silenced on the Overview (one known to be off, say); `at` is when, in Unix
+ *  seconds. It is left out of Needs attention and the Down counts until it is up again or the owner undoes it. */
+export interface Silence {
+  id: number;
+  at: number;
+}
+
+/** What a silence is checked against: whether the machine is up now, and when it was last seen up. */
+export interface Seen {
+  id: number;
+  health: "up" | "down" | "unknown";
+  lastSeen: number | null;
+}
+
+/** Reads the saved silences back. Anything that isn't a list of them counts as none, so a damaged value
+ *  never stops the screen from showing; a machine listed twice keeps the first. */
+export function parseSilences(text: string | null): Silence[] {
+  if (!text) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(value)) return [];
+  const out: Silence[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const { id, at } = item as { id?: unknown; at?: unknown };
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) continue;
+    if (typeof at !== "number" || !Number.isSafeInteger(at) || at < 0) continue;
+    if (out.some((s) => s.id === id)) continue;
+    out.push({ id, at });
+  }
+  return out;
+}
+
+/** True while a silence still holds: the machine isn't up now and hasn't been seen up since it was
+ *  silenced, so one that came back while another screen was open (or the app was closed) and went down
+ *  again isn't silenced any more. Not checked yet counts as still silenced. */
+export function stillSilenced(s: Silence, seen: Seen): boolean {
+  return seen.health !== "up" && !(seen.lastSeen != null && seen.lastSeen > s.at);
+}
+
+/** The silences to keep: those of machines that still exist and are still silenced. */
+export function keepSilences(list: Silence[], devices: Seen[]): Silence[] {
+  const byId = new Map(devices.map((d) => [d.id, d]));
+  return list.filter((s) => {
+    const d = byId.get(s.id);
+    return !!d && stillSilenced(s, d);
+  });
+}

@@ -15,6 +15,11 @@ export const icons = {
   sortUp: "M12 19V5M6.5 10.5 12 5l5.5 5.5",
   sortDown: "M12 5v14M6.5 13.5 12 19l5.5-5.5",
   sortBoth: "M8 9.5l4-4 4 4M8 14.5l4 4 4-4",
+  /** A bell struck through: silence a machine that is down. */
+  bellOff:
+    "M8.6 4.1A6 6 0 0 1 18 9c0 3.4.7 5.6 1.4 7M16.5 17H3.5s2.5-1.8 2.5-8c0-1 .2-1.9.6-2.7M10.3 20.5a2 2 0 0 0 3.4 0M3.5 3.5l17 17",
+  /** An arrow turning back: undo. */
+  undo: "M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
   /** A cross: clear what was typed. */
   clear: "M6.5 6.5l11 11M17.5 6.5l-11 11",
   /** Six dots: a handle to drag something by. */
