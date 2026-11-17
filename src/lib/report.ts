@@ -131,9 +131,11 @@ export interface Problem {
   details?: Details;
   /** A stack trace or other long text, shown as it is. */
   trace?: string;
-  /** The problem is in home-cc itself although its area is about machines (a list it couldn't load from
-   *  its own back end, say), so there is nothing on a machine to investigate or fix. */
-  inHomeCc?: boolean;
+  /** What the problem is about when that differs from its area: "home-cc" for home-cc itself although the
+   *  area is about machines (a list it couldn't load from its own back end, a setting or password it couldn't
+   *  store), so there is nothing on a machine to investigate or fix; "this PC" for this PC rather than the
+   *  machine named in the details (this PC's own SSH key, say). */
+  about?: "home-cc" | "this PC";
 }
 
 /** Which prompt: look into it on the machine, fix it on the machine, or find the bug in home-cc. */
@@ -158,7 +160,8 @@ export const PROMPT_KINDS: Record<PromptKind, { label: string; asks: string }> =
 /** What a problem in each area is about, outside home-cc: a saved machine or a service on it ("machine"),
  *  this PC and the network around it ("this PC", for pinging and scanning), or nothing but home-cc itself
  *  (null: its saved devices, settings, keychain, zoom, live updates, screens). The one place that decides
- *  which problems get "Investigate" and "Remediate" (with reachOf). */
+ *  which problems get "Investigate" and "Remediate" (with reachOf, and a problem's own `about` where it differs
+ *  from its area). */
 export const AREA_REACH: Record<Area, "machine" | "this PC" | null> = {
   stats: "machine",
   trust: "machine",
@@ -195,9 +198,10 @@ export type Reach =
 const textOf = (v: Details[string]) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
 /** Where the problem is, outside home-cc, or null when it is about home-cc itself. A machine's problem
- *  needs the machine's address among its details (deviceDetails), or there is nowhere to send an agent. */
+ *  needs the machine's address among its details (deviceDetails), or there is nowhere to send an agent. A
+ *  problem's `about` comes before its area. */
 export function reachOf(p: Problem): Reach | null {
-  const area = p.inHomeCc ? null : AREA_REACH[p.area];
+  const area = p.about === "home-cc" ? null : p.about ?? AREA_REACH[p.area];
   if (area === "this PC") return { on: "this PC" };
   if (area !== "machine") return null;
   const d = p.details ?? {};
@@ -212,12 +216,14 @@ export function reachOf(p: Problem): Reach | null {
   if (hostname && !/\s/.test(hostname) && hostname !== address) reach.hostname = hostname;
   const user = textOf(d["SSH user"]);
   if (user) reach.ssh = { user, port: typeof d["SSH port"] === "number" ? d["SSH port"] : 22 };
+  // An IPv6 address goes in brackets in a web address, or its last part reads as the port.
+  const inUrl = address.includes(":") ? `[${address}]` : address;
   if (p.area === "proxmox") {
     const port = typeof d["API port"] === "number" ? d["API port"] : 8006;
-    reach.api = { what: "Proxmox's web page and API", url: `https://${address}:${port}` };
+    reach.api = { what: "Proxmox's web page and API", url: `https://${inUrl}:${port}` };
   } else if (p.area === "pihole" && typeof d["Port"] === "number") {
     const scheme = d["Connection"] === "plain HTTP" ? "http" : "https";
-    reach.api = { what: "Pi-hole's web page and API", url: `${scheme}://${address}:${d["Port"]}/admin` };
+    reach.api = { what: "Pi-hole's web page and API", url: `${scheme}://${inUrl}:${d["Port"]}/admin` };
   }
   return reach;
 }
@@ -303,19 +309,20 @@ function bugIntro(): string[] {
   ];
 }
 
-function whereName(reach: Reach): string {
+function whereName(reach: Reach, area: Area): string {
   if (reach.on === "machine") return `my machine "${reach.name}"`;
-  return reach.name ? `this PC ("${reach.name}"), the one home-cc runs on` : "this PC, the one home-cc runs on, or the network around it";
+  if (reach.name) return `this PC ("${reach.name}"), the one home-cc runs on`;
+  return AREA_REACH[area] === "this PC" ? "this PC, the one home-cc runs on, or the network around it" : "this PC, the one home-cc runs on";
 }
 
 /** "Investigate" and "Remediate": go to the machine and look, or fix it there. */
-function machineIntro(kind: "investigate" | "remediate", reach: Reach): string[] {
+function machineIntro(kind: "investigate" | "remediate", reach: Reach, area: Area): string[] {
   const go = "- Go to the machine named under Where it is, the way it says there, and find the cause on it.";
   const ifHomeCc =
     "the source of home-cc is at the address above, and the files to start from are listed at the end.";
   if (kind === "investigate") {
     return [
-      `${ABOUT_HOME_CC} It showed the problem below, about ${whereName(reach)}. ` +
+      `${ABOUT_HOME_CC} It showed the problem below, about ${whereName(reach, area)}. ` +
         "Please look into it there and tell me what is causing it. Don't change anything.",
       "",
       go,
@@ -328,7 +335,7 @@ function machineIntro(kind: "investigate" | "remediate", reach: Reach): string[]
     ];
   }
   return [
-    `${ABOUT_HOME_CC} It showed the problem below, about ${whereName(reach)}. Please fix it there.`,
+    `${ABOUT_HOME_CC} It showed the problem below, about ${whereName(reach, area)}. Please fix it there.`,
     "",
     go,
     "- Before you change anything, tell me what you will change and why.",
@@ -350,7 +357,7 @@ function reachLines(reach: Reach, area: Area): string[] {
       `- ${reach.name ? `This PC ("${reach.name}")` : "This PC"}: the one home-cc runs on (see Running on, under App), ` +
         "probably the one you are working on now. Work here; no SSH is needed.",
     ];
-    if (!reach.name) lines.push("- The devices home-cc checks and scans are on the network around it.");
+    if (AREA_REACH[area] === "this PC") lines.push("- The devices home-cc checks and scans are on the network around it.");
     return lines;
   }
   const lines = [`- Machine: "${reach.name}" at ${reach.address}${reach.hostname ? ` (hostname ${reach.hostname})` : ""}`];
@@ -376,7 +383,7 @@ export function agentPrompt(problem: Problem, ctx: Context, kind: PromptKind = "
   const reach = kind === "bug" ? null : reachOf(problem);
   const out: string[] = [];
   out.push(
-    ...(reach && kind !== "bug" ? machineIntro(kind, reach) : bugIntro()),
+    ...(reach && kind !== "bug" ? machineIntro(kind, reach, problem.area) : bugIntro()),
     "",
     "## What happened",
     "",

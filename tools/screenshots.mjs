@@ -2409,6 +2409,21 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "agent prompts: a Proxmox token home-cc won't save is about home-cc, not the host, so only the bug prompt is offered",
+      path: "/proxmox?pvenotoken",
+      async run(page) {
+        const setup = page.locator("form.setup");
+        await setup.getByText("How to make a token").waitFor();
+        await setup.getByLabel("Token ID").fill("root@pam!homecc=1234");
+        await setup.getByRole("button", { name: "Save", exact: true }).click();
+        const problem = setup.locator(".alert.problem", { hasText: "Put only the token ID here" });
+        await problem.getByRole("button", { name: "Copy a prompt for an agent" }).waitFor();
+        for (const name of ["Investigate", "Remediate"]) {
+          if (await problem.getByRole("button", { name, exact: true }).count()) throw new Error(`a token home-cc won't save offers "${name}"`);
+        }
+      },
+    },
+    {
       what: "Pi-hole: the Overview is quiet when all is well, and flags a paused or unreachable Pi-hole",
       path: "/",
       async run(page) {

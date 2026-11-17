@@ -117,7 +117,9 @@ Windows machine.
   code). A problem about home-cc itself gets only the last. Which is which is
   decided in one place, `AREA_REACH` and `reachOf` in `report.ts`: by the
   problem's area, and for a machine's area only when its details name the
-  machine's address (`deviceDetails`). Give a new screen's problems the
+  machine's address (`deviceDetails`). A problem on a machine's screen that
+  is really about home-cc (a setting or password it couldn't store) or this
+  PC (its own SSH key) says so with `about`. Give a new screen's problems the
   device's details, and a new area its entry there. Never put a secret in the
   details: say whether one is stored instead.
 - `src-tauri/src/` – the back end (Rust).

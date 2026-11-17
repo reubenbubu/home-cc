@@ -69,12 +69,14 @@
   const source = $derived(passwordSource(!!password, hasPassword));
   const steps = $derived(local?.publicKey ? manualSteps(local.publicKey, os) : []);
 
-  /** A problem in this part of the form. Says which machine and key, never a password. */
-  function problem(what: string, error: string): ProblemInfo {
+  /** A problem in this part of the form. Says which machine and key, never a password. `about` says when it
+   *  is about this PC's own key or home-cc's keychain rather than the machine (see report.ts). */
+  function problem(what: string, error: string, about?: ProblemInfo["about"]): ProblemInfo {
     return {
       area: "keys",
       what,
       error,
+      about,
       details: {
         ...(device ? deviceDetails(device) : { Device: "a new machine" }),
         "This PC's key": local?.path ?? "none found",
@@ -110,7 +112,7 @@
     try {
       local = await api.localSshKey();
     } catch (e) {
-      loadError = problem("Looking for this PC's SSH key", `Couldn't look for this PC's SSH key: ${errorText(e)}`);
+      loadError = problem("Looking for this PC's SSH key", `Couldn't look for this PC's SSH key: ${errorText(e)}`, "this PC");
     } finally {
       loading = false;
     }
@@ -124,7 +126,7 @@
       local = await api.createSshKey(passphrase || null);
       passphrase = "";
     } catch (e) {
-      createError = problem("Making an SSH key for this PC", `Couldn't make the key: ${errorText(e)}`);
+      createError = problem("Making an SSH key for this PC", `Couldn't make the key: ${errorText(e)}`, "this PC");
     } finally {
       creating = false;
     }
@@ -172,7 +174,7 @@
       removed = true;
       onpasswordremoved();
     } catch (e) {
-      removeError = problem(`Removing the stored password of "${device.name}" after setting up key login`, `Couldn't remove the password: ${errorText(e)}`);
+      removeError = problem(`Removing the stored password of "${device.name}" after setting up key login`, `Couldn't remove the password: ${errorText(e)}`, "home-cc");
     }
   }
 
@@ -261,7 +263,7 @@
       {#if createError}<Problem problem={createError} />{/if}
       <div><button type="button" class="btn" disabled={creating} onclick={create}>{creating ? "Making the key…" : "Make a key"}</button></div>
     {:else if local.problem}
-      <Problem problem={problem("Reading this PC's SSH key", local.problem)} />
+      <Problem problem={problem("Reading this PC's SSH key", local.problem, "this PC")} />
       <div><button type="button" class="btn small" onclick={loadKey}>Look again</button></div>
     {/if}
 

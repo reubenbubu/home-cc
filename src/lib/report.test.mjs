@@ -91,8 +91,8 @@ test("a problem about a machine or service offers all three prompts, one about h
   // In a machine's area, but with no machine named (the terminals' clipboard, a list that wouldn't load).
   assert.deepEqual(promptKinds({ area: "terminal", what: "Copying or pasting in a terminal tab", error: "denied" }), ["bug"]);
   assert.deepEqual(promptKinds({ ...nas, details: { "Docker version": "27.1" } }), ["bug"]);
-  assert.deepEqual(promptKinds({ area: "status", what: "Loading device status", error: "x", inHomeCc: true }), ["bug"]);
-  assert.deepEqual(promptKinds({ ...nas, inHomeCc: true }), ["bug"]);
+  assert.deepEqual(promptKinds({ area: "status", what: "Loading device status", error: "x", about: "home-cc" }), ["bug"]);
+  assert.deepEqual(promptKinds({ ...nas, about: "home-cc" }), ["bug"]);
 });
 
 test("every area says whether it is about a machine, this PC or home-cc, and every prompt has its words", () => {
@@ -115,6 +115,8 @@ test("the machine is named with how to reach it: address, hostname, SSH user and
   assert.equal(pve.api.url, "https://192.168.68.54:8006");
   const ph = reachOf({ area: "pihole", what: "x", error: "y", details: { Device: "ph", Address: "192.168.68.2", Connection: "plain HTTP", Port: 80 } });
   assert.equal(ph.api.url, "http://192.168.68.2:80/admin");
+  const v6 = reachOf({ area: "proxmox", what: "x", error: "y", details: { Device: "pve", Address: "fd00::54", "API port": 8006 } });
+  assert.equal(v6.api.url, "https://[fd00::54]:8006", "an IPv6 address in brackets");
   // This PC's own stats are read without SSH: the agent works here.
   assert.deepEqual(reachOf({ ...proxmox, details: { Device: "desk", Address: "127.0.0.1", "Read on this PC without SSH": true } }), {
     on: "this PC",
@@ -185,4 +187,22 @@ test("each of the three says no secret is included, and names only whether a pas
     assert.ok(text.includes("- Password stored for it: yes"), kind);
     assert.ok(text.includes("No passwords or other secrets are included."), kind);
   }
+});
+
+test("a problem's own about comes before its area: home-cc's storage on a machine's screen, or this PC's own key", () => {
+  // Saving a Pi-hole's settings or removing its stored password is home-cc's database and keychain, not the Pi-hole.
+  const saving = { ...nas, area: "pihole", what: "Saving the Pi-hole connection settings", about: "home-cc" };
+  assert.equal(reachOf(saving), null);
+  assert.deepEqual(promptKinds(saving), ["bug"]);
+  assert.equal(agentPrompt(saving, ctx, "investigate"), agentPrompt(saving, ctx));
+  // Making this PC's SSH key, from a machine's key setup: the agent works here, not on the machine named.
+  const key = { ...nas, area: "keys", what: "Making an SSH key for this PC", about: "this PC" };
+  assert.deepEqual(reachOf(key), { on: "this PC" });
+  assert.deepEqual(promptKinds(key), ["investigate", "remediate", "bug"]);
+  const text = agentPrompt(key, ctx, "investigate");
+  assert.ok(text.includes("about this PC, the one home-cc runs on."));
+  assert.ok(text.includes("Work here; no SSH is needed."));
+  assert.ok(!text.includes("- Machine:"));
+  assert.ok(!text.includes("ssh -p"));
+  assert.ok(!text.includes("network around it"), "the network is only for pinging and scanning");
 });
