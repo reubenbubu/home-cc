@@ -4,6 +4,9 @@
 //
 // Other screens open a tab with openTerminal({ deviceId, title, command }), for example
 // openTerminal({ deviceId: 7, title: "web on Homelab VM", command: "docker exec -it web sh" }).
+//
+// The text in them has a size of its own (terminalZoom in zoom.svelte.ts), which the app's zoom doesn't
+// change: each terminal's font is made smaller as the app grows (terminalFontSize in zoom.ts).
 import { goto } from "$app/navigation";
 import { tick } from "svelte";
 import { FitAddon } from "@xterm/addon-fit";
@@ -23,6 +26,8 @@ import {
   rightClickAction,
   tabTitle,
 } from "./terminal";
+import { terminalFontSize } from "./zoom";
+import { terminalZoom, zoom } from "./zoom.svelte";
 
 export type TabState = "connecting" | "open" | "ended" | "failed";
 
@@ -105,10 +110,11 @@ function theme(): ITheme {
 
 const FONT = '"JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace';
 
-/** A little larger than the app's text, which follows the display scaling. */
+/** The size the terminals' text is drawn at, in page pixels: a little larger than the app's text (which
+ *  follows the display scaling), at the size chosen for the terminals, whatever the app is zoomed to. */
 function fontSize(): number {
-  const base = parseFloat(getComputedStyle(document.documentElement).fontSize) || 13;
-  return Math.round(base * 1.08 * 2) / 2;
+  const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return terminalFontSize(root, terminalZoom.percent, zoom.percent);
 }
 
 /** After the screen has had a chance to show a new tab, so it is measured at its real size. */
@@ -152,6 +158,14 @@ class Terminals {
   start() {
     if (this.#started) return;
     this.#started = true;
+    // A new size for the terminals' text, or for the app: every terminal in sight is drawn at its new
+    // size and fitted again (one out of sight is when it is shown, as it can't be measured until then).
+    $effect.root(() => {
+      $effect(() => {
+        fontSize();
+        for (const key of this.#live.keys()) this.fit(key);
+      });
+    });
     const leftOver = terminalApi.closeAll().catch(() => {});
     this.#ready = Promise.all([leftOver, this.#listen()]).then(() => {});
     setInterval(() => {
@@ -281,11 +295,15 @@ class Terminals {
     this.#live.get(key)?.el.remove();
   }
 
-  /** Make the terminal fill its place on the screen. The program is told the new size. */
+  /** Make the terminal fill its place on the screen, with its text at the size chosen. The program is told
+   *  the new size. */
   fit(key: number) {
     const live = this.#live.get(key);
     // Hidden tabs have no size; they are fitted when shown.
     if (!live?.opened || !live.el.isConnected || live.el.clientWidth === 0 || live.el.clientHeight === 0) return;
+    // Only now, in sight: a terminal out of sight can't measure its letters at a new size.
+    const size = fontSize();
+    if (live.term.options.fontSize !== size) live.term.options.fontSize = size;
     try {
       live.fit.fit();
     } catch {

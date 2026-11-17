@@ -7,11 +7,29 @@
 // they now have. The window's built-in zoom keys (Tauri's zoomHotkeysEnabled)
 // stay off: they would zoom a second time on top of these, use other steps on
 // Linux, and not be remembered.
+//
+// The terminals' text has a size of its own (terminalZoom, below). While a
+// terminal has the focus, the keys change that instead, and so does the wheel
+// with the pointer over a terminal; the buttons on the Terminals screen too.
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { addWheel, clampZoom, parseZoom, zoomIn, zoomKeyAction, zoomOut, zoomShows, ZOOM_DEFAULT, type ZoomAction, type ZoomView } from "./zoom";
+import {
+  addWheel,
+  clampZoom,
+  parseZoom,
+  zoomIn,
+  zoomKeyAction,
+  zoomOut,
+  zoomShows,
+  zoomTarget,
+  ZOOM_DEFAULT,
+  type ZoomAction,
+  type ZoomTarget,
+  type ZoomView,
+} from "./zoom";
 import { errorText } from "./api";
 
 const STORE_KEY = "home-cc.zoom";
+const TERMINAL_STORE_KEY = "home-cc.terminal-zoom";
 
 /** Wheel turns further apart than this don't add up to a step. */
 const WHEEL_PAUSE_MS = 400;
@@ -27,21 +45,26 @@ export interface ZoomProblem {
   error: string;
 }
 
-function remembered(): number {
+function remembered(key = STORE_KEY): number {
   try {
-    return parseZoom(localStorage.getItem(STORE_KEY));
+    return parseZoom(localStorage.getItem(key));
   } catch {
     return ZOOM_DEFAULT;
   }
 }
 
-function remember(percent: number) {
+function remember(percent: number, key = STORE_KEY) {
   try {
-    if (percent === ZOOM_DEFAULT) localStorage.removeItem(STORE_KEY);
-    else localStorage.setItem(STORE_KEY, String(percent));
+    if (percent === ZOOM_DEFAULT) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(percent));
   } catch {
     // Not remembered for next time, but the size still changes now.
   }
+}
+
+/** Whether this element is in one of the terminals (terminals.svelte.ts draws each into a .terminal-host). */
+function inTerminal(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(".terminal-host") != null;
 }
 
 function native(): boolean {
@@ -81,6 +104,8 @@ class ZoomStore {
   #seq = 0;
   #wheel = 0;
   #wheelAt = 0;
+  /** What the wheel turns so far were over: turns over the app and over a terminal don't add up. */
+  #wheelOn: ZoomTarget = "app";
 
   /** Puts back the size from last time. Called as the app starts, before the first screen is drawn. */
   restore() {
@@ -152,18 +177,30 @@ class ZoomStore {
       if (!action) return;
       e.preventDefault();
       // Held down, the key repeats: one step for each repeat, as in a web browser.
-      this.act(action);
+      if (zoomTarget("key", { focusInTerminal: inTerminal(e.target), pointerInTerminal: false }) === "terminal") {
+        // Kept from the program in the terminal, which would otherwise get it as well.
+        e.stopPropagation();
+        terminalZoom.act(action);
+      } else {
+        this.act(action);
+      }
     };
     const onWheel = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       // Otherwise the page would scroll, or the browser zoom by itself.
       e.preventDefault();
+      const target = zoomTarget("wheel", { focusInTerminal: false, pointerInTerminal: inTerminal(e.target) });
+      // Not scrolled back through, nor sent to a program that follows the mouse.
+      if (target === "terminal") e.stopPropagation();
       const lines = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 40 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 800 : 1;
-      if (e.timeStamp - this.#wheelAt > WHEEL_PAUSE_MS) this.#wheel = 0;
+      if (e.timeStamp - this.#wheelAt > WHEEL_PAUSE_MS || target !== this.#wheelOn) this.#wheel = 0;
       this.#wheelAt = e.timeStamp;
+      this.#wheelOn = target;
       const { total, action } = addWheel(this.#wheel, e.deltaY * lines);
       this.#wheel = total;
-      if (action) this.act(action);
+      if (!action) return;
+      if (target === "terminal") terminalZoom.act(action);
+      else this.act(action);
     };
     // Caught on the way in, so a box or a terminal that keeps the key for itself doesn't stop the zoom.
     window.addEventListener("keydown", onKey, { capture: true });
@@ -176,3 +213,22 @@ class ZoomStore {
 }
 
 export const zoom = new ZoomStore();
+
+/** How big the text in the terminals is, in percent of its normal size, on the same steps as the app's
+ *  zoom. Kept apart from it: terminals.svelte.ts gives each terminal a font size that makes up for the
+ *  app's zoom (terminalFontSize), so zooming the app leaves the terminals' text as it was on the screen,
+ *  and this leaves the app as it was. Remembered for next time in the window's storage, as the app's is. */
+class TerminalZoomStore {
+  percent = $state(remembered(TERMINAL_STORE_KEY));
+
+  set(percent: number) {
+    this.percent = clampZoom(percent);
+    remember(this.percent, TERMINAL_STORE_KEY);
+  }
+
+  act(action: ZoomAction) {
+    this.set(action === "in" ? zoomIn(this.percent) : action === "out" ? zoomOut(this.percent) : ZOOM_DEFAULT);
+  }
+}
+
+export const terminalZoom = new TerminalZoomStore();

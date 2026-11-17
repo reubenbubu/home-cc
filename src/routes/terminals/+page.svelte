@@ -9,6 +9,8 @@
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
   import { terminals, type Tab } from "$lib/terminals.svelte";
+  import { ZOOM_MAX, ZOOM_MIN, type ZoomAction } from "$lib/zoom";
+  import { terminalZoom } from "$lib/zoom.svelte";
   import Address from "$lib/components/Address.svelte";
   import Problem from "$lib/components/Problem.svelte";
 
@@ -98,6 +100,13 @@
     };
   }
 
+  /** A text size button. Pressed with the mouse, the keyboard goes back to the terminal, where Ctrl and + / -
+   *  go on changing the same size; pressed from the keyboard, it stays on the button. */
+  function textSize(e: MouseEvent, action: ZoomAction) {
+    terminalZoom.act(action);
+    if (e.detail > 0 && terminals.active != null) terminals.focus(terminals.active);
+  }
+
   /** Arrow keys move between tabs, as in other tab bars. */
   function tabKeys(e: KeyboardEvent, i: number) {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
@@ -156,6 +165,10 @@
           You can have several open at once, to different machines. Copy with Ctrl+Shift+C, or Ctrl+C while text is
           selected; paste with Ctrl+Shift+V. Right-click copies the selection, or pastes when nothing is selected.
         </p>
+        <p class="muted">
+          In a terminal, Ctrl and + or - (0 for the normal size), or Ctrl and the mouse wheel, change the size of the
+          terminals' text and leave the rest of the app as it is.
+        </p>
       {/if}
     </section>
   {:else}
@@ -199,6 +212,17 @@
         {#if shownTab.command}<span class="command mono ellipsis">{commandShown(shownTab.command)}</span>{/if}
       </p>
     {/if}
+    <!-- The terminals' own text size, apart from the app's (Settings). -->
+    <div class="text-size" role="group" aria-label="Size of the text in the terminals">
+      <span class="small muted" aria-hidden="true">Text</span>
+      <button class="icon-btn step" type="button" onclick={(e) => textSize(e, "out")} disabled={terminalZoom.percent <= ZOOM_MIN}
+        aria-label="Smaller text" title="Smaller text (Ctrl and - in a terminal)">−</button>
+      <button class="icon-btn now mono" type="button" onclick={(e) => textSize(e, "reset")}
+        aria-label="Text at {terminalZoom.percent}%, back to normal size" title="Back to the normal size (Ctrl and 0 in a terminal)"
+        >{terminalZoom.percent}%</button>
+      <button class="icon-btn step" type="button" onclick={(e) => textSize(e, "in")} disabled={terminalZoom.percent >= ZOOM_MAX}
+        aria-label="Larger text" title="Larger text (Ctrl and + in a terminal)">+</button>
+    </div>
     </div>
 
     {#each terminals.tabs as tab (tab.key)}
@@ -274,6 +298,13 @@
   .where { display: flex; align-items: baseline; gap: 0 0.6rem; min-width: 0; max-width: 100%; margin: 0 0 0.55rem auto; }
   .where .user { margin-right: -0.6rem; flex: none; }
   .where .command { min-width: 0; color: var(--text-soft); }
+  /* Beside the login, or at the right on its own when there is none. */
+  .text-size { display: flex; align-items: center; gap: 0.1rem; flex: none; margin: 0 0 0.3rem auto; }
+  .text-size > span { margin-right: 0.25rem; }
+  .where + .text-size { margin-left: 0; }
+  .text-size .icon-btn { width: auto; min-width: 2rem; height: 2rem; padding: 0 0.35rem; }
+  .text-size .step { font-size: 1.15rem; }
+  .text-size .now { min-width: 4.2rem; font-size: 0.85rem; color: var(--text-soft); }
   .picked-at { display: flex; align-self: center; flex: none; max-width: 100%; color: var(--text-soft); line-height: 1.25; }
   .tab {
     display: flex;

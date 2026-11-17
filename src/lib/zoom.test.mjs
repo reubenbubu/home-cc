@@ -1,7 +1,20 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addWheel, clampZoom, parseZoom, WHEEL_STEP, zoomIn, zoomKeyAction, zoomOut, zoomShows, ZOOM_STEPS } from "./zoom.ts";
+import {
+  addWheel,
+  clampZoom,
+  parseZoom,
+  terminalBaseSize,
+  terminalFontSize,
+  WHEEL_STEP,
+  zoomIn,
+  zoomKeyAction,
+  zoomOut,
+  zoomShows,
+  zoomTarget,
+  ZOOM_STEPS,
+} from "./zoom.ts";
 
 test("sizes stay whole percentages from 50 to 200", () => {
   assert.equal(clampZoom(100), 100);
@@ -90,4 +103,51 @@ test("a window that has zoomed is told apart from one that was only resized", ()
   assert.equal(zoomShows(before, { ratio: 1.25, width: 1280 }, 200), false);
   // Nothing to wait for at the normal size.
   assert.equal(zoomShows(before, before, 100), true);
+});
+
+test("in a terminal the keys and the wheel change its text; everywhere else, the app", () => {
+  const where = (focusInTerminal, pointerInTerminal) => ({ focusInTerminal, pointerInTerminal });
+  assert.equal(zoomTarget("key", where(true, false)), "terminal");
+  assert.equal(zoomTarget("key", where(false, true)), "app");
+  // The wheel follows the pointer, not the keyboard.
+  assert.equal(zoomTarget("wheel", where(false, true)), "terminal");
+  assert.equal(zoomTarget("wheel", where(true, false)), "app");
+  assert.equal(zoomTarget("key", where(false, false)), "app");
+});
+
+test("the terminals' normal text size is a little larger than the app's", () => {
+  assert.equal(terminalBaseSize(13), 14);
+  assert.equal(terminalBaseSize(16), 17.5);
+  assert.equal(terminalBaseSize(NaN), 14);
+  assert.equal(terminalBaseSize(0), 14);
+});
+
+test("a terminal's text is the same size on the screen whatever the app is zoomed to", () => {
+  // At 100% the app and the terminal agree.
+  assert.equal(terminalFontSize(13, 100, 100), 14);
+  // The app at 175%: the terminal is given less, so it looks the same.
+  assert.equal(terminalFontSize(13, 100, 175), 8);
+  assert.equal(terminalFontSize(13, 100, 67), 20.9);
+  assert.equal(terminalFontSize(13, 150, 200), 10.5);
+  for (const app of ZOOM_STEPS) {
+    for (const term of ZOOM_STEPS) {
+      const onScreen = (terminalFontSize(13, term, app) * app) / 100;
+      const want = (14 * term) / 100;
+      assert.ok(Math.abs(onScreen - want) < 0.02, `terminal ${term}% with the app at ${app}%: ${onScreen}px, not ${want}px`);
+    }
+  }
+});
+
+test("zooming the app back and forth leaves the terminal where it was", () => {
+  const start = terminalFontSize(13, 110, 100);
+  // Up to 200%, down to 50%, and back up to 100%, one step at a time.
+  let app = 100;
+  for (let i = 0; i < 10; i++) app = zoomIn(app);
+  for (let i = 0; i < 10; i++) app = zoomOut(app);
+  for (let i = 0; i < 5; i++) app = zoomIn(app);
+  assert.equal(app, 100);
+  assert.equal(terminalFontSize(13, 110, app), start);
+  // Odd sizes are kept in range, as the app's are.
+  assert.equal(terminalFontSize(13, 900, 100), 28);
+  assert.equal(terminalFontSize(13, NaN, 100), 14);
 });

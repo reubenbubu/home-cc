@@ -67,7 +67,7 @@ export const AREA_FILES: Record<Area, string[]> = {
     "src/lib/settings.svelte.ts and src/routes/settings/+page.svelte",
   ],
   zoom: [
-    "src/lib/zoom.svelte.ts and src/lib/zoom.ts (zooming the app, remembering the size)",
+    "src/lib/zoom.svelte.ts and src/lib/zoom.ts (zooming the app and the terminals' text, remembering the sizes)",
     "src-tauri/capabilities/default.json (the permission to zoom the window)",
   ],
   live: [

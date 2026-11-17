@@ -332,7 +332,8 @@
         {/if}
         <p class="hint">
           Changes straight away, without Save, and is kept for next time. Anywhere in the app you can also hold Ctrl
-          and press + or - (0 for 100%), or hold Ctrl and turn the mouse wheel.
+          and press + or - (0 for 100%), or hold Ctrl and turn the mouse wheel. In a terminal these change only the
+          size of the terminals' text, which this leaves as it is.
         </p>
       </div>
     </section>
