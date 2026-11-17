@@ -112,7 +112,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .page-head h1 { margin: 0; font-size: 1.55rem; font-weight: 600; }
 .page-head .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
-/* A message that something went wrong (or, with .warn, needs a look). */
+/* A message that something went wrong (or, with .warn, needs a look; with .ask, waits for a yes). */
 .alert {
   margin: 0;
   padding: 0.6rem 0.8rem;
@@ -124,6 +124,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   overflow-wrap: anywhere;
 }
 .alert.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.alert.ask { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 
 /* Bar for a share of something (CPU, RAM, disk, scan progress). */
 .track { display: block; height: 0.45rem; border-radius: 999px; background: var(--track); overflow: hidden; }

@@ -180,7 +180,11 @@
             {/if}
           </td>
 
-          <td class="c-ip mono" title={d.host}>{d.host}</td>
+          <td class="c-ip mono" title={d.mac ? `${d.host} · hardware address ${d.mac}` : d.host}>
+            <span class="ip">{d.host}</span>
+            <!-- Stands in for the Hardware address column when the table is too narrow for it. -->
+            {#if d.mac}<span class="mac-line muted"><span class="sr-only">hardware address </span>{d.mac}</span>{/if}
+          </td>
           {#if variant !== "ignored"}<td class="c-rtt mono">{@render response(d)}</td>{/if}
           {#if variant !== "fresh"}<td class="c-seen muted">{seen(d)}</td>{/if}
           {#if variant === "known"}
@@ -280,9 +284,16 @@
   .btn.suggested { border-color: var(--accent); color: var(--accent); }
   .btn.quiet { margin-left: auto; color: var(--muted); }
 
-  /* Narrower tables drop the least important columns first. */
+  .ip, .mac-line { display: block; overflow: hidden; text-overflow: ellipsis; }
+  /* Sized so that the 17 characters of an address fit the Address column as it is. */
+  .mac-line { display: none; font-size: 0.8rem; line-height: 1.25; user-select: text; }
+
+  /* Narrower tables drop the least important columns first. The hardware address is never lost: without
+     its own column it moves under the address, where it can still be read and copied. */
   @container (max-width: 100rem) {
     .c-mac { display: none; }
+    .mac-line { display: block; }
+    td.c-ip { line-height: 1.3; }
   }
   @container (max-width: 82rem) {
     .known .c-host, .fresh .c-host { display: none; }

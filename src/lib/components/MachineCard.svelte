@@ -1,9 +1,10 @@
 <script lang="ts">
   // One machine on the Machines screen: status, system, and bars for CPU, RAM
   // and each disk, or a plain explanation of why there are none.
-  import { OS_LABELS, type Device, type Disk } from "$lib/api";
+  import { OS_LABELS, type Device, type Disk, type HostKey } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { ms, relTime, share, uptime, usedOfTotal } from "$lib/format";
+  import { identityCommand, identityText } from "$lib/hostkey";
   import { icons } from "$lib/icons";
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
@@ -20,6 +21,10 @@
   const st = $derived(entry?.stats ?? null);
   const refreshing = $derived(stats.refreshing.has(device.id));
   const refreshError = $derived(stats.refreshErrors.get(device.id) ?? null);
+  /** The identity the machine presented, when it is waiting for the owner's approval. */
+  const offered = $derived(entry?.offeredKey ?? null);
+  const trusting = $derived(stats.trusting.has(device.id));
+  const trustError = $derived(stats.trustErrors.get(device.id) ?? null);
   const ram = $derived(share(st?.memUsedKb, st?.memTotalKb));
   const ramWarn = $derived(ram != null && ram > settings.value.ramWarnPct);
 
@@ -31,6 +36,29 @@
     return d.label && !d.mount.endsWith(":") ? `${d.mount} (${d.label})` : diskLabel(d);
   }
 </script>
+
+{#snippet howToCheck(key: HostKey, same: string)}
+  <p class="muted small">
+    To check, run <span class="mono cmd">{identityCommand(key.algorithm, device.os)}</span> on the machine itself. It
+    prints a line with the same SHA256 text as {same}.
+  </p>
+{/snippet}
+
+<!-- Approves exactly the identity on screen. Drawn afresh when that changes, so a half-given confirmation
+     never carries over to an identity the owner hasn't read. Held back while the machine is being read:
+     that reading may come back with another identity, or none to approve. -->
+{#snippet approve(key: HostKey, label: string)}
+  <div class="confirm">
+    {#key key.fingerprint}
+      <ConfirmButton
+        {label}
+        confirmLabel="Yes, it matches"
+        disabled={refreshing || trusting}
+        onconfirm={() => stats.trust(device.id, key.fingerprint)}
+      />
+    {/key}
+  </div>
+{/snippet}
 
 <article class="panel card">
   <header>
@@ -49,7 +77,7 @@
           class:spin={refreshing}
           aria-label="Read stats for {device.name} now"
           title="Read stats now"
-          disabled={refreshing}
+          disabled={refreshing || trusting}
           onclick={() => stats.refresh(device.id)}
         >
           <Icon path={icons.refresh} size={16} />
@@ -70,30 +98,52 @@
   {#if refreshError}
     <p class="alert" role="alert">Couldn't read stats: {refreshError}</p>
   {/if}
+  <!-- Not inside the approval block: after a refusal the machine may have nothing left to approve. -->
+  {#if trustError}
+    <p class="alert" role="alert">Not approved: {trustError}</p>
+  {/if}
 
   {#if !device.sshUser}
     <div class="state">
       <p class="muted">Add an SSH user to see stats.</p>
       <button class="btn small" onclick={() => onedit(device)}>Add SSH user</button>
     </div>
-  {:else if entry?.errorKind === "hostKeyChanged"}
+  {:else if entry?.errorKind === "hostKeyChanged" && offered}
     <div class="alert warn" role="alert">
       <p><strong>This machine's identity has changed.</strong></p>
       <p>
         That is normal if you reinstalled or replaced it. If you didn't, something else may be answering at this
-        address: check before you trust it.
+        address. Nothing is sent to it until you approve the new identity.
       </p>
-      <div class="confirm">
-        <ConfirmButton
-          label="Trust this machine again"
-          confirmLabel="Yes, trust the new identity"
-          disabled={refreshing}
-          onconfirm={() => stats.trustAgain(device.id)}
-        />
-      </div>
+      <dl class="prints">
+        <dt>Was</dt>
+        <dd class="mono">{entry.expectedFingerprint ?? "not known"}</dd>
+        <dt>Now</dt>
+        <dd class="mono">{identityText(offered)}</dd>
+      </dl>
+      {@render howToCheck(offered, '"Now"')}
+      {@render approve(offered, "Approve the new identity")}
+    </div>
+  {:else if entry?.errorKind === "newHost" && offered}
+    <div class="alert ask" role="status">
+      <p><strong>First connection to {device.name}.</strong></p>
+      <p>Its identity is</p>
+      <p class="mono print">{identityText(offered)}</p>
+      <p>
+        Check it matches, then approve to use the stored password. The password has not been sent, and won't be
+        until you approve.
+      </p>
+      {@render howToCheck(offered, "the identity above")}
+      {@render approve(offered, "Approve and use the password")}
     </div>
   {:else if entry?.error}
     <p class="alert" role="alert">{entry.error}</p>
+    {#if entry.paused}
+      <p class="muted small paused">
+        home-cc has stopped trying this machine by itself, so it doesn't keep knocking with a login that fails. Fix the
+        login with Edit, or press the refresh button above to try again.
+      </p>
+    {/if}
   {:else if !st}
     <div class="state">
       <p class="muted">{refreshing ? "Reading…" : "Waiting for the first reading…"}</p>
@@ -165,6 +215,14 @@
   p { margin: 0; line-height: 1.5; }
   .alert p + p { margin-top: 0.3rem; }
   .confirm { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.6rem; }
+  /* Identities are there to be compared and copied: always selectable, and wrapped rather than cut. */
+  .prints { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.2rem 0.7rem; margin: 0.5rem 0; }
+  .prints dt { color: var(--muted); }
+  .prints dd { margin: 0; }
+  .prints dd, .print, .cmd { font-size: 0.92rem; overflow-wrap: anywhere; user-select: text; }
+  .alert .print { margin: 0.2rem 0 0.4rem; }
+  .cmd { color: var(--text-soft); font-size: 0.92em; }
+  .paused { margin-top: -0.2rem; }
 
   /* Readings from before the latest try failed: still shown, but clearly old. */
   .stale { opacity: 0.6; }

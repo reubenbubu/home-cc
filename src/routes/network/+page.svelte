@@ -4,6 +4,7 @@
   import { count } from "$lib/format";
   import { scan } from "$lib/scan.svelte";
   import { status } from "$lib/status.svelte";
+  import CheckProblem from "$lib/components/CheckProblem.svelte";
   import DeviceTable from "$lib/components/DeviceTable.svelte";
   import ScanStatus from "$lib/components/ScanStatus.svelte";
 
@@ -33,7 +34,14 @@
 <header class="page-head">
   <h1>Network</h1>
   <div class="actions">
-    <button class="btn" onclick={() => status.checkNow()} disabled={status.checking} title="Check every device now instead of waiting for the timer">
+    <button
+      class="btn"
+      onclick={() => status.checkNow()}
+      disabled={status.checking || scan.running}
+      title={scan.running
+        ? "A scan is running. Every device is checked when it ends."
+        : "Check every device now instead of waiting for the timer"}
+    >
       {status.checking ? "Checking…" : "Check now"}
     </button>
     <button class="btn primary" onclick={() => scan.start()} disabled={scan.running}>
@@ -42,8 +50,10 @@
   </div>
 </header>
 
-{#if status.checkError}
-  <p class="alert gap" role="alert">The check didn't finish: {status.checkError}</p>
+<CheckProblem />
+<!-- A refusal that only repeats the standing problem above is not said twice. -->
+{#if status.checkError && status.checkError !== status.problem}
+  <p class="alert gap" role="alert">Not checked: {status.checkError}</p>
 {/if}
 
 <ScanStatus />

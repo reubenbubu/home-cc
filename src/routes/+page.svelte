@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KIND_LABELS, OS_LABELS, type Device, type MachineStats } from "$lib/api";
+  import { KIND_LABELS, OS_LABELS, type Device, type MachineStats, type StatsErrorKind } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { devices, isMachine } from "$lib/devices.svelte";
   import { ms, pct, relTime, share } from "$lib/format";
@@ -8,6 +8,7 @@
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import CheckProblem from "$lib/components/CheckProblem.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MiniMeter from "$lib/components/MiniMeter.svelte";
   import ScanStatus from "$lib/components/ScanStatus.svelte";
@@ -33,6 +34,15 @@
     return best;
   }
 
+  /** A machine card's one line about a failed reading. The first two wait for the owner on Machines. */
+  const NOTE: Record<StatsErrorKind, string> = {
+    newHost: "First connection: needs your approval",
+    hostKeyChanged: "Identity changed: needs your approval",
+    auth: "Couldn't log in to read stats",
+    unreachable: "Couldn't read stats",
+    other: "Couldn't read stats",
+  };
+
   interface Issue {
     key: string;
     text: string;
@@ -52,7 +62,9 @@
       const entry = stats.get(d.id);
       if (!d.sshUser || !entry) continue;
       if (entry.errorKind === "hostKeyChanged") {
-        warn.push({ key: `key-${d.id}`, text: `${d.name}: its identity has changed, check it before trusting it`, href });
+        warn.push({ key: `key-${d.id}`, text: `${d.name}: its identity has changed and needs your approval`, href });
+      } else if (entry.errorKind === "newHost") {
+        warn.push({ key: `new-${d.id}`, text: `${d.name}: first connection, its identity needs your approval`, href });
       } else if (entry.errorKind === "auth") {
         warn.push({ key: `auth-${d.id}`, text: `${d.name}: couldn't log in to read stats`, href });
       }
@@ -94,6 +106,7 @@
   </div>
 </header>
 
+<CheckProblem />
 <ScanStatus compact />
 
 <section class="stats" aria-label="Summary">
@@ -155,7 +168,7 @@
               {:else if entry?.error}
                 <a class="small note" href="/machines" title={entry.error}>
                   <Icon path={icons.warn} size={13} />
-                  {entry.errorKind === "hostKeyChanged" ? "Identity changed: check it" : "Couldn't read stats"}
+                  {(entry.errorKind && NOTE[entry.errorKind]) || NOTE.other}
                 </a>
               {:else if st}
                 <div class="minis">

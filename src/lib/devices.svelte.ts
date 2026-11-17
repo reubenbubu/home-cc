@@ -43,7 +43,8 @@ class DeviceStore {
 
 export const devices = new DeviceStore();
 
-/** A device as the input for saving it, with some fields changed. The hardware address is left as it is. */
+/** A device as the input for saving it, with some fields changed. The hardware address is not sent, which
+ *  leaves it as it is (unless the patch changes the address: the back end then forgets it). */
 export function toInput(d: Device, patch: Partial<DeviceInput> = {}): DeviceInput {
   return {
     name: d.name,
