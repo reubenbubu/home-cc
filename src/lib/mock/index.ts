@@ -396,8 +396,8 @@ export function installMock() {
   });
   /** The PC home-cc runs on: read here without SSH, with or without an SSH user. */
   const isLocal = (d: MockDevice) => d.pattern === "self" && d.kind !== "ignore";
-  /** Machines with stats: those with an SSH user, and this PC. */
-  const readsStats = (d: MockDevice) => d.kind !== "ignore" && (!!d.sshUser || isLocal(d));
+  /** Machines with stats: those with an SSH user, and this PC. Never a handheld, even one that kept an SSH user. */
+  const readsStats = (d: MockDevice) => d.kind !== "ignore" && d.kind !== "handheld" && (!!d.sshUser || isLocal(d));
   /** An entry as the screens get it: the stored identity is looked up at that moment. */
   const publicEntry = (e: MachineStatsEntry): MachineStatsEntry => ({ ...e, pinnedFingerprint: pinned.get(e.deviceId)?.fingerprint ?? null });
   const entry = (

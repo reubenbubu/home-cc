@@ -242,9 +242,12 @@ fn updates_due(checked_at: Option<i64>, now: i64) -> bool {
 }
 
 /// Machines that may be Docker hosts: tracked, with an SSH user, and not Windows (the
-/// scripts here are for `sh`).
+/// scripts here are for `sh`). Not a handheld either, even one that kept an SSH user
+/// from a type it had before: a phone isn't logged in to.
 fn may_host(d: &Device) -> bool {
-    d.kind != DeviceKind::Ignore && d.os != Os::Windows && d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty())
+    !matches!(d.kind, DeviceKind::Ignore | DeviceKind::Handheld)
+        && d.os != Os::Windows
+        && d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty())
 }
 
 /// Whether the screen should look for Docker on a machine now.
@@ -1145,6 +1148,7 @@ mod tests {
         assert!(!may_host(&device(" ")));
         assert!(!may_host(&Device { os: Os::Windows, ..device("sam") }));
         assert!(!may_host(&Device { kind: DeviceKind::Ignore, ..device("sam") }));
+        assert!(!may_host(&Device { kind: DeviceKind::Handheld, ..device("sam") }));
         assert!(may_host(&Device { os: Os::Proxmox, ..device("root") }));
     }
 

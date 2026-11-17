@@ -156,9 +156,11 @@ can take one more timer period to show as down.
   stats like any other machine.
 - Handhelds are not machines: they are not on the Machines screen (only in the
   table with "Show other devices too") and not in the Overview's "Machines up",
-  and like appliances they have no SSH user and no stats, only up or down. On
-  the Overview they are small tiles under their own "Handhelds" heading,
-  between Appliances and Other devices on the tiles' line.
+  and like appliances they have no SSH user and no stats, only up or down. One
+  that kept an SSH user from a type it had before (a PC made a Handheld on the
+  Network screen) is still not logged in to, for stats or for Docker. On the
+  Overview they are small tiles under their own "Handhelds" heading, between
+  Appliances and Other devices on the tiles' line.
 - A machine added by hand starts with the "Default SSH user" chosen in
   Settings as its SSH user, which the owner can change in the form. With none
   chosen the field starts empty, with no name suggested. An appliance or a
