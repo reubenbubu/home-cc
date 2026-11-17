@@ -8,10 +8,13 @@ pub mod names;
 mod neigh;
 pub mod oui;
 mod ping;
+mod resolve;
 mod scan;
 mod status;
 #[cfg(windows)]
 mod winping;
+
+pub use resolve::{ResolvedName, resolve_names};
 
 use crate::error::{Error, Result};
 use crate::history::Check;

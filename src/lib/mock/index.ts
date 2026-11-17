@@ -601,6 +601,23 @@ export function installMock() {
     return m ? Number(m[1]) : null;
   }
 
+  /** Names the sample network gives addresses, tidied as the back end does it ("nas.lan" gives "nas").
+   *  Devices give the name a scan found for them; one device never has a name. */
+  const SAMPLE_NAMES: Record<string, string> = {
+    // This PC by Wi-Fi, and its address on the WSL adapter.
+    "192.168.68.61": "DESKTOP-MAIN",
+    "172.28.160.1": "DESKTOP-MAIN",
+    "192.168.68.102": "ipad",
+    "192.168.68.130": "esp-4f2a1c",
+    "192.168.68.140": "android-5c1e",
+  };
+  const NEVER_NAMED = "192.168.68.117";
+  function sampleName(address: string): string | null {
+    const a = address.trim();
+    if (!isIpv4(a) || a === NEVER_NAMED) return null;
+    return SAMPLE_NAMES[a] ?? devices.find((d) => d.host === a)?.hostname ?? `host-${a.split(".")[3]}`;
+  }
+
   const publicDevice = ({ pattern: _pattern, access: _access, ...d }: MockDevice): Device => d;
   const find = (id: number): MockDevice => {
     const d = devices.find((x) => x.id === id);
@@ -714,6 +731,12 @@ export function installMock() {
       emit("status-changed");
     },
     check_problem: () => (noPing ? PING_PROBLEM : null),
+    resolve_names: async ({ addresses }: { addresses: string[] }) => {
+      if (addresses.length > 256) throw `Names can be looked up for at most 256 addresses at a time, not ${addresses.length}.`;
+      // Long enough for "looking…" to be seen.
+      await sleep(250);
+      return addresses.map((address) => ({ address, name: sampleName(address) }));
+    },
 
     machine_stats: () =>
       devices

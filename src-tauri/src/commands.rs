@@ -184,6 +184,13 @@ pub async fn check_now(app: AppHandle, monitor: State<'_, Monitor>) -> Result<()
     monitor.check_round(&app).await
 }
 
+/// The name each address resolves to, for showing beside it. Remembered for
+/// a while, so screens can ask as often as they like.
+#[tauri::command]
+pub async fn resolve_names(addresses: Vec<String>) -> Result<Vec<net::ResolvedName>> {
+    net::resolve_names(addresses).await
+}
+
 /// Why status checks can't work at all, if they can't.
 #[tauri::command]
 pub fn check_problem(monitor: State<Monitor>) -> Option<String> {

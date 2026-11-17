@@ -3,6 +3,7 @@
   import { api, errorText, secretKeys, type AppInfo, type Settings } from "$lib/api";
   import { icons } from "$lib/icons";
   import { settings } from "$lib/settings.svelte";
+  import Address from "$lib/components/Address.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Problem from "$lib/components/Problem.svelte";
@@ -75,6 +76,13 @@
     if (Number(m[5]) > 32) return "The number after the slash must be 32 or less.";
     return null;
   }
+
+  /** This PC's own addresses on the range chosen (none for a range typed in). */
+  const ownAddresses = $derived.by(() => {
+    const cidr = rangeChoice === "auto" ? settings.bestSubnet?.cidr : rangeChoice === "custom" ? null : rangeChoice;
+    const ips = settings.subnets.filter((s) => s.cidr === cidr && s.ownIp).map((s) => s.ownIp);
+    return [...new Set(ips)];
+  });
 
   /** Not an error: the back end decides what it will scan. A smaller number after the slash means more addresses. */
   const bigRange = $derived(rangeChoice === "custom" && !rangeProblem(customRange) && Number(customRange.trim().split("/")[1]) < 20);
@@ -177,6 +185,12 @@
           <option value="custom">Something else…</option>
         </select>
       </label>
+      {#if ownAddresses.length > 0}
+        <div class="own">
+          <span class="muted">This PC on that network</span>
+          {#each ownAddresses as ip (ip)}<Address host={ip} />{/each}
+        </div>
+      {/if}
       {#if rangeChoice === "custom"}
         <label>Range
           <input class="mono" bind:value={customRange} placeholder="192.168.68.0/22" spellcheck="false" autocomplete="off"
@@ -280,6 +294,7 @@
   /* A message about a field sits right under it. */
   .panel > .problem, .panel > label + .hint { margin-top: -0.55rem; }
   .section-title { margin-bottom: 0; }
+  .own { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 1.2rem; margin-top: -0.4rem; font-size: 0.92rem; min-width: 0; }
 
   .with-unit { display: flex; align-items: center; gap: 0.6rem; }
   .with-unit input[type="number"] { width: 8rem; }

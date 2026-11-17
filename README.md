@@ -65,6 +65,10 @@ Windows machine.
 
 - `src/` – the screens (Svelte). One folder per module under `src/routes/`,
   listed in `src/lib/modules.ts`. Theme colours are in `src/app.css`.
+  Shared parts are in `src/lib/components/`. Every IP address on screen is
+  shown with `Address.svelte`, which adds the hostname it resolves to as a
+  field of its own (in a table, a "Hostname" column), so the owner can tell
+  which machine it is. New screens do the same.
 - `src-tauri/src/` – the back end (Rust).
   - `inventory.rs` – saved devices, in a SQLite file in the app data folder.
     `settings.rs`, `history.rs` (ping results) and `hostkeys.rs` (SSH

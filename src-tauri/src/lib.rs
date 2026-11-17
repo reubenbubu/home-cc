@@ -50,6 +50,7 @@ pub fn run() {
             commands::device_statuses,
             commands::check_now,
             commands::check_problem,
+            commands::resolve_names,
             commands::machine_stats,
             commands::refresh_stats,
             commands::trust_host_key,
