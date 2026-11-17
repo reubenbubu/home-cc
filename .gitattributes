@@ -1,3 +1,6 @@
 # Shell scripts run inside Linux containers, so keep Unix line endings
 # even on a Windows checkout.
 *.sh text eol=lf
+
+# Windows batch files need Windows line endings, or cmd.exe misreads them.
+*.bat text eol=crlf

@@ -30,6 +30,11 @@ npm run tauri dev     # run the app with live reload
 npm run tauri build   # make an installer for this system
 ```
 
+On Windows, `build-and-install.bat` does it all: double-click it to get the
+latest version from GitHub, install the packages, build, and open the new
+installer. `build-and-install.bat --no-pull` builds what is in the folder
+without updating first.
+
 ## Checks
 
 ```sh
