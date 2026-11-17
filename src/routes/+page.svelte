@@ -64,7 +64,7 @@
       if (entry.errorKind === "hostKeyChanged") {
         warn.push({ key: `key-${d.id}`, text: `${d.name}: its identity has changed and needs your approval`, href });
       } else if (entry.errorKind === "newHost") {
-        warn.push({ key: `new-${d.id}`, text: `${d.name}: first connection, its identity needs your approval`, href });
+        warn.push({ key: `new-${d.id}`, text: `${d.name}: its identity needs your approval before the stored password is used`, href });
       } else if (entry.errorKind === "auth") {
         warn.push({ key: `auth-${d.id}`, text: `${d.name}: couldn't log in to read stats`, href });
       }
