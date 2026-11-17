@@ -15,6 +15,8 @@
   let filled = false;
   let saving = $state(false);
   let saveError = $state<string | null>(null);
+  /** What the refused save sent, as it was then (the form may have been edited since). */
+  let refusedSettings = "";
   let savedNote = $state(false);
   /** Field messages only show once Save has been tried. */
   let tried = $state(false);
@@ -99,7 +101,9 @@
     saving = true;
     try {
       const scanRange = rangeChoice === "auto" ? "" : rangeChoice === "custom" ? customRange.trim() : rangeChoice;
-      fill(await settings.save({ ...form, scanRange }));
+      const sent = { ...form, scanRange };
+      refusedSettings = JSON.stringify(sent);
+      fill(await settings.save(sent));
       savedNote = true;
       tried = false;
     } catch (err) {
@@ -258,14 +262,14 @@
     {#if saveError}
       <Problem
         class="save-problem"
-        problem={{ area: "settings", what: "Saving the settings", error: saveError, details: { "Tried to save": JSON.stringify(form) } }}
+        problem={{ area: "settings", what: "Saving the settings", error: saveError, details: { "Tried to save": refusedSettings } }}
         message="Not saved: {saveError}"
       />
     {/if}
     {#if info}
       <span class="muted small about">home-cc {info.version} on {info.os}</span>
     {:else if infoError}
-      <span class="muted small about">Couldn't read the app's version: {infoError}</span>
+      <Problem class="save-problem" problem={{ area: "screen", what: "Reading the app's version on the Settings screen", error: infoError }} message="Couldn't read the app's version: {infoError}" />
     {/if}
   </div>
 </form>

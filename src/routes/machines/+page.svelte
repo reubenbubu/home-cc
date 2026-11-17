@@ -41,7 +41,17 @@
       error: message,
       details: {
         ...(d ? deviceDetails(d) : { Device: "a new machine" }),
-        "Typed in the form": JSON.stringify({ ...form, password: undefined }),
+        // Listed one by one so nothing else (a password box, the owner's notes) can slip in.
+        "Typed in the form": JSON.stringify({
+          name: form.name,
+          host: form.host,
+          kind: form.kind,
+          os: form.os,
+          sshUser: form.sshUser,
+          sshPort: form.sshPort,
+          mac: form.mac,
+          notes: form.notes ? "(written, not included)" : "",
+        }),
         "A password was typed": !!password,
       },
     };

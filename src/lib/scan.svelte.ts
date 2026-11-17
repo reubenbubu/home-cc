@@ -20,6 +20,8 @@ class ScanStore {
   /** Unix seconds when the last scan finished. */
   finishedAt = $state<number | null>(null);
   error = $state<string | null>(null);
+  /** What was being done when error happened, for the message and a problem report. */
+  errorWhat = $state<"scan" | "check" | "stop">("scan");
   /** 1 to 3, for "Step 2 of 3". */
   step = $derived(this.progress ? Math.max(1, PHASES.indexOf(this.progress.phase) + 1) : 1);
   /** True when this window started the scan and is waiting for its result. */
@@ -31,6 +33,7 @@ class ScanStore {
       const running = await api.scanRunning();
       if (!this.#own) this.running = running;
     } catch (e) {
+      this.errorWhat = "check";
       this.error = errorText(e);
     }
   }
@@ -67,6 +70,7 @@ class ScanStore {
       this.result = await api.startScan();
       this.finishedAt = Math.floor(Date.now() / 1000);
     } catch (e) {
+      this.errorWhat = "scan";
       this.error = errorText(e);
     } finally {
       this.#own = false;
@@ -85,6 +89,7 @@ class ScanStore {
       await api.cancelScan();
     } catch (e) {
       this.stopping = false;
+      this.errorWhat = "stop";
       this.error = errorText(e);
     }
   }

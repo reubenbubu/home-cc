@@ -28,6 +28,9 @@ class Problems {
   #seen: Seen[] = [];
 
   record(p: Problem) {
+    const last = this.#seen.at(-1);
+    // Shown again straight after itself (a screen drawn afresh): keep when it was first shown.
+    if (last && sameProblem(last, p)) return;
     const at = Math.floor(Date.now() / 1000);
     this.#seen = this.#seen.filter((s) => !sameProblem(s, p));
     this.#seen.push({ at, what: p.what, error: p.error });

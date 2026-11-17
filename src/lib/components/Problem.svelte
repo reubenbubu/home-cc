@@ -1,7 +1,7 @@
 <script lang="ts">
   // A problem on a screen: the message, then a way to hand it to a coding agent (AgentPrompt).
   // Shown problems are remembered for the session, so a later prompt can mention what came before.
-  import type { Snippet } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import { problems } from "$lib/problems.svelte";
   import type { Details, Problem } from "$lib/report";
   import AgentPrompt from "./AgentPrompt.svelte";
@@ -25,7 +25,12 @@
     children?: Snippet;
   } = $props();
 
-  $effect(() => problems.record({ area: problem.area, what: problem.what, error: problem.error }));
+  // Recorded once per message, not each time the screen redraws it with a new object.
+  const key = $derived(`${problem.area}\n${problem.what}\n${problem.error}`);
+  $effect(() => {
+    void key;
+    untrack(() => problems.record({ area: problem.area, what: problem.what, error: problem.error }));
+  });
 </script>
 
 <div class="alert problem {cls}" class:warn={tone === "warn"} role="alert">

@@ -7,6 +7,12 @@
   import { settings } from "$lib/settings.svelte";
   import Problem from "./Problem.svelte";
 
+  const SCAN_WHAT = {
+    scan: { what: "Scanning the network", lead: "The scan didn't finish" },
+    check: { what: "Checking whether a scan was already running", lead: "Couldn't tell whether a scan is running" },
+    stop: { what: "Stopping the scan", lead: "Couldn't stop the scan" },
+  };
+
   let { compact = false }: { compact?: boolean } = $props();
 
   const p = $derived(scan.progress);
@@ -65,8 +71,8 @@
     {/if}
     {#if scan.error}
       <Problem
-        problem={{ area: "scan", what: "Scanning the network", error: scan.error, details: { "Range to scan": settings.scanRangeLabel } }}
-        message="The scan didn't finish: {scan.error}"
+        problem={{ area: "scan", what: SCAN_WHAT[scan.errorWhat].what, error: scan.error, details: { "Range to scan": settings.scanRangeLabel } }}
+        message="{SCAN_WHAT[scan.errorWhat].lead}: {scan.error}"
       />
     {/if}
   </section>

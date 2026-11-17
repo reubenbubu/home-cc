@@ -13,22 +13,29 @@
   let phase = $state<"idle" | "working" | "copied" | "failed">("idle");
   let open = $state(false);
 
+  // The screens hand in a new problem object whenever anything around it is redrawn (every few seconds
+  // on a machine card), so only a change of the message itself counts: a string compares equal.
+  const key = $derived(`${problem.area}\n${problem.what}\n${problem.error}`);
+  /** Moves on when the message changes, so a prompt still being made for the old one is dropped. */
+  let generation = 0;
+
   // A prompt made for an earlier message must not be shown, or copied, as if it were about this one.
   $effect(() => {
-    void problem.what;
-    void problem.error;
+    void key;
+    generation++;
     text = null;
     phase = "idle";
     open = false;
   });
 
   async function copy() {
+    const gen = generation;
     phase = "working";
     const made = await buildPrompt(problem, extra);
+    if (gen !== generation) return;
     text = made;
     const copied = await copyText(made);
-    // Only if the message wasn't replaced meanwhile.
-    if (text !== made) return;
+    if (gen !== generation) return;
     phase = copied ? "copied" : "failed";
     if (!copied) open = true;
   }
