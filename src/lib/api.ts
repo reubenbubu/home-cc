@@ -219,6 +219,51 @@ export interface ResolvedName {
   retrySoon?: boolean;
 }
 
+/** Which SSH key this PC logs in with (localSshKey). */
+export interface LocalKey {
+  /** Full path of the private key file. Null when this PC has no key. */
+  path: string | null;
+  /** What to call it: the file name, or the path chosen in Settings. */
+  name: string | null;
+  /** True if the key file is the one chosen in Settings. */
+  fromSettings: boolean;
+  /** The line that goes in authorized_keys on a machine. Null if it couldn't be read. */
+  publicKey: string | null;
+  /** For example "ssh-ed25519". */
+  algorithm: string | null;
+  /** "SHA256:…", as ssh-keygen -lf prints it. */
+  fingerprint: string | null;
+  /** Why the public key couldn't be read, or why the key file chosen in Settings is missing. */
+  problem: string | null;
+  /** Worth knowing but not a problem, such as a .pub file that didn't match its key. */
+  note: string | null;
+  /** Other key files in the .ssh folder that logins offer as well. */
+  others: string[];
+  /** Where a new key would be written. Only set when this PC has no key and one can be made. */
+  newKeyPath: string | null;
+}
+
+/** What came of setupKeyLogin. A failure is a rejection with a readable message.
+ *  - approve: nothing was sent. Getting in needs the password and the machine's identity isn't approved yet;
+ *    show offeredKey (and expectedFingerprint for a changed identity), approve it with
+ *    approveKeySetupIdentity, then call setupKeyLogin again.
+ *  - done: the key is on the machine (added now, or there already) and a login with keys only was tried. */
+export type KeySetupOutcome =
+  | { outcome: "approve"; offeredKey: HostKey; expectedFingerprint: string | null }
+  | {
+      outcome: "done";
+      /** The file on the machine that holds the key. */
+      file: string;
+      alreadyThere: boolean;
+      /** True if home-cc then logged in without a password. */
+      keyLoginWorks: boolean;
+      windows: boolean;
+      /** What was done and how the check went, for the owner. */
+      message: string;
+      /** With keyLoginWorks false: what to check on the machine. */
+      advice: string | null;
+    };
+
 /** Something the back end ran into by itself, in a timed round. */
 export interface LogLine {
   /** Unix seconds. */
@@ -299,6 +344,21 @@ export const api = {
    *  accepted. Rejects if the machine has presented a different one since; reload and ask again.
    *  Follow it with refreshStats. */
   trustHostKey: (deviceId: number, fingerprint: string) => invoke<void>("trust_host_key", { deviceId, fingerprint }),
+
+  /** Which key this PC logs in with (the one chosen in Settings, or the usual ones in .ssh), with its public half. */
+  localSshKey: () => invoke<LocalKey>("local_ssh_key"),
+  /** Make an ed25519 key in the .ssh folder, for a PC that has none (never overwrites a file). A passphrase, if
+   *  given, locks it and is stored in the keychain as secretKeys.sshKeyPassphrase. Resolves with the new key. */
+  createSshKey: (passphrase: string | null) => invoke<LocalKey>("create_ssh_key", { passphrase }),
+  /** Add this PC's public key to the machine, logging in once (with the password if no key gets in), then try a
+   *  login with keys only. `password` is the one typed in the form, used for this once and not stored; without
+   *  it the stored one is used. A password is only sent to an approved identity: see KeySetupOutcome. */
+  setupKeyLogin: (deviceId: number, password: string | null) =>
+    invoke<KeySetupOutcome>("setup_key_login", { deviceId, password }),
+  /** Approve the identity setupKeyLogin showed (outcome "approve"). Rejects if the machine has shown another one
+   *  since, or was pointed elsewhere; then set up again and check the new one. */
+  approveKeySetupIdentity: (deviceId: number, fingerprint: string) =>
+    invoke<void>("approve_key_setup_identity", { deviceId, fingerprint }),
 };
 
 /** Events from the back end. Each returns a function that stops listening. */

@@ -6,6 +6,7 @@
   import { ms, relTime, share, uptime, usedOfTotal } from "$lib/format";
   import { identityCommand, identityText } from "$lib/hostkey";
   import { icons } from "$lib/icons";
+  import { keySetupAsk } from "$lib/keysetup.svelte";
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
@@ -190,6 +191,13 @@
       problem={machineProblem("stats", `Reading stats from "${device.name}" over SSH`, entry.error)}
       extra={passwordDetails}
     />
+    {#if entry.errorKind === "auth"}
+      <!-- Opens the form on this machine with its key login part open (components/KeySetup.svelte). -->
+      <div class="state">
+        <p class="muted small">A key login needs no password, and home-cc can set it up for you.</p>
+        <button class="btn small" onclick={() => { keySetupAsk.ask(device.id); onedit(device); }}>Set up key login</button>
+      </div>
+    {/if}
     {#if entry.paused}
       <p class="muted small paused">
         home-cc has stopped trying this machine by itself, so it doesn't keep knocking with a login that fails. Fix the

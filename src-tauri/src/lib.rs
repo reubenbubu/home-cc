@@ -5,6 +5,7 @@ pub mod error;
 pub mod history;
 mod hostkeys;
 pub mod inventory;
+mod keysetup;
 mod localstats;
 mod monitor;
 pub mod net;
@@ -29,6 +30,7 @@ pub fn run() {
             let inventory = Inventory::open(&dir.join("home-cc.db"))?;
             app.manage(inventory);
             app.manage(Monitor::default());
+            app.manage(keysetup::KeySetup::default());
             Monitor::start(app.handle());
             Ok(())
         })
@@ -55,6 +57,10 @@ pub fn run() {
             commands::machine_stats,
             commands::refresh_stats,
             commands::trust_host_key,
+            keysetup::local_ssh_key,
+            keysetup::create_ssh_key,
+            keysetup::setup_key_login,
+            keysetup::approve_key_setup_identity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running home-cc");

@@ -207,7 +207,8 @@ fn compact_powershell(script: &str) -> String {
 /// Wrap a PowerShell script so it survives cmd.exe (the default shell of Windows' SSH
 /// server) or any other shell: base64 of the UTF-16 text has no character that needs
 /// quoting. cmd.exe refuses command lines over 8191 characters, so scripts must stay small.
-fn powershell_command(script: &str) -> String {
+/// `keysetup` sends its script for Windows the same way.
+pub(crate) fn powershell_command(script: &str) -> String {
     format!(
         "powershell.exe -NoLogo -NoProfile -NonInteractive -InputFormat None -OutputFormat Text \
          -EncodedCommand {}",
