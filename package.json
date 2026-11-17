@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "node --test \"src/**/*.test.mjs\"",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "ci": "docker compose -f ci/compose.yml run --rm --build ci",

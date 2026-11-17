@@ -147,7 +147,20 @@
     {#if machines.length > 0}
       <section class="cards" aria-label="Machine stats">
         {#each machines as m (m.id)}
-          <MachineCard device={m} onedit={startEdit} />
+          <!-- A reading this card can't draw must not take the other machines down with it. -->
+          <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
+            <MachineCard device={m} onedit={startEdit} />
+            {#snippet failed(_error, reset)}
+              <article class="panel broken" role="alert">
+                <h3 class="ellipsis" title={m.name}>{m.name}</h3>
+                <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
+                <div class="form-actions">
+                  <button class="btn small" onclick={reset}>Try again</button>
+                  <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
+                </div>
+              </article>
+            {/snippet}
+          </svelte:boundary>
         {/each}
       </section>
     {/if}
@@ -289,6 +302,10 @@
   @container (min-width: 230rem) {
     .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   }
+
+  .broken { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; border-color: var(--bad); }
+  .broken h3 { margin: 0; font-size: 1.08rem; font-weight: 600; }
+  .broken p { margin: 0; line-height: 1.5; }
 
   .table-wrap { padding: 0.9rem 0.7rem 0.5rem; }
   .table-head { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem 1rem; flex-wrap: wrap; padding: 0 0.55rem 0.35rem; }

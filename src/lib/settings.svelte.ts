@@ -1,5 +1,6 @@
 // App settings and the list of local networks, shared by every screen.
 import { api, errorText, type Settings, type Subnet } from "./api";
+import { scanRanges } from "./net";
 
 /** Same as the back end's defaults; shown until the saved ones have loaded. */
 export const DEFAULT_SETTINGS: Settings = {
@@ -16,6 +17,8 @@ class SettingsStore {
   subnets = $state<Subnet[]>([]);
   loaded = $state(false);
   error = $state<string | null>(null);
+  /** The ranges to pick from: one per network, however many adapters are on it. */
+  ranges = $derived(scanRanges(this.subnets));
   /** The network a scan uses when no range is set. */
   bestSubnet = $derived(this.subnets.find((s) => s.best) ?? this.subnets[0] ?? null);
   /** The range a scan will cover, in words. */

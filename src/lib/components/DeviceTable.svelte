@@ -97,6 +97,8 @@
     <span class="muted">–</span>
   {:else if !s.up}
     <span class="down">down</span>
+  {:else if s.rttMs == null && status.isSelf(d)}
+    <span class="muted" title="home-cc runs on this PC, so there is nothing to time">this PC</span>
   {:else if s.rttMs == null}
     <span class="muted" title="It is there, but it doesn't answer ping (common for Windows PCs)">no reply</span>
   {:else}

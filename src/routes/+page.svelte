@@ -61,10 +61,11 @@
       if (ram != null && ram > settings.value.ramWarnPct) {
         warn.push({ key: `ram-${d.id}`, text: `${d.name}: RAM is ${pct(ram)} used`, href });
       }
-      for (const disk of entry.stats.disks) {
+      // Keyed by position: two disks of one machine can report the same mount point.
+      for (const [i, disk] of entry.stats.disks.entries()) {
         const used = share(disk.usedBytes, disk.totalBytes);
         if (used != null && used > settings.value.diskWarnPct) {
-          warn.push({ key: `disk-${d.id}-${disk.mount}`, text: `${d.name}: disk ${disk.mount} is ${pct(used)} full`, href });
+          warn.push({ key: `disk-${d.id}-${i}`, text: `${d.name}: disk ${disk.mount} is ${pct(used)} full`, href });
         }
       }
     }
@@ -78,6 +79,8 @@
     <span class="down small">down</span>
   {:else if s?.up && s.rttMs != null}
     <span class="mono muted small">{ms(s.rttMs)}</span>
+  {:else if s?.up && status.isSelf(d)}
+    <span class="muted small self" title="home-cc runs on this PC">this PC</span>
   {/if}
 {/snippet}
 
@@ -258,7 +261,7 @@
   .card-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-width: 0; }
   .card-name { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; min-width: 0; }
   .down { color: var(--bad); font-weight: 600; flex: none; }
-  .card-top .mono { flex: none; }
+  .card-top .mono, .self { flex: none; white-space: nowrap; }
   .minis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.9rem; }
   .note { display: flex; align-items: center; gap: 0.35rem; color: var(--text-soft); text-decoration: none; }
   .note :global(svg) { color: var(--warn); flex: none; }

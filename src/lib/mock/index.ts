@@ -22,7 +22,7 @@ import type {
 } from "../api";
 
 /** How a sample device behaves when it is checked. */
-type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "off" | "gone" | "fresh";
+type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
 
 interface MockDevice extends Device {
   pattern: Pattern;
@@ -58,6 +58,8 @@ function sampleFor(pattern: Pattern, i: number, rand: () => number): { up: boole
     case "recovered":
       return i >= 61 && i < 70 ? down : wired();
     case "noPing":
+    // The PC the app runs on is never checked over the network: it is reported as there, with no time.
+    case "self":
       return { up: true, rttMs: null };
     case "off":
       return i >= 84 ? down : wifi();
@@ -72,6 +74,9 @@ function round2(n: number | null): number | null {
 
 export function installMock() {
   const start = nowSecs();
+  /** "?awkward" in the address adds readings that are allowed but unusual, to check that the screens cope
+   *  (tools/screenshots.mjs does). */
+  const awkward = new URLSearchParams(window.location.search).has("awkward");
   const DAY = 86400;
   let nextId = 1;
 
@@ -110,7 +115,7 @@ export function installMock() {
     dev("Office Deco", "192.168.68.52", "mesh", "other", "wired", { mac: "3c:52:a1:10:2f:5d", vendor: tpLink, hostname: "deco-BE85" }),
     dev("Bedroom Deco", "192.168.68.53", "mesh", "other", "wifi", { mac: "3c:52:a1:10:30:12", vendor: tpLink, hostname: "deco-BE85" }),
     dev("Garage Deco", "192.168.68.54", "mesh", "other", "recovered", { mac: "3c:52:a1:10:31:c4", vendor: tpLink, hostname: "deco-BE85" }),
-    dev("Main PC", "192.168.68.60", "pc", "windows", "wired", { sshUser: "sam", mac: "a0:36:bc:5e:11:90", vendor: "ASUSTek Computer Inc.", hostname: "DESKTOP-MAIN", notes: "home-cc runs here" }),
+    dev("Main PC", "192.168.68.60", "pc", "windows", "self", { sshUser: "sam", mac: "a0:36:bc:5e:11:90", vendor: "ASUSTek Computer Inc.", hostname: "DESKTOP-MAIN", notes: "home-cc runs here" }),
     dev("NAS", "192.168.68.10", "server", "windows", "noPing", { sshUser: "admin", mac: "d8:bb:c1:7a:02:6e", vendor: "Micro-Star INTL Co., Ltd.", hostname: "NAS" }),
     dev("Homelab VM", "192.168.68.21", "vm", "linux", "wired", { sshUser: "sam", mac: "00:15:5d:44:0a:01", vendor: "Microsoft Corporation", hostname: "homelab" }),
     dev("Dev VM", "192.168.68.22", "vm", "linux", "wired", { sshUser: "sam", mac: "00:15:5d:44:0a:02", vendor: "Microsoft Corporation", hostname: "dev" }),
@@ -141,6 +146,8 @@ export function installMock() {
   };
   const subnets: Subnet[] = [
     { cidr: "192.168.68.0/22", interface: "Ethernet", ownIp: "192.168.68.60", best: true },
+    // On the same network by Wi-Fi as well as by cable: the same range comes back twice.
+    { cidr: "192.168.68.0/22", interface: "Wi-Fi", ownIp: "192.168.68.61", best: false },
     { cidr: "172.28.160.0/20", interface: "vEthernet (WSL)", ownIp: "172.28.160.1", best: false },
   ];
   const secrets = new Set<string>([`ssh-password:${idOf("NAS")}`]);
@@ -276,6 +283,11 @@ export function installMock() {
     })],
   ]);
 
+  if (awkward) {
+    // Two filesystems mounted on the same folder, both nearly full.
+    goodStats.get(idOf("Homelab VM"))?.disks.push(disk("/mnt/data", "/dev/sdc1", 500, 471.5), disk("/mnt/data", "/dev/sdd1", 200, 188.2));
+  }
+
   const entries = new Map<number, MachineStatsEntry>();
   const entry = (
     name: string,
@@ -372,7 +384,7 @@ export function installMock() {
         vendor: d.vendor,
         hostname: d.hostname,
         looksLikeMesh: d.vendor === tpLink,
-        rttMs: d.pattern === "noPing" ? null : (history?.[history.length - 1]?.rttMs ?? 4.2),
+        rttMs: d.pattern === "noPing" || d.pattern === "self" ? null : (history?.[history.length - 1]?.rttMs ?? 4.2),
         isSelf: d.name === "Main PC",
       };
     });

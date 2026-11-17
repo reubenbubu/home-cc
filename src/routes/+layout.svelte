@@ -2,6 +2,7 @@
   import "../app.css";
   import { page } from "$app/state";
   import { onMount } from "svelte";
+  import { errorText } from "$lib/api";
   import { modules } from "$lib/modules";
   import { devices } from "$lib/devices.svelte";
   import { live, startLive } from "$lib/live.svelte";
@@ -28,6 +29,11 @@
       live.error && `Live updates aren't working, so this screen may be out of date: ${live.error}`,
     ].filter((p): p is string => !!p),
   );
+
+  /** A screen that fails while drawing is replaced by a message; the cause goes to the log for a bug report. */
+  function screenFailed(error: unknown) {
+    console.error("A screen could not be shown:", error);
+  }
 
   function isActive(href: string) {
     return href === "/" ? page.url.pathname === "/" : page.url.pathname.startsWith(href);
@@ -59,7 +65,21 @@
     {#each problems as problem}
       <p class="alert load-problem" role="alert">{problem}</p>
     {/each}
-    {@render children()}
+    <!-- Without this, one value a screen can't draw would leave it blank or stuck, with nothing said.
+         A new boundary for each screen, so moving to another screen always works. -->
+    {#key page.route.id}
+      <svelte:boundary onerror={screenFailed}>
+        {@render children()}
+        {#snippet failed(error, reset)}
+          <section class="panel broken" role="alert">
+            <h1>This screen couldn't be shown</h1>
+            <p>Something home-cc was given isn't in a form this screen can show. The other screens still work.</p>
+            <p class="muted small">If it keeps happening, report it with this detail: <span class="mono">{errorText(error)}</span></p>
+            <div><button class="btn" onclick={reset}>Try again</button></div>
+          </section>
+        {/snippet}
+      </svelte:boundary>
+    {/key}
   </main>
 </div>
 
@@ -117,6 +137,9 @@
     padding: 1.5rem 1.85rem;
   }
   .load-problem { margin-bottom: var(--gap); }
+  .broken { display: flex; flex-direction: column; gap: 0.75rem; max-width: 46rem; border-color: var(--bad); }
+  .broken h1 { margin: 0; font-size: 1.3rem; font-weight: 600; }
+  .broken p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
 
   /* Narrow windows (for example half of a 1080p screen): icons only. */
   @media (max-width: 1180px) {

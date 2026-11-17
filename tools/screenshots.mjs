@@ -8,7 +8,8 @@
 // --sizes takes any WIDTHxHEIGHT, with @SCALE for display scaling.
 //
 // Without --url it starts its own dev server on a free port and stops it at
-// the end. Exits with an error if any screen is wider than its window.
+// the end. Exits with an error if any screen is wider than its window, logs
+// an error, or can't cope with the unusual readings of "?awkward".
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -161,6 +162,39 @@ function inspect() {
   return { overflow, cut, tall: content ? content.scrollHeight - content.clientHeight : 0 };
 }
 
+/** Readings that are allowed but unusual (the sample back end adds them for "?awkward": two disks on one
+ *  folder) must not break a screen. Returns what went wrong. */
+async function checkAwkward(browser, url) {
+  const checks = [
+    {
+      path: "/machines?awkward",
+      what: "both /mnt/data disks on the Homelab VM card",
+      find: (page) => page.locator("article", { hasText: "Homelab VM" }).getByText("/mnt/data", { exact: true }),
+    },
+    {
+      path: "/?awkward",
+      what: "both /mnt/data warnings under Needs attention",
+      find: (page) => page.getByRole("link", { name: /Homelab VM: disk \/mnt\/data/ }),
+    },
+  ];
+  const problems = [];
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  for (const check of checks) {
+    await page.goto(url + check.path, { waitUntil: "networkidle" });
+    try {
+      await check.find(page).nth(1).waitFor({ timeout: 10_000 });
+    } catch {
+      problems.push(`${check.path}: didn't show ${check.what}`);
+    }
+    for (const error of errors.splice(0)) problems.push(`${check.path}: error in the page: ${error}`);
+  }
+  await page.close();
+  return problems;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.out) {
@@ -174,9 +208,11 @@ async function main() {
 
   const chromium = await loadChromium();
   const server = args.url ? { url: args.url.replace(/\/$/, ""), stop() {} } : await startDevServer();
-  const browser = await chromium.launch();
   const failures = [];
+  // Launched inside the try: if the browser can't start, the dev server must still be stopped.
+  let browser;
   try {
+    browser = await chromium.launch();
     // The first visit makes the dev server prepare each screen (and may reload the page once); do that before measuring.
     const warm = await browser.newPage();
     for (const path of [...new Set(SCREENS.map((s) => s.path))]) {
@@ -220,9 +256,16 @@ async function main() {
       }
       await context.close();
     }
+
+    const awkward = await checkAwkward(browser, server.url);
+    failures.push(...awkward);
+    console.log(`${awkward.length ? "FAIL" : "ok  "} unusual readings (two disks on one folder)`);
   } finally {
-    await browser.close();
-    server.stop();
+    try {
+      await browser?.close();
+    } finally {
+      server.stop();
+    }
   }
 
   if (failures.length > 0) {

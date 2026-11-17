@@ -36,7 +36,11 @@
   <header>
     <StatusDot health={status.health(device)} />
     <h3 class="ellipsis" title={device.name}>{device.name}</h3>
-    {#if s?.up && s.rttMs != null}<span class="mono muted small">{ms(s.rttMs)}</span>{/if}
+    {#if s?.up && s.rttMs != null}
+      <span class="mono muted small">{ms(s.rttMs)}</span>
+    {:else if s?.up && status.isSelf(device)}
+      <span class="muted small self" title="home-cc runs on this PC">this PC</span>
+    {/if}
     {#if s && !s.up}<span class="down small">down</span>{/if}
     <span class="tools">
       {#if device.sshUser}
@@ -123,7 +127,8 @@
         <Meter label="RAM" value={null} text="–" />
       {/if}
 
-      {#each st.disks as d (d.mount)}
+      <!-- No key: the mount point is the machine's own text, and two disks can report the same one. -->
+      {#each st.disks as d}
         {@const used = share(d.usedBytes, d.totalBytes)}
         <Meter
           label={diskLabel(d)}
@@ -152,6 +157,7 @@
   h3 { margin: 0; font-size: 1.08rem; font-weight: 600; }
   .tools { display: flex; margin-left: auto; margin-right: -0.4rem; }
   .down { color: var(--bad); font-weight: 600; }
+  .self { flex: none; white-space: nowrap; }
   .sub { display: flex; gap: 0.25rem 0.9rem; min-width: 0; margin-top: -0.35rem; }
   .sub .mono, .nowrap { white-space: nowrap; flex: none; }
 

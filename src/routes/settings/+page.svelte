@@ -28,7 +28,7 @@
   function fill(s: Settings) {
     form = { ...s };
     if (!s.scanRange) rangeChoice = "auto";
-    else if (settings.subnets.some((n) => n.cidr === s.scanRange)) rangeChoice = s.scanRange;
+    else if (settings.ranges.some((r) => r.cidr === s.scanRange)) rangeChoice = s.scanRange;
     else {
       rangeChoice = "custom";
       customRange = s.scanRange;
@@ -159,8 +159,8 @@
       <label>Range to scan
         <select bind:value={rangeChoice}>
           <option value="auto">Automatic{settings.bestSubnet ? ` (now ${settings.bestSubnet.cidr})` : ""}</option>
-          {#each settings.subnets as n (n.cidr)}
-            <option value={n.cidr}>{n.cidr} · {n.interface}, this PC is {n.ownIp}</option>
+          {#each settings.ranges as r}
+            <option value={r.cidr}>{r.label}</option>
           {/each}
           <option value="custom">Something else…</option>
         </select>

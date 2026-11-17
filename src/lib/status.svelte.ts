@@ -1,6 +1,9 @@
 // Up or down for every device, with recent history. Reloaded when the back end
 // says a round of checks has finished.
 import { api, errorText, type Device, type DeviceStatus } from "./api";
+import { ownAddresses } from "./net";
+import { scan } from "./scan.svelte";
+import { settings } from "./settings.svelte";
 
 export type Health = "up" | "down" | "unknown";
 
@@ -12,6 +15,7 @@ class StatusStore {
   checking = $state(false);
   checkError = $state<string | null>(null);
   byId = $derived(new Map(this.list.map((s) => [s.deviceId, s])));
+  #own = $derived(ownAddresses(settings.subnets, scan.result?.found));
   #seq = 0;
 
   async load() {
@@ -36,6 +40,12 @@ class StatusStore {
   health(d: Device): Health {
     const s = this.get(d);
     return s ? (s.up ? "up" : "down") : "unknown";
+  }
+
+  /** True for the PC home-cc runs on. It is never checked over the network (the back end just reports it
+   *  as there, with no response time), so it must not be described as a device that doesn't answer. */
+  isSelf(d: Device): boolean {
+    return this.#own.has(d.host.trim());
   }
 
   async checkNow() {
