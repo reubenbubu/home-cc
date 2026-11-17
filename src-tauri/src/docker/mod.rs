@@ -55,6 +55,9 @@ const OUTPUT_LINES: usize = 60;
 /// The screens check a host's images for updates by themselves at most this often. The owner's "Check for
 /// updates" asks straight away.
 const UPDATES_EVERY: i64 = 6 * 3600;
+// The registry check stops asking well before its SSH run (LONG) is cut off, even when the image it is on
+// when its time is up takes as long as it can, so the answers found are kept.
+const _: () = assert!(scripts::CHECK_BUDGET_SECS + scripts::IMAGE_MAX_SECS + 60 < LONG.as_secs());
 
 /// What stops Docker from being used on a machine, with what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -771,17 +774,19 @@ impl Docker {
             .filter(|c| parse::is_image_ref(&c.image))
             .filter_map(|c| Some((c.image.clone(), c.image_id.clone()?)))
             .collect();
-        let images: std::collections::BTreeSet<String> = pairs.iter().map(|(i, _)| i.clone()).take(updates::MAX_IMAGES).collect();
+        // Every image name the containers run; the registries are asked about the first MAX_IMAGES of them.
+        let all_images: std::collections::BTreeSet<String> = pairs.iter().map(|(i, _)| i.clone()).collect();
+        let images: std::collections::BTreeSet<String> = all_images.iter().take(updates::MAX_IMAGES).cloned().collect();
         let ids: std::collections::BTreeSet<String> = pairs.iter().map(|(_, id)| id.clone()).collect();
         let out = self.run(app, &d, &scripts::local_images(&ids, &images), QUICK).await?;
         let local = updates::local_images(&String::from_utf8_lossy(&out.stdout));
 
         let before = stored(self);
-        let mut remote = before.remote.clone();
+        let known = &before.remote;
         let ask: Vec<(String, updates::ImageRef)> = images
             .iter()
             .filter(|i| match &only {
-                Some(list) => list.contains(i) || !remote.contains_key(*i),
+                Some(list) => list.contains(i) || !known.contains_key(*i),
                 None => true,
             })
             .filter_map(|i| {
@@ -790,12 +795,16 @@ impl Docker {
                 updates::from_registry(&r, &runs, &local, i).then(|| (i.clone(), r))
             })
             .collect();
-        if !ask.is_empty() {
+        let found = if ask.is_empty() {
+            HashMap::new()
+        } else {
+            // The script stops asking well within LONG (scripts::CHECK_BUDGET_SECS), so one slow registry
+            // costs its own images' answers, not the whole check.
             let out = self.run(app, &d, &scripts::remote_digests(&ask), LONG).await?;
-            // An image the output didn't get to (cut short) keeps its earlier answer.
-            remote.extend(updates::remote_digests(&String::from_utf8_lossy(&out.stdout)));
-        }
-        remote.retain(|i, _| images.contains(i));
+            updates::remote_digests(&String::from_utf8_lossy(&out.stdout))
+        };
+        let asked: Vec<String> = ask.iter().map(|(i, _)| i.clone()).collect();
+        let remote = updates::merge_answers(before.remote.clone(), &asked, found, &all_images);
         let checked_at = if only.is_none() { Some(now()) } else { before.checked_at };
         let view = updates::UpdateCheck { device_id: d.id, checked_at, images: updates::compare_all(&pairs, &local, &remote) };
         self.updates

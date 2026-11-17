@@ -457,8 +457,21 @@ export interface HostUpdates {
   failed: ImageUpdate[];
   /** Containers with a newer image, in stacks or not. */
   count: number;
+  /** Image names with no answer yet (a container recreated since the check, say), so "up to date" can't be said. */
+  unchecked: string[];
   /** Whether every container's image has an answer. */
   complete: boolean;
+}
+
+/** The image names of these containers that have no answer yet. A container without an image id can't be asked
+ *  about and doesn't count. */
+export function uncheckedIn(containers: Container[], answers: Map<string, ImageUpdate>): string[] {
+  return [...new Set(containers.filter((c) => c.imageId && !updateOf(answers, c)).map((c) => c.image))].sort();
+}
+
+/** "1 image not checked yet", "3 images not checked yet". */
+export function uncheckedText(n: number): string {
+  return `${n} ${n === 1 ? "image" : "images"} not checked yet`;
 }
 
 export function stackUpdates(s: Stack, answers: Map<string, ImageUpdate>): StackUpdates {
@@ -493,12 +506,14 @@ export function hostUpdates(o: Overview, answers: Map<string, ImageUpdate>): Hos
     const u = updateOf(answers, c);
     if (u && isCheckFailure(u.state) && !failed.has(u.image)) failed.set(u.image, u);
   }
+  const unchecked = uncheckedIn(all, answers);
   return {
     stacks,
     others,
     failed: [...failed.values()].sort((a, b) => a.image.localeCompare(b.image)),
     count: stacks.reduce((n, s) => n + s.count, 0) + others.length,
-    complete: all.every((c) => !c.imageId || !!updateOf(answers, c)),
+    unchecked,
+    complete: unchecked.length === 0,
   };
 }
 
@@ -539,6 +554,13 @@ export interface UpdatesDraft {
  *  because updating it starts it. */
 export function isTicked(stack: string, x: ServiceUpdate, choices: Record<string, boolean>): boolean {
   return choices[serviceKey(stack, x.service)] ?? !x.stopped;
+}
+
+/** What an update would do, in one string: which services of which stacks, and the images they move to. When
+ *  it changes while the confirm is armed, the confirm asks again (ConfirmButton's `what`), so the second click
+ *  never runs something other than what was shown at the first. */
+export function planSignature(plan: StackUpdates[]): string {
+  return JSON.stringify(plan.map((s) => [s.stack, s.services.map((x) => [x.service, x.update.latest, x.containers])]));
 }
 
 /** What an update runs, stack by stack: the ticked services. Stacks with none ticked drop out. */

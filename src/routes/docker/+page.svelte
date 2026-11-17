@@ -6,7 +6,16 @@
   import { devices } from "$lib/devices.svelte";
   import { drafts } from "$lib/drafts.svelte";
   import type { Container, ImageUpdate, Stack } from "$lib/docker/api";
-  import { draftsDroppedWith, hostUpdates, isLoginProblem, stackOrder, updatesByKey, updatesText } from "$lib/docker/logic";
+  import {
+    draftsDroppedWith,
+    hostUpdates,
+    isLoginProblem,
+    stackOrder,
+    uncheckedText,
+    updatesByKey,
+    updatesDraftKey,
+    updatesText,
+  } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import { docker, REFRESH_SECS } from "$lib/docker/store.svelte";
   import { count, relTime } from "$lib/format";
@@ -32,9 +41,17 @@
   let panel = $state<Panel | null>(drafts.get<Panel>("docker-panel") ?? null);
   $effect(() => drafts.remember("docker-panel", panel));
 
-  /** Every change of the side panel comes through here, so a panel put away lets its draft go. */
+  /** Every change of the side panel comes through here, so a panel put away lets its draft go. An update panel
+   *  put away (by its Close, the toolbar, its Clean up link or another host's tab) lets its last result go too,
+   *  and one opened afresh starts without one (an update that finished while it was put away included), so an
+   *  old "Updated …" never shows as if it had just happened. */
   function show(next: Panel | null) {
-    drafts.clear(...draftsDroppedWith(panel, next));
+    const dropped = draftsDroppedWith(panel, next);
+    if (panel?.kind === "updates" && dropped.includes(updatesDraftKey(panel.hostId))) docker.updateResults.delete(panel.hostId);
+    if (next?.kind === "updates" && !(panel?.kind === "updates" && panel.hostId === next.hostId) && !docker.updating.has(next.hostId)) {
+      docker.updateResults.delete(next.hostId);
+    }
+    drafts.clear(...dropped);
     panel = next;
   }
 
@@ -213,7 +230,11 @@
               {#if updates.count}
                 <strong class="found">{updatesText(updates)}</strong>
               {:else}
-                <span>{updates.failed.length ? "No updates found" : "All images up to date"}</span>
+                <!-- "Up to date" only when every image has an answer and none failed. -->
+                <span>{updates.failed.length || !updates.complete ? "No updates found" : "All images up to date"}</span>
+              {/if}
+              {#if !updates.complete}
+                <span class="muted" title={updates.unchecked.join("\n")}>{uncheckedText(updates.unchecked.length)}</span>
               {/if}
               {#if updates.failed.length}
                 <button class="linkish" onclick={() => toggleUpdates(null)}>{updates.failed.length === 1 ? "1 image" : `${updates.failed.length} images`} couldn't be checked</button>

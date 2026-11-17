@@ -16,8 +16,11 @@
     containerKey,
     hostUpdates,
     isTicked,
+    planSignature,
     serviceKey,
     shortDigest,
+    uncheckedIn,
+    uncheckedText,
     updatePlan,
     updatesByKey,
     updatesDraftKey,
@@ -61,6 +64,12 @@
     if (stack == null) return all.failed;
     const mine = overview?.stacks.find((s) => s.name === stack)?.containers.map((c) => c.image) ?? [];
     return all.failed.filter((u) => mine.includes(u.image));
+  });
+  /** Images with no answer yet (all of the host's, or this stack's), so the panel doesn't call them up to date. */
+  const unchecked = $derived.by(() => {
+    if (!all) return [];
+    if (stack == null) return all.unchecked;
+    return uncheckedIn(overview?.stacks.find((s) => s.name === stack)?.containers ?? [], answers);
   });
   const checking = $derived(docker.checking.has(id));
   const checkError = $derived(docker.updateErrors.get(id));
@@ -189,14 +198,26 @@
     <footer>
       <ConfirmButton
         label={planCount ? `Update ${count(planCount, "container")} in ${count(plan.length, "stack")}` : "Nothing ticked"}
-        confirmLabel="Yes, pull and restart {planCount === 1 ? 'it' : 'them'}"
+        confirmLabel={planCount === 1 ? "Yes, pull and restart it" : `Yes, pull and restart these ${planCount}`}
         disabled={planCount === 0 || !!updatingNow}
+        what={planSignature(plan)}
         onconfirm={run}
       />
       {#if updatingNow}<span class="muted small" role="status">Updating {updatingNow}…</span>{/if}
     </footer>
   {:else if check && !checking && !others.length}
-    <p class="muted">{stack == null ? `Everything on ${name} that could be checked is up to date.` : `${stack} is up to date.`}</p>
+    {#if unchecked.length}
+      <p class="muted">No updates found{stack == null ? "" : ` in ${stack}`} among the images checked so far.</p>
+    {:else}
+      <p class="muted">{stack == null ? `Everything on ${name} that could be checked is up to date.` : `${stack} is up to date.`}</p>
+    {/if}
+  {/if}
+
+  {#if check && !checking && unchecked.length}
+    <p class="muted small unchecked">
+      {uncheckedText(unchecked.length)}: <span class="mono">{unchecked.join(", ")}</span>. Check again asks about
+      {unchecked.length === 1 ? "it" : "them"}.
+    </p>
   {/if}
 
   {#if others.length}
@@ -281,6 +302,7 @@
   .doing { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--accent); }
   .fails { margin: 0.3rem 0 0; padding-left: 1.2rem; list-style: disc; overflow-wrap: anywhere; }
   .fails li + li { border: none; }
+  .unchecked { overflow-wrap: anywhere; }
   .linkish { border: none; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; }
   .spinner {
     display: inline-block;

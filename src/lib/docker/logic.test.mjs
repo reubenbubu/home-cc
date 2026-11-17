@@ -31,8 +31,11 @@ import {
   summarise,
   hostUpdates,
   isTicked,
+  planSignature,
   shortDigest,
   uncheckedImages,
+  uncheckedIn,
+  uncheckedText,
   updateKey,
   updateMark,
   updatePlan,
@@ -359,7 +362,7 @@ function updatesSample() {
 }
 
 test("updates are counted per container, per stack and per host, and said in one line", () => {
-  const { o, answers } = updatesSample();
+  const { o, check, answers } = updatesSample();
   const h = hostUpdates(o, answers);
   assert.deepEqual(
     h.stacks.map((s) => [s.stack, s.count, s.services.map((x) => x.service)]),
@@ -378,6 +381,13 @@ test("updates are counted per container, per stack and per host, and said in one
     ["registry.home.lan/sam/nas-backup:1.4", "needsLogin"],
   ]);
   assert.equal(h.complete, false, "new-one has no answer yet");
+  assert.deepEqual(h.unchecked, ["alpine:3.20"], "by image name; no-id can't be asked about and doesn't count");
+  assert.equal(uncheckedText(1), "1 image not checked yet");
+  assert.equal(uncheckedText(3), "3 images not checked yet");
+  assert.deepEqual(uncheckedIn(o.stacks[0].containers, answers), [], "a stack whose images all have answers");
+  const answered = updatesByKey({ deviceId: 1, checkedAt: 100, images: [...check.images, answer("alpine:3.20", "id-new", "upToDate")] });
+  const done = hostUpdates(o, answered);
+  assert.deepEqual([done.complete, done.unchecked], [true, []]);
   assert.equal(updatesText(h), "5 updates in 2 stacks and 1 other container");
 
   const only = (stacks, others) => ({ stacks, others, failed: [], count: stacks.reduce((n, s) => n + s.count, 0) + others.length, complete: true });
@@ -410,6 +420,15 @@ test("an update runs the ticked services; a stopped one starts unticked", () => 
     ["photos", ["immich-server"], 2],
   ]);
   assert.deepEqual(plan({ "photos/immich-server": false, "media/radarr": false, "media/sonarr": false }), [], "nothing ticked");
+
+  // The confirm asks again when what it would run changes between its two clicks.
+  const sig = (choices, list = stacks) => planSignature(updatePlan(list, choices));
+  assert.equal(sig({}), sig({ "media/sonarr": true }), "the same services, ticked by default or by hand");
+  assert.notEqual(sig({}), sig({ "media/sonarr": false }), "one service fewer");
+  const started = stacks.map((s) => ({ ...s, services: s.services.map((x) => (x.service === "prowlarr" ? { ...x, stopped: false } : x)) }));
+  assert.notEqual(sig({}), sig({}, started), "a stopped service started in the background is ticked now");
+  const newer = stacks.map((s) => ({ ...s, services: s.services.map((x) => ({ ...x, update: { ...x.update, latest: "sha256:" + "9".repeat(64) } })) }));
+  assert.notEqual(sig({}), sig({}, newer), "a newer image than the one shown");
   assert.equal(isTicked("media", stacks[0].services[0], {}), false);
   assert.equal(updatesDraftKey(4), "docker-updates:4");
 });

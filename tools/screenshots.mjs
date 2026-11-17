@@ -1525,7 +1525,7 @@ async function checkFlows(browser, url) {
         if (await panel.getByText("photos").count()) throw new Error("another stack's updates are in this stack's list");
         await panel.getByRole("button", { name: "Update 2 containers in 1 stack" }).click();
         if ((await page.evaluate(() => window.__updates)).length) throw new Error("it updated without asking");
-        await panel.getByRole("button", { name: "Yes, pull and restart them" }).click();
+        await panel.getByRole("button", { name: "Yes, pull and restart these 2" }).click();
         await media.getByText("Updating…").waitFor();
         await panel.getByText("Updated media.").waitFor({ timeout: 15_000 });
         await panel.getByRole("button", { name: "Clean up…" }).waitFor();
@@ -1539,6 +1539,60 @@ async function checkFlows(browser, url) {
         await page.getByText("3 updates in 2 stacks and 1 other container").waitFor();
         await page.getByRole("tab", { name: /Homelab VM/ }).locator(".badge", { hasText: /^4 updates$/ }).waitFor();
         await media.getByText("What Docker said").waitFor();
+        // Put away by its Clean up link, the update's result goes with it: opened again, no old "Updated media.".
+        await panel.getByRole("button", { name: "Clean up…" }).click();
+        await page.getByRole("heading", { name: "Clean up Homelab VM" }).waitFor();
+        await media.getByRole("button", { name: "Update…" }).click();
+        await panel.getByRole("heading", { name: "Update media" }).waitFor();
+        if (await panel.getByText("Updated media.").count()) throw new Error("an old update's result shows in a panel opened afresh");
+      },
+    },
+    {
+      what: "Docker updates: a confirm already asked goes back to asking when what it would update changes before the yes",
+      path: "/docker",
+      async run(page) {
+        await page.getByText("5 updates in 2 stacks and 1 other container").waitFor();
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          window.__updates = [];
+          tauri.invoke = (cmd, args, ...rest) => {
+            if (cmd === "docker_update_stack") window.__updates.push(args);
+            return invoke(cmd, args, ...rest);
+          };
+        });
+        await page.getByRole("article", { name: "Stack media" }).getByRole("button", { name: "Update…" }).click();
+        const panel = page.getByRole("region", { name: "Image updates on Homelab VM" });
+        await panel.getByRole("button", { name: "Update 2 containers in 1 stack" }).click();
+        await panel.getByRole("button", { name: "Yes, pull and restart these 2" }).waitFor();
+        // What would run changes under the armed confirm (a tick here stands in for a service started or an
+        // image found newer in the background).
+        await panel.getByRole("checkbox", { name: /^prowlarr\b/ }).check();
+        await panel.getByRole("button", { name: "Update 3 containers in 1 stack" }).waitFor();
+        if (await panel.getByRole("button", { name: /^Yes, pull and restart/ }).count()) throw new Error("the confirm stayed armed for a different update");
+        if ((await page.evaluate(() => window.__updates)).length) throw new Error("it updated without asking");
+      },
+    },
+    {
+      what: "Docker updates: an image with no answer yet is said, and the host isn't called up to date",
+      path: "/docker",
+      async run(page) {
+        await page.getByRole("tab", { name: /Monitoring/ }).click();
+        await page.getByText("All images up to date").waitFor({ timeout: 15_000 });
+        // The registries' answer for grafana goes missing, as one cut short would.
+        await page.evaluate(() => {
+          const tauri = window.__TAURI_INTERNALS__;
+          const invoke = tauri.invoke;
+          tauri.invoke = async (cmd, args, ...rest) => {
+            const got = await invoke(cmd, args, ...rest);
+            if (cmd !== "docker_check_updates" || !got) return got;
+            return { ...got, images: got.images.filter((u) => !u.image.startsWith("grafana/")) };
+          };
+        });
+        await page.getByRole("button", { name: "Check for updates" }).click();
+        await page.getByText("1 image not checked yet").waitFor({ timeout: 15_000 });
+        await page.getByText("No updates found").waitFor();
+        if (await page.getByText("All images up to date").count()) throw new Error("called up to date with an image unanswered");
       },
     },
     {
@@ -1552,7 +1606,7 @@ async function checkFlows(browser, url) {
         await panel.getByText("sonarr", { exact: true }).waitFor();
         await panel.getByText("Containers outside any stack").waitFor();
         await panel.getByRole("button", { name: "Update 4 containers in 2 stacks" }).click();
-        await panel.getByRole("button", { name: "Yes, pull and restart them" }).click();
+        await panel.getByRole("button", { name: "Yes, pull and restart these 4" }).click();
         await panel.getByText("Updated media, photos.").waitFor({ timeout: 20_000 });
         await page.getByText("1 update in 1 stack and 1 other container").waitFor();
       },

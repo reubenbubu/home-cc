@@ -205,11 +205,15 @@ index's digest). The screens check by themselves at most every 6 hours per
 host; "Check for updates" asks at once. Each container shows its answer: an
 update, built on the host (nothing to compare), pinned by digest, or why the
 registry couldn't answer (needs a login, unreachable, tag not found, rate
-limit). Counts show on each stack card, the host tab, a line for the host
+limit). A registry that doesn't answer costs its own image a short wait, and
+a check stops asking after 20 minutes, so the answers it has are kept; an
+image with no answer yet is said as "not checked yet", never as up to date.
+Counts show on each stack card, the host tab, a line for the host
 ("3 updates in 2 stacks") and on the Overview. "Update" on a stack, or
 "Update all" for the host, lists each service with its old and new digest
-and the containers that restart, asks first, then pulls and recreates only
-the ticked services (`compose pull` and `up -d --no-deps`). A stopped service
+and the containers that restart, asks first (and asks again if that list
+changes before the yes), then pulls and recreates only the ticked services
+(`compose pull` and `up -d --no-deps`). A stopped service
 starts unticked, because updating it starts it. A container outside any
 stack is only offered a pull of its new image: its run options aren't known,
 so the owner recreates it. Old images are left for Clean up to remove.

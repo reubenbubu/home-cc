@@ -260,6 +260,13 @@ pub fn remote(via: &str, code: i32, body: &str) -> Remote {
         },
         "manifest" if code == 0 => manifest_digests(body)
             .unwrap_or_else(|| Remote::Failed(UpdateState::Failed, "docker manifest inspect gave an answer home-cc can't read.".into())),
+        "late" => Remote::Failed(
+            UpdateState::Failed,
+            "The check ran out of time before it got to this image (other registries were slow to answer). Check for \
+             updates asks again."
+                .into(),
+        ),
+        "slow" => Remote::Failed(UpdateState::Unreachable, "The registry didn't answer in time.".into()),
         "none" => Remote::Failed(
             UpdateState::Failed,
             "This host has neither curl nor docker buildx nor docker manifest, so its images can't be checked. Installing \
@@ -387,6 +394,47 @@ pub fn compare(image: &str, image_id: &str, local: &Local, remote: Option<&Remot
     }
 }
 
+/// The registries' answers after a check, so every image the containers run (`images`) has one and none is
+/// left looking up to date for want of an answer:
+/// - an image asked about (`asked`) takes what came back (`found`); when nothing came back for it (the output
+///   was cut short), it keeps an earlier answer, or else is marked as not answered;
+/// - an image past [`MAX_IMAGES`] is marked as left out, as it is never asked about;
+/// - images no container runs any more are let go.
+pub fn merge_answers(
+    mut remote: HashMap<String, Remote>,
+    asked: &[String],
+    mut found: HashMap<String, Remote>,
+    images: &BTreeSet<String>,
+) -> HashMap<String, Remote> {
+    for image in asked {
+        match found.remove(image) {
+            Some(answer) => {
+                remote.insert(image.clone(), answer);
+            }
+            None => {
+                remote.entry(image.clone()).or_insert_with(|| {
+                    Remote::Failed(
+                        UpdateState::Failed,
+                        "The check's answer was cut short before this image. Check for updates asks again.".into(),
+                    )
+                });
+            }
+        }
+    }
+    let kept: BTreeSet<&String> = images.iter().take(MAX_IMAGES).collect();
+    remote.retain(|i, _| kept.contains(i));
+    for image in images.iter().skip(MAX_IMAGES) {
+        remote.insert(
+            image.clone(),
+            Remote::Failed(
+                UpdateState::Failed,
+                format!("home-cc checks at most {MAX_IMAGES} images per host, and this one was past that, so it wasn't asked about."),
+            ),
+        );
+    }
+    remote
+}
+
 /// Every (image, local image) pair the containers run, compared, in image order.
 pub fn compare_all(pairs: &BTreeSet<(String, String)>, local: &Local, remote: &HashMap<String, Remote>) -> Vec<ImageUpdate> {
     pairs.iter().filter_map(|(image, id)| compare(image, id, local, remote.get(image))).collect()
@@ -468,6 +516,39 @@ mod tests {
         assert!(matches!(remote("manifest", 0, "not json"), Remote::Failed(UpdateState::Failed, _)));
         assert!(matches!(remote("buildx", 0, "Name: x\n"), Remote::Failed(UpdateState::Failed, _)));
         assert!(matches!(remote("none", 1, ""), Remote::Failed(UpdateState::Failed, m) if m.contains("docker-buildx-plugin")));
+        assert!(matches!(remote("late", 1, ""), Remote::Failed(UpdateState::Failed, m) if m.contains("ran out of time")));
+        assert!(matches!(remote("slow", 124, ""), Remote::Failed(UpdateState::Unreachable, m) if m.contains("in time")));
+    }
+
+    #[test]
+    fn every_image_ends_up_with_an_answer() {
+        let names: Vec<String> = (0..MAX_IMAGES + 2).map(|n| format!("app{n:03}:1")).collect();
+        let images: BTreeSet<String> = names.iter().cloned().collect();
+        let earlier = HashMap::from([
+            ("app000:1".to_string(), Remote::Digest(OLD.into())),
+            ("app001:1".to_string(), Remote::Digest(OLD.into())),
+            ("gone:1".to_string(), Remote::Digest(OLD.into())),
+        ]);
+        let asked: Vec<String> = names[..3].to_vec();
+        let found = HashMap::from([("app000:1".to_string(), Remote::Digest(NEW.into()))]);
+        let merged = merge_answers(earlier, &asked, found, &images);
+        assert_eq!(merged["app000:1"], Remote::Digest(NEW.into()), "the new answer");
+        assert_eq!(merged["app001:1"], Remote::Digest(OLD.into()), "cut short: the earlier answer stays");
+        assert!(matches!(&merged["app002:1"], Remote::Failed(UpdateState::Failed, m) if m.contains("cut short")), "cut short, never answered");
+        assert!(!merged.contains_key("app003:1"), "not asked this time (built here, say): no answer made up");
+        assert!(!merged.contains_key("gone:1"), "no container runs it now");
+        for past in &names[MAX_IMAGES..] {
+            assert!(matches!(&merged[past], Remote::Failed(UpdateState::Failed, m) if m.contains("at most 100")), "{past}");
+        }
+        // Compared, an image past the limit shows as couldn't be checked, not as up to date or unanswered.
+        let pairs = BTreeSet::from([(names[MAX_IMAGES].clone(), ID1.to_string())]);
+        let local = Local {
+            by_id: HashMap::from([(ID1.into(), LocalImage { id: ID1.into(), repo_digests: vec![format!("{}@{OLD}", names[MAX_IMAGES].trim_end_matches(":1"))] })]),
+            tags: HashMap::new(),
+        };
+        let view = compare_all(&pairs, &local, &merged);
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].state, UpdateState::Failed);
     }
 
     #[test]

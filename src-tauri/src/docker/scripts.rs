@@ -199,12 +199,19 @@ hcc_head() {
   echo "$d"
 }
 hcc_missing() { printf '%s' "$1" | grep -qi -e 'is not a docker command' -e 'unknown command'; }
+hcc_t=''
+if timeout 1 true >/dev/null 2>&1; then hcc_t="timeout $hcc_wait"; fi
+hcc_slow() { [ -n "$hcc_t" ] && [ "$1" -eq 124 ]; }
+hcc_late() { hcc_n=$(date +%s 2>/dev/null) && [ "$hcc_n" -ge "$hcc_end" ] 2>/dev/null; }
 hcc_check() {
   echo "@@remote $1"
+  if hcc_late; then echo "@@via late 1"; return; fi
   if d=$(hcc_head "$2" "$3" "$4"); then echo "@@via head 0"; echo "| Digest: $d"; return; fi
-  out=$(docker buildx imagetools inspect "$1" </dev/null 2>&1); rc=$?
+  out=$($hcc_t docker buildx imagetools inspect "$1" </dev/null 2>&1); rc=$?
+  if hcc_slow $rc; then echo "@@via slow $rc"; return; fi
   if [ $rc -eq 0 ] || ! hcc_missing "$out"; then echo "@@via buildx $rc"; printf '%s\n' "$out" | head -n 60 | sed 's/^/| /'; return; fi
-  out=$(docker manifest inspect -v "$1" </dev/null 2>&1); rc=$?
+  out=$($hcc_t docker manifest inspect -v "$1" </dev/null 2>&1); rc=$?
+  if hcc_slow $rc; then echo "@@via slow $rc"; return; fi
   if [ $rc -eq 0 ] || ! hcc_missing "$out"; then echo "@@via manifest $rc"; printf '%s\n' "$out" | head -c 100000 | sed 's/^/| /'; return; fi
   echo "@@via none 1"
 }
@@ -214,7 +221,24 @@ hcc_check() {
 /// See [`super::updates::remote_digests`] for what it prints. The names must already be checked to be safe
 /// image names (they are quoted too).
 pub fn remote_digests(images: &[(String, super::updates::ImageRef)]) -> String {
-    let mut body = String::from(HEAD_FUNCTION);
+    remote_digests_within(images, CHECK_BUDGET_SECS, FALLBACK_SECS)
+}
+
+/// How long an update check goes on asking registries, in seconds. An image it hasn't got to by then is
+/// answered "ran out of time" without being asked, so the check ends well within the time its SSH run is
+/// given (one slow registry can't cost the answers already found).
+pub const CHECK_BUDGET_SECS: u64 = 20 * 60;
+/// How long `docker buildx imagetools` or `docker manifest` may take for one image, where the host has
+/// `timeout`. curl has its own limit (CURL_SECS for each of its at most three requests).
+pub const FALLBACK_SECS: u64 = 30;
+/// curl's limit per request: `--max-time 20` in HEAD_FUNCTION.
+pub const CURL_SECS: u64 = 20;
+/// The longest one image can take once started: three curl requests, then both fallbacks.
+pub const IMAGE_MAX_SECS: u64 = 3 * CURL_SECS + 2 * FALLBACK_SECS;
+
+fn remote_digests_within(images: &[(String, super::updates::ImageRef)], budget: u64, wait: u64) -> String {
+    let mut body = format!("hcc_end=$(( $(date +%s) + {budget} ))\nhcc_wait={wait}\n");
+    body += HEAD_FUNCTION;
     for (image, r) in images {
         body += &format!("hcc_check {} {} {} {}\n", quote(image), quote(r.api_host()), quote(&r.repo), quote(&r.tag));
     }
@@ -572,6 +596,56 @@ exit 1
         assert!(log.contains("https://registry-1.docker.io/v2/library/alpine/manifests/3.20"), "{log}");
         assert!(log.lines().all(|l| l.contains(" -G ") || l.contains("-I")), "only HEAD requests and the token: {log}");
         assert!(log.contains("scope=repository:library/alpine:pull"), "{log}");
+    }
+
+    /// A registry that never answers costs its own image a short wait, not the whole check, and once the
+    /// check's time is up the images left are answered without being asked.
+    #[cfg(unix)]
+    #[test]
+    fn registry_check_gives_up_on_slow_registries_and_runs_out_of_time() {
+        use super::super::updates::{self, Remote, UpdateState, image_ref};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("registry-slow");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // No curl answers; buildx hangs for "slow" images.
+        let curl = "#!/bin/sh\nexit 7\n".to_string();
+        let docker = format!(
+            "#!/bin/sh\necho \"$*\" >> \"{log}\"\ncase \"$4\" in *slow*) exec sleep 20 ;; esac\necho \"Name: $4\"; echo 'Digest: sha256:{d}'\n",
+            log = dir.join("docker.log").display(),
+            d = "4".repeat(64)
+        );
+        for (name, text) in [("curl", curl), ("docker", docker)] {
+            std::fs::write(bin.join(name), text).unwrap();
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let images: Vec<(String, updates::ImageRef)> =
+            ["slow.example/app:1", "ok.example/app:1"].iter().map(|i| (i.to_string(), image_ref(i).unwrap())).collect();
+        let has_timeout = Command::new("sh").arg("-c").arg("timeout 1 true").status().is_ok_and(|s| s.success());
+
+        if has_timeout {
+            let started = std::time::Instant::now();
+            let (code, out) = sh(&format!("PATH={}:$PATH\n{}", bin.display(), remote_digests_within(&images, 600, 1)), &dir);
+            assert_eq!(code, 0, "{out}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(15), "the hanging buildx was stopped: {out}");
+            let found = updates::remote_digests(&out);
+            assert!(matches!(&found["slow.example/app:1"], Remote::Failed(UpdateState::Unreachable, _)), "{out}");
+            assert_eq!(found["ok.example/app:1"], Remote::Digest(format!("sha256:{}", "4".repeat(64))), "the next image is still asked: {out}");
+            let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
+            assert!(!log.contains("manifest inspect -v slow"), "no second wait for the same registry: {log}");
+        }
+
+        let _ = std::fs::remove_file(dir.join("docker.log"));
+        let (code, out) = sh(&format!("PATH={}:$PATH\n{}", bin.display(), remote_digests_within(&images, 0, 1)), &dir);
+        assert_eq!(code, 0, "{out}");
+        let found = updates::remote_digests(&out);
+        for (image, _) in &images {
+            assert!(matches!(&found[image], Remote::Failed(UpdateState::Failed, m) if m.contains("ran out of time")), "{image}: {out}");
+        }
+        assert!(!dir.join("docker.log").exists(), "nothing asked once the time is up");
+        assert!(remote_digests(&images).contains(&format!("+ {CHECK_BUDGET_SECS} ))\nhcc_wait={FALLBACK_SECS}\n")));
+        assert_eq!(HEAD_FUNCTION.matches("curl -sS ").count(), 3, "IMAGE_MAX_SECS counts three curl requests");
+        assert_eq!(HEAD_FUNCTION.matches(&format!("--max-time {CURL_SECS} ")).count(), 3);
     }
 
     #[test]
