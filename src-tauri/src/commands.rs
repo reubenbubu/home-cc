@@ -233,3 +233,73 @@ pub fn trust_host_key(
 ) -> Result<()> {
     monitor.trust_host_key(&inv, device_id, &fingerprint)
 }
+
+// --- Terminals ---
+// The fixed interface the Terminals screen and the Docker and Proxmox screens share:
+// open, write, resize, close, with output in the "terminal-output" and "terminal-exit"
+// events. See terminal.rs.
+
+/// Connect to a machine and start a terminal on it: the login shell, or `command` in its
+/// place. Resolves once it is running, with the terminal's id.
+#[tauri::command]
+pub async fn terminal_open(
+    app: AppHandle,
+    terminals: State<'_, crate::terminal::Terminals>,
+    device_id: i64,
+    command: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<u32> {
+    terminals.open(&app, device_id, command, cols, rows).await
+}
+
+/// What was typed or pasted.
+#[tauri::command]
+pub fn terminal_write(terminals: State<crate::terminal::Terminals>, id: u32, data: String) -> Result<()> {
+    terminals.write(id, data)
+}
+
+/// Bytes the terminal on screen reports by itself, one character per byte (0 to 255):
+/// mouse clicks in the oldest mouse format come this way, and must reach the program
+/// as the bytes they are, not as UTF-8.
+#[tauri::command]
+pub fn terminal_write_binary(terminals: State<crate::terminal::Terminals>, id: u32, data: String) -> Result<()> {
+    terminals.write_binary(id, &data)
+}
+
+#[tauri::command]
+pub fn terminal_resize(terminals: State<crate::terminal::Terminals>, id: u32, cols: u16, rows: u16) -> Result<()> {
+    terminals.resize(id, cols, rows)
+}
+
+/// The screen has drawn this many more bytes of the terminal's output.
+#[tauri::command]
+pub fn terminal_ack(terminals: State<crate::terminal::Terminals>, id: u32, bytes: u64) {
+    terminals.ack(id, bytes);
+}
+
+#[tauri::command]
+pub fn terminal_close(terminals: State<crate::terminal::Terminals>, id: u32) {
+    terminals.close(id);
+}
+
+/// Close every terminal. The window calls it each time it loads (+layout.svelte), so
+/// terminals left behind by a reload of the window don't stay connected.
+#[tauri::command]
+pub async fn terminal_close_all(terminals: State<'_, crate::terminal::Terminals>) -> Result<()> {
+    terminals.close_all().await;
+    Ok(())
+}
+
+/// The text on the clipboard, for pasting into a terminal. Read here because the web
+/// view may not be allowed to read the clipboard itself.
+#[tauri::command(async)]
+pub fn clipboard_read_text() -> Result<String> {
+    crate::terminal::read_clipboard()
+}
+
+/// Copy text selected in a terminal.
+#[tauri::command(async)]
+pub fn clipboard_write_text(text: String) -> Result<()> {
+    crate::terminal::write_clipboard(&text)
+}

@@ -35,6 +35,10 @@ data-encoding = "2"
 # Random numbers for making SSH keys. The same version russh already builds on.
 rand = "0.10"
 
+# Copy and paste in terminal tabs: the web view can't be relied on to read the
+# clipboard. Text only, which leaves out the image libraries.
+arboard = { version = "3", default-features = false }
+
 # Same versions netdev already uses on Linux, for reading the neighbour table.
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-packet-core = "0.9"

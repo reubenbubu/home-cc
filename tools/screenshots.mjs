@@ -149,6 +149,52 @@ const SCREENS = [
     },
   },
   { name: "settings", path: "/settings", ready: "form" },
+  // Terminals: two tabs, the one shown after a few commands; then a tab that couldn't log in.
+  {
+    name: "terminals",
+    path: "/terminals",
+    ready: ".empty",
+    async before(page) {
+      await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+      await openTerminalTab(page, "Homelab VM (sam@192.168.68.21)");
+      await terminalShows(page, "Try ls");
+      await page.locator('[role="tabpanel"]:not([hidden]) .xterm').click();
+      for (const [line, shows] of [["ls", "update.sh"], ["docker ps", "homeassistant"], ["colours", "magenta"]]) {
+        await page.keyboard.type(`${line}\r`);
+        await terminalShows(page, shows);
+      }
+      // Every row in sight: the terminal is no taller than its place on the screen (nor much shorter).
+      const fit = await page.evaluate(() => {
+        const host = document.querySelector('[role="tabpanel"]:not([hidden]) .terminal-host').getBoundingClientRect();
+        const drawn = document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-screen').getBoundingClientRect();
+        const row = document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-rows > div').getBoundingClientRect();
+        return { host: host.height, drawn: drawn.height, row: row.height };
+      });
+      if (fit.drawn > fit.host + 0.5 || fit.host - fit.drawn >= fit.row) {
+        throw new Error(`the terminal doesn't fit its place: ${fit.drawn}px of rows in ${fit.host}px`);
+      }
+    },
+  },
+  {
+    name: "terminals-failed",
+    path: "/terminals",
+    ready: ".empty",
+    async before(page) {
+      await openTerminalTab(page, "Media PC (sam@192.168.68.70)");
+      await page.getByText("Couldn't open the terminal").waitFor();
+    },
+  },
+  {
+    name: "terminals-lost",
+    path: "/terminals",
+    ready: ".empty",
+    async before(page) {
+      await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+      await terminalShows(page, "Try ls");
+      await page.keyboard.type("ls\rdrop\r");
+      await page.getByText("was lost").waitFor();
+    },
+  },
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
     name: "overview-check-problem",
@@ -163,6 +209,22 @@ const SCREENS = [
     before: (page) => page.getByText("Status checks aren't working").waitFor(),
   },
 ];
+
+/** On the Terminals screen: open a tab on the machine with this label in the list. */
+async function openTerminalTab(page, label) {
+  await page.getByLabel("Machine").selectOption({ label });
+  await page.getByRole("button", { name: "Open terminal" }).click();
+  await page.getByRole("tab", { selected: true, name: label.split(" (")[0] }).waitFor();
+}
+
+/** Waits until the terminal shown has this text on it. */
+async function terminalShows(page, text) {
+  await page.waitForFunction(
+    (t) => document.querySelector('[role="tabpanel"]:not([hidden]) .xterm-rows')?.textContent.includes(t),
+    text,
+    { timeout: 10_000 },
+  );
+}
 
 function parseArgs(argv) {
   const args = { out: null, url: null, only: null, sizes: null, zoom: null };
@@ -712,6 +774,82 @@ async function checkFlows(browser, url) {
           if (!n.text) throw new Error(`${n.node} has no hostname`);
           if (!n.whole) throw new Error(`${n.node}'s hostname "${n.text}" is cut short`);
         }
+      },
+    },
+    // Terminals
+    {
+      what: "a machine's terminal button opens a tab that keeps running on other screens, and closing it ends the connection",
+      path: "/machines",
+      async run(page) {
+        await page.evaluate(recordCalls);
+        await page.getByRole("button", { name: "Open a terminal on Homelab VM" }).click();
+        await page.waitForURL("**/terminals");
+        await terminalShows(page, "Try ls");
+        await page.locator('[role="tabpanel"]:not([hidden]) .xterm').click();
+        await page.keyboard.type("ls\r");
+        await terminalShows(page, "update.sh");
+        // Away and back: the same terminal, still showing what it showed, with no new connection.
+        await page.getByRole("link", { name: "Machines" }).click();
+        await page.locator("article").first().waitFor();
+        await page.getByRole("link", { name: "Terminals" }).click();
+        await terminalShows(page, "update.sh");
+        await page.keyboard.type("size\r");
+        await terminalShows(page, "columns");
+        const opened = await page.evaluate(() => window.__calls.filter((c) => c === "terminal_open").length);
+        if (opened !== 1) throw new Error(`the terminal was opened ${opened} times`);
+        await page.getByRole("button", { name: "Close Homelab VM" }).click();
+        await page.getByText("No terminals open").waitFor();
+        if (!(await page.evaluate(() => window.__calls.includes("terminal_close")))) {
+          throw new Error("closing the tab didn't close the connection");
+        }
+      },
+    },
+    {
+      what: "in a terminal, Ctrl+Shift+V pastes, Ctrl+C without a selection interrupts, and exit ends the session",
+      path: "/terminals",
+      async run(page) {
+        await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+        await terminalShows(page, "Try ls");
+        await page.locator('[role="tabpanel"]:not([hidden]) .xterm').click();
+        await page.keyboard.press("Control+Shift+V");
+        await terminalShows(page, "echo pasted from the clipboard");
+        await page.keyboard.press("Control+c");
+        await terminalShows(page, "^C");
+        await page.keyboard.type("exit\r");
+        await page.getByText("Session ended.").waitFor();
+        await page.getByRole("button", { name: "Reconnect" }).click();
+        await page.getByText("Session ended.").waitFor({ state: "detached" });
+        await page.getByRole("tab", { selected: true, name: "Dev VM" }).waitFor();
+      },
+    },
+    {
+      what: "a new terminal takes the keyboard by itself, also what is typed while it connects",
+      path: "/machines",
+      async run(page) {
+        await page.getByRole("button", { name: "Open a terminal on Homelab VM" }).click();
+        await page.waitForURL("**/terminals");
+        // No click in the terminal first: typing straight away has to reach it.
+        await page.keyboard.type("size\r");
+        await terminalShows(page, "columns");
+        await page.keyboard.type("ls\r");
+        await terminalShows(page, "update.sh");
+      },
+    },
+    {
+      what: "a terminal whose connection is lost says so as a problem that can be handed on, and can reconnect",
+      path: "/terminals",
+      async run(page) {
+        await openTerminalTab(page, "Dev VM (sam@192.168.68.22)");
+        await terminalShows(page, "Try ls");
+        await page.keyboard.type("drop\r");
+        const problem = page.getByRole("alert").filter({ hasText: "was lost" });
+        await problem.waitFor();
+        if (!(await problem.getByText("Session ended. The connection to").count())) {
+          throw new Error("the lost connection isn't shown as a problem");
+        }
+        await page.getByRole("button", { name: "Reconnect" }).click();
+        await problem.waitFor({ state: "detached" });
+        await terminalShows(page, "Try ls");
       },
     },
   ];

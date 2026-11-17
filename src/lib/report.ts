@@ -6,7 +6,20 @@
 export const REPO_URL = "https://github.com/reubenbubu/home-cc";
 
 /** Which part of the app a problem came from. Decides where the agent is told to start looking. */
-export type Area = "stats" | "trust" | "scan" | "status" | "devices" | "secrets" | "settings" | "live" | "zoom" | "screen" | "keys";
+export type Area =
+  | "stats"
+  | "trust"
+  | "scan"
+  | "status"
+  | "devices"
+  | "secrets"
+  | "settings"
+  | "live"
+  | "zoom"
+  | "screen"
+  | "keys"
+  // Terminals
+  | "terminal";
 
 /** Source files to start from for each area. Paths are from the root of the repository. */
 export const AREA_FILES: Record<Area, string[]> = {
@@ -59,6 +72,12 @@ export const AREA_FILES: Record<Area, string[]> = {
     "src-tauri/src/keysetup.rs (this PC's key, making one, and adding it to a machine: the scripts run there)",
     "src-tauri/src/ssh.rs (logging in, and which key files are offered)",
     "src/lib/components/KeySetup.svelte and src/lib/keysetup.ts (the screen)",
+  ],
+  // Terminals
+  terminal: [
+    "src-tauri/src/terminal.rs (the terminal over SSH, and copy and paste)",
+    "src-tauri/src/ssh.rs and src-tauri/src/monitor.rs (connecting and logging in: login_for)",
+    "src/lib/terminals.svelte.ts and src/lib/terminal.ts (the tabs) and src/routes/terminals/+page.svelte (the screen)",
   ],
   screen: [
     "the screen named under App, in src/routes/ (its +page.svelte) and the components it uses in src/lib/components/",

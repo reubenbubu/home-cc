@@ -190,6 +190,55 @@ export interface MachineStatsEntry {
   local: boolean;
 }
 
+// --- Terminals (src-tauri/src/terminal.rs) ---
+// The fixed interface shared with the Docker and Proxmox screens. To open a tab from another screen, use
+// openTerminal in terminals.svelte.ts rather than these.
+
+/** The "terminal-output" event: bytes the machine printed, base64-encoded (decode with terminal.ts). */
+export interface TerminalOutput {
+  id: number;
+  data: string;
+}
+
+/** The "terminal-exit" event. The terminal is gone. */
+export interface TerminalExit {
+  id: number;
+  /** Why, for the owner. Null for a normal end: `exit`, a program that finished fine, or a closed tab. */
+  reason: string | null;
+  /** The program's exit code, when the machine sent one. */
+  exitStatus: number | null;
+}
+
+export const terminalApi = {
+  /** Connects and starts the login shell, or `command` in its place (for example "docker exec -it web sh"),
+   *  on a terminal of this size. Resolves with the terminal's id once it runs; its first output may arrive
+   *  before that. Rejects with a readable message, also when the machine's identity needs approving first. */
+  open: (deviceId: number, command: string | null, cols: number, rows: number) =>
+    invoke<number>("terminal_open", { deviceId, command, cols, rows }),
+  /** What was typed or pasted. Rejects once the terminal has closed. */
+  write: (id: number, data: string) => invoke<void>("terminal_write", { id, data }),
+  /** Bytes the terminal itself reports, as xterm.js's onBinary gives them: each character is one byte (0 to
+   *  255). Mouse clicks in the oldest mouse format, which vim uses with xterm.js, come this way. */
+  writeBinary: (id: number, data: string) => invoke<void>("terminal_write_binary", { id, data }),
+  resize: (id: number, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
+  /** The screen has drawn this many more bytes of output. The back end stops reading while too much waits. */
+  ack: (id: number, bytes: number) => invoke<void>("terminal_ack", { id, bytes }),
+  /** Closes the terminal and its connection. Closing one that already closed is fine. */
+  close: (id: number) => invoke<void>("terminal_close", { id }),
+  /** Closes every terminal, for example ones left over from before the window was reloaded. */
+  closeAll: () => invoke<void>("terminal_close_all"),
+  /** The text on the clipboard ("" if none). The back end reads it: the web view may not be allowed to. */
+  clipboardRead: () => invoke<string>("clipboard_read_text"),
+  clipboardWrite: (text: string) => invoke<void>("clipboard_write_text", { text }),
+};
+
+export const terminalEvents = {
+  onOutput: (fn: (e: TerminalOutput) => void): Promise<UnlistenFn> =>
+    listen<TerminalOutput>("terminal-output", (e) => fn(e.payload)),
+  onExit: (fn: (e: TerminalExit) => void): Promise<UnlistenFn> => listen<TerminalExit>("terminal-exit", (e) => fn(e.payload)),
+};
+// --- End of terminals ---
+
 /** Keychain entry names used with setSecret / hasSecret / deleteSecret. */
 export const secretKeys = {
   /** Password for one machine. Removed with the machine. */

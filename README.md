@@ -81,6 +81,9 @@ Windows machine.
   - `keysetup.rs` – key login: shows this PC's key, makes one if there is
     none, and adds it to a machine (like ssh-copy-id), then checks it works.
   - `monitor.rs` – the background timers for status checks and stats.
+  - `terminal.rs` – terminal tabs over SSH, and copy and paste for them. Its
+    test against a real SSH server (vim, tmux, htop) runs with
+    `HOME_CC_TEST_SSH=host:port:user:password cargo test real_server -- --ignored`.
   - `commands.rs` – everything the screens can ask the back end to do.
 - `src-tauri/examples/` – small command-line programs for trying the network
   and SSH code by itself, for example

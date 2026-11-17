@@ -23,6 +23,7 @@ import type {
   StatsErrorKind,
   Subnet,
 } from "../api";
+import { terminalCommands } from "./terminal";
 
 /** How a sample device behaves when it is checked. */
 type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
@@ -912,6 +913,22 @@ export function installMock() {
         emit("stats-changed");
       }, 600);
     },
+    // --- Terminals (mock/terminal.ts) ---
+    // Logging in fails the way the machine's last stats reading did, with the back end's words.
+    ...terminalCommands((deviceId) => {
+      const d = find(deviceId);
+      const e = entries.get(deviceId);
+      const approve = `Approve it on the Machines screen, then open the terminal again.`;
+      const problem =
+        e?.errorKind === "newHost"
+          ? `Logging in to ${d.name} needs its stored password, and home-cc only sends that once you have approved this machine's identity. ${approve}`
+          : e?.errorKind === "hostKeyChanged"
+            ? `${d.name}'s identity has changed since home-cc first reached it, so nothing was sent to it. Check the new identity on the Machines screen and approve it there if you expected the change, then open the terminal again.`
+            : e?.errorKind === "auth" || e?.errorKind === "unreachable"
+              ? (e.error ?? "Couldn't log in.")
+              : null;
+      return { name: d.name, user: d.sshUser, hostname: d.hostname?.toLowerCase() ?? "machine", os: d.os, problem };
+    }),
   };
 
   mockIPC(

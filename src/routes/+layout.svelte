@@ -10,6 +10,7 @@
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
   import { zoom } from "$lib/zoom.svelte";
+  import { terminals } from "$lib/terminals.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import CopiedNote from "$lib/components/CopiedNote.svelte";
   import Problem from "$lib/components/Problem.svelte";
@@ -17,8 +18,12 @@
 
   let { children } = $props();
 
-  // One load of everything, then the stores follow the back end's events.
-  onMount(() => startLive());
+  // One load of everything, then the stores follow the back end's events. Terminals still running from
+  // before a reload of the window have no tab any more: they are closed now, not left connected.
+  onMount(() => {
+    terminals.start();
+    return startLive();
+  });
 
   // The size the owner left the app at, before the first screen is seen (the app stays out of sight until
   // the window has zoomed); then the zoom keys work everywhere.
