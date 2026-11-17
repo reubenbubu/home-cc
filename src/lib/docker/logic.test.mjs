@@ -17,6 +17,7 @@ import {
   keepLast,
   logFileName,
   logLine,
+  logsDraftKey,
   matches,
   pickTotals,
   portShown,
@@ -243,6 +244,24 @@ test("a cleanup put away by the Docker screen lets its ticks go; leaving the scr
   assert.deepEqual(draftsDroppedWith(cleanup, { kind: "cleanup", hostId: 4 }), []);
   assert.deepEqual(draftsDroppedWith(null, cleanup), []);
   assert.deepEqual(draftsDroppedWith({ kind: "files", hostId: 4 }, null), []);
+});
+
+test("a log put away by the Docker screen lets its search and length go; the same log open does not", () => {
+  const jellyfin = { kind: "logs", hostId: 4, container: { id: "c1" } };
+  const key = logsDraftKey(4, "c1");
+  assert.equal(key, "docker-logs:4:c1");
+  // Its Close, the container's Logs button pressed again, or another host's tab.
+  assert.deepEqual(draftsDroppedWith(jellyfin, null), [key]);
+  // Another container's log, the same container id on another host, or another panel in its place.
+  assert.deepEqual(draftsDroppedWith(jellyfin, { kind: "logs", hostId: 4, container: { id: "c2" } }), [key]);
+  assert.deepEqual(draftsDroppedWith(jellyfin, { kind: "logs", hostId: 5, container: { id: "c1" } }), [key]);
+  assert.deepEqual(draftsDroppedWith(jellyfin, { kind: "files", hostId: 4 }), [key]);
+  assert.deepEqual(draftsDroppedWith(jellyfin, { kind: "cleanup", hostId: 4 }), [key]);
+  assert.deepEqual(draftsDroppedWith(jellyfin, { kind: "hosts" }), [key]);
+  // The same log still open keeps them.
+  assert.deepEqual(draftsDroppedWith(jellyfin, { kind: "logs", hostId: 4, container: { id: "c1" } }), []);
+  // A log opened in place of a cleanup lets the cleanup's ticks go, and nothing of its own.
+  assert.deepEqual(draftsDroppedWith({ kind: "cleanup", hostId: 4 }, jellyfin), [cleanupDraftKey(4)]);
 });
 
 test("a terminal into a container names it only as Docker could have", () => {

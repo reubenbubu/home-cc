@@ -86,9 +86,33 @@
     return ACCEPT_AS.includes(d.kind) ? d.kind : "other";
   }
 
+  /** A rename kept from before the owner looked at another screen, not put back in its field yet. */
+  let resumed = rename != null;
+  /** The last press was on a link: the owner is going to another screen. */
+  let towardLink = false;
+  $effect(() => {
+    if (renaming === null) return;
+    const down = (e: PointerEvent) => (towardLink = e.target instanceof Element && !!e.target.closest("a[href]"));
+    window.addEventListener("pointerdown", down, true);
+    return () => window.removeEventListener("pointerdown", down, true);
+  });
+
   function startRename(d: Device) {
+    resumed = false;
     renaming = d.id;
     renameText = d.name;
+  }
+
+  /** Leaving the field saves the name, as Enter does, except for another screen: pressing a link (in a
+   *  WebView that doesn't focus links) or moving to one keeps the rename as typed, unsaved, and it comes back
+   *  with this screen (drafts.svelte.ts). */
+  function renameBlur(e: FocusEvent, d: Device) {
+    const to = e.relatedTarget;
+    if (towardLink || (to instanceof Element && to.closest("a[href]"))) {
+      towardLink = false;
+      return;
+    }
+    finishRename(d);
   }
 
   function finishRename(d: Device) {
@@ -117,9 +141,13 @@
     }
   }
 
+  /** A rename just started has the name selected, to type over; one kept from before goes on after what was
+   *  typed. */
   function focus(node: HTMLInputElement) {
     node.focus();
-    node.select();
+    if (resumed) node.setSelectionRange(node.value.length, node.value.length);
+    else node.select();
+    resumed = false;
   }
 
   /** Phones and tablets often make up a new hardware address for each network, which hides the maker. */
@@ -294,7 +322,7 @@
                 bind:value={renameText}
                 use:focus
                 onkeydown={(e) => renameKey(e, d)}
-                onblur={() => finishRename(d)}
+                onblur={(e) => renameBlur(e, d)}
               />
             {:else}
               <button class="name-btn" title="Rename" onclick={() => startRename(d)}>

@@ -92,7 +92,10 @@ Each feature lists what "done" looks like.
 - Show mesh nodes as their own group.
 - Remember devices between runs. Let the owner rename them and mark which ones
   are PCs, VMs, servers, appliances (printers, TVs, cameras and other things
-  with an address that aren't PCs) or "ignore".
+  with an address that aren't PCs) or "ignore". A new name is saved with
+  Enter or by pressing elsewhere on the screen, and given up with Escape; one
+  half typed when the owner goes to another screen is not saved, and is there
+  to finish when they come back.
 
 Done when: a scan finds all the owner's known machines and mesh nodes, and
 names survive a restart.
@@ -179,7 +182,10 @@ closes the connection.
 - For each Docker host, list containers with name, image, state, ports,
   uptime, and CPU and memory use.
 - Start, stop, restart and remove containers.
-- View logs live, with search, and download them to a file.
+- View logs live, with search, and download them to a file. The search and
+  how much of the log is shown stay while another screen is shown, and go
+  when the log is closed (its Close, the container's Logs button again, or
+  another panel or host in its place).
 - Clean up: remove stopped containers, unused images, unused volumes and build
   cache, with a preview of what will be removed and how much space it frees
   before anything is deleted.

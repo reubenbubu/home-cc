@@ -253,17 +253,31 @@ export function updatesDraftKey(hostId: number): string {
   return `docker-updates:${hostId}`;
 }
 
+/** Where a container's log search and length are kept while another screen is shown (drafts.svelte.ts). */
+export function logsDraftKey(hostId: number, containerId: string): string {
+  return `docker-logs:${hostId}:${containerId}`;
+}
+
 /** The side panels whose ticks are kept per host, and where. */
 const HOST_DRAFTS: Record<string, (hostId: number) => string> = { cleanup: cleanupDraftKey, updates: updatesDraftKey };
 
+type SidePanel = { kind: string; hostId?: number; container?: { id: string } } | null;
+
+/** Where a side panel keeps what the owner chose in it, if it keeps anything. */
+function panelDraft(p: SidePanel): string | undefined {
+  if (!p || p.hostId == null) return undefined;
+  if (p.kind === "logs") return p.container ? logsDraftKey(p.hostId, p.container.id) : undefined;
+  return HOST_DRAFTS[p.kind]?.(p.hostId);
+}
+
 /** The drafts to let go when the Docker screen swaps or shuts its side panel. Leaving the screen keeps them,
- *  but a cleanup or an update put away from the toolbar or replaced by another panel is put away as surely as
- *  with its own Close: opened again, it starts from the usual ticks, never from a named volume ticked earlier.
- *  An update panel that only changes between one stack and the whole host keeps its ticks. */
-export function draftsDroppedWith(from: { kind: string; hostId?: number } | null, to: { kind: string; hostId?: number } | null): string[] {
-  const key = from && from.hostId != null ? HOST_DRAFTS[from.kind]?.(from.hostId) : undefined;
-  if (!key) return [];
-  if (to?.kind === from?.kind && to?.hostId === from?.hostId) return [];
+ *  but a cleanup, an update or a log put away from the toolbar, the container's own Logs button or the host
+ *  tabs, or replaced by another panel, is put away as surely as with its own Close: opened again, it starts
+ *  from the usual ticks (never from a named volume ticked earlier), or a log from the usual length with no
+ *  search. An update panel that only changes between one stack and the whole host keeps its ticks. */
+export function draftsDroppedWith(from: SidePanel, to: SidePanel): string[] {
+  const key = panelDraft(from);
+  if (!key || panelDraft(to) === key) return [];
   return [key];
 }
 

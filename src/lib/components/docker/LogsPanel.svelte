@@ -6,7 +6,7 @@
   import { errorText, type Device } from "$lib/api";
   import { dockerApi, dockerEvents, type Container, type DockerHost } from "$lib/docker/api";
   import { dockerIcons } from "$lib/docker/icons";
-  import { highlight, keepLast, logFileName, logLine, matches, type LogLine } from "$lib/docker/logic";
+  import { highlight, keepLast, logFileName, logLine, logsDraftKey, matches, type LogLine } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import Icon from "../Icon.svelte";
   import Problem from "../Problem.svelte";
@@ -32,9 +32,10 @@
 
   let lines = $state.raw<Held[]>([]);
   let dropped = $state(0);
-  // The search and how much of the log to show stay while another screen is shown (drafts.svelte.ts).
+  // The search and how much of the log to show stay while another screen is shown (drafts.svelte.ts). The
+  // Docker screen lets them go whenever it puts the log away (draftsDroppedWith), as Close does here.
   type LogsView = { query: string; tail: number };
-  const draftKey = untrack(() => `docker-logs:${host.deviceId}:${container.id}`);
+  const draftKey = untrack(() => logsDraftKey(host.deviceId, container.id));
   const view = drafts.get<LogsView>(draftKey);
   let query = $state(view?.query ?? "");
   let tail = $state(view?.tail ?? 200);
