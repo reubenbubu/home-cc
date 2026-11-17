@@ -58,9 +58,10 @@ export function toInput(d: Device, patch: Partial<DeviceInput> = {}): DeviceInpu
   };
 }
 
-const MACHINE_KINDS: DeviceKind[] = ["pc", "server", "vm", "container"];
+const MACHINE_KINDS: DeviceKind[] = ["pc", "server", "vm", "container", "appliance"];
 
-/** PCs, servers, VMs and containers: the devices that can have stats. */
+/** PCs, servers, VMs, containers and appliances: the devices on the Machines screen. All of them can
+ *  have stats, though most appliances have no SSH and only show whether they are up. */
 export function isMachine(d: Device): boolean {
   return MACHINE_KINDS.includes(d.kind);
 }

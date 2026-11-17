@@ -226,7 +226,7 @@
       </div>
       {#if listError}<p class="alert" role="alert">{listError}</p>{/if}
       {#if devices.loaded && rows.length === 0}
-        <p class="muted pad">Nothing here yet. Use "Add machine" to add your first one, or scan the network and set a device's type to PC, Server or VM.</p>
+        <p class="muted pad">Nothing here yet. Use "Add machine" to add your first one, or scan the network and set a device's type to PC, Server, VM or Appliance.</p>
       {:else}
         <div class="box">
           <table>
@@ -311,6 +311,9 @@
             <ConfirmButton label="Remove" confirmLabel="Remove password" onconfirm={() => removePassword(id)} />
           </span>
         </div>
+      {/if}
+      {#if form.kind === "appliance"}
+        <p class="hint">Most appliances have no SSH: leave the SSH user empty and home-cc just checks that it is up.</p>
       {/if}
       <p class="hint">
         To read stats, home-cc logs in with your key file (the one chosen in <a href="/settings">Settings</a>, or the usual

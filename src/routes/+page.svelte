@@ -123,7 +123,7 @@
   <div class="panel stat">
     <div class="muted">Machines up</div>
     <div class="value mono">{upOf(machines)}<span class="of">of {machines.length}</span></div>
-    <div class="muted small">PCs, servers, VMs and containers</div>
+    <div class="muted small">PCs, servers, VMs, containers and appliances</div>
   </div>
   <div class="panel stat">
     <div class="muted">Mesh nodes up</div>
@@ -153,6 +153,8 @@
             {@const st = entry?.stats}
             {@const disk = st ? fullestDisk(st) : null}
             {@const ram = share(st?.memUsedKb, st?.memTotalKb)}
+            <!-- An appliance's system is mostly not known ("Other"), and then not worth its place. -->
+            {@const system = m.kind === "appliance" && m.os === "other" ? [] : [OS_LABELS[m.os]]}
             <article class="panel card">
               <div class="card-top">
                 <div class="card-name">
@@ -161,9 +163,12 @@
                 </div>
                 {@render response(m)}
               </div>
-              <div class="muted small ellipsis"><span class="mono">{m.host}</span> · {OS_LABELS[m.os]} · {KIND_LABELS[m.kind]}</div>
+              <div class="muted small ellipsis"><span class="mono">{m.host}</span> · {[...system, KIND_LABELS[m.kind]].join(" · ")}</div>
               <Sparkline history={status.get(m)?.history ?? []} />
-              {#if !m.sshUser}
+              {#if !m.sshUser && m.kind === "appliance"}
+                <!-- Most appliances have no SSH, so there are no stats to ask for: just when it was last there. -->
+                <div class="muted small">Last seen {relTime(status.get(m)?.lastSeen ?? m.lastSeen, clock.now)}</div>
+              {:else if !m.sshUser}
                 <a class="small quiet-link" href="/machines?edit={m.id}">Add an SSH user to see stats</a>
               {:else if entry?.error}
                 <a class="small note" href="/machines" title={entry.error}>

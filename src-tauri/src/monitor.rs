@@ -145,7 +145,9 @@ impl Drop for ScanGuard<'_> {
     }
 }
 
-/// Machines the app reads stats from: any tracked device with an SSH user.
+/// Machines the app reads stats from: any tracked device with an SSH user,
+/// whatever its type. Most appliances have none, so they only get the status
+/// checks, which every tracked device gets.
 fn wants_stats(d: &Device) -> bool {
     d.kind != DeviceKind::Ignore && d.ssh_user.as_deref().is_some_and(|u| !u.trim().is_empty())
 }
@@ -571,4 +573,40 @@ async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepared> {
         },
         password_held_back: has_password && !approved,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inventory::{Os, Source};
+
+    fn device(kind: DeviceKind, ssh_user: Option<&str>) -> Device {
+        Device {
+            id: 1,
+            name: "Printer".into(),
+            host: "192.168.68.40".into(),
+            kind,
+            os: Os::Other,
+            ssh_user: ssh_user.map(Into::into),
+            ssh_port: 22,
+            notes: String::new(),
+            mac: None,
+            vendor: None,
+            hostname: None,
+            source: Source::Scan,
+            reviewed: true,
+            first_seen: 0,
+            last_seen: None,
+        }
+    }
+
+    #[test]
+    fn stats_are_read_from_any_tracked_device_with_an_ssh_user() {
+        assert!(!wants_stats(&device(DeviceKind::Appliance, None)), "an appliance without SSH is only checked");
+        assert!(!wants_stats(&device(DeviceKind::Appliance, Some("  "))));
+        assert!(wants_stats(&device(DeviceKind::Appliance, Some("admin"))), "a NAS box with SSH");
+        assert!(wants_stats(&device(DeviceKind::Pc, Some("sam"))));
+        assert!(!wants_stats(&device(DeviceKind::Pc, None)));
+        assert!(!wants_stats(&device(DeviceKind::Ignore, Some("sam"))));
+    }
 }

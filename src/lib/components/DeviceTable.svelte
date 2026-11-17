@@ -19,7 +19,7 @@
   let { list, variant }: { list: Device[]; variant: "fresh" | "known" | "ignored" } = $props();
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
-  const ACCEPT_AS: DeviceKind[] = ["pc", "server", "vm", "mesh", "other"];
+  const ACCEPT_AS: DeviceKind[] = ["pc", "server", "vm", "mesh", "appliance", "other"];
 
   let error = $state<string | null>(null);
   const saving = new SvelteSet<number>();
@@ -253,7 +253,7 @@
   .c-spark { width: 11rem; }
   .c-type { width: 9.5rem; }
   .c-mac { width: 11rem; }
-  .c-accept { width: 30.5rem; }
+  .c-accept { width: 34rem; }
   .c-remove { width: 15rem; }
   td.c-name, td.c-type, td.c-accept, td.c-remove { overflow: visible; }
   .down { color: var(--bad); font-weight: 600; }
