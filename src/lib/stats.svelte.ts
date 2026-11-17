@@ -1,8 +1,11 @@
-// CPU, RAM and disk readings for machines that have an SSH user. Reloaded when
-// the back end says new readings are ready.
+// CPU, RAM and disk readings for machines that have an SSH user, and for this
+// PC, which is read without SSH. Reloaded when the back end says new readings
+// are ready.
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { api, errorText, type MachineStatsEntry } from "./api";
+import { api, errorText, type Device, type MachineStatsEntry } from "./api";
+import { sshLeadsElsewhere } from "./net";
 import { OneAtATime } from "./running";
+import { status } from "./status.svelte";
 
 class StatsStore {
   list = $state<MachineStatsEntry[]>([]);
@@ -42,6 +45,13 @@ class StatsStore {
 
   get(id: number): MachineStatsEntry | undefined {
     return this.byId.get(id);
+  }
+
+  /** True for this PC: its stats are read here, without SSH, so it needs no SSH user. The back end says so
+   *  in each entry; before the first one comes in, the screens' own idea of "this PC" stands in. */
+  local(d: Device): boolean {
+    if (d.kind === "ignore") return false;
+    return this.get(d.id)?.local ?? (status.isSelf(d) && !sshLeadsElsewhere(d));
   }
 
   /** Read one machine now. A failed reading comes back inside the entry; only a refused request ends up in

@@ -13,6 +13,7 @@ export const AREA_FILES: Record<Area, string[]> = {
   stats: [
     "src-tauri/src/ssh.rs (connecting and logging in)",
     "src-tauri/src/stats.rs and src-tauri/src/stats_*.{sh,ps1} (what is run on the machine and how it is read)",
+    "src-tauri/src/localstats.rs (this PC's own stats, read without SSH)",
     "src-tauri/src/monitor.rs (the timed stats rounds)",
     "src/lib/stats.svelte.ts and src/lib/components/MachineCard.svelte (the screen)",
   ],

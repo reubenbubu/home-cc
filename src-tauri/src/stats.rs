@@ -1,4 +1,6 @@
 //! Machine stats read over SSH: operating system, uptime, CPU, RAM and disks.
+//! This PC's own stats are read with the same scripts and parser, without SSH
+//! (localstats.rs).
 //!
 //! A small script runs on the machine (stats_linux.sh, or one of the two
 //! stats_windows scripts) and prints the same simple format from every system:
@@ -72,19 +74,19 @@ pub struct Collected {
 // `compact_powershell` tidy them here in code before anything is sent.
 
 /// Sent on stdin to [`LINUX_COMMAND`].
-const LINUX_SCRIPT: &str = include_str!("stats_linux.sh");
+pub(crate) const LINUX_SCRIPT: &str = include_str!("stats_linux.sh");
 /// Works whatever the user's login shell is (bash, zsh, fish, csh): it only has to start `sh`.
 const LINUX_COMMAND: &str = "sh -s";
-const WINDOWS_SCRIPT: &str = include_str!("stats_windows.ps1");
+pub(crate) const WINDOWS_SCRIPT: &str = include_str!("stats_windows.ps1");
 /// Second try for Windows accounts that are not administrators: inside an SSH session
 /// Windows refuses them the full query, so this one uses only .NET and the registry.
-const WINDOWS_SCRIPT_NO_WMI: &str = include_str!("stats_windows_nowmi.ps1");
+pub(crate) const WINDOWS_SCRIPT_NO_WMI: &str = include_str!("stats_windows_nowmi.ps1");
 
 /// One reading, from connecting to logging out, never takes much longer than this.
-const TOTAL_LIMIT: Duration = Duration::from_secs(30);
+pub(crate) const TOTAL_LIMIT: Duration = Duration::from_secs(30);
 /// The full Windows script gets this long, so that the reduced one still has time to
 /// run if the full one hangs.
-const WINDOWS_FIRST_LIMIT: Duration = Duration::from_secs(12);
+pub(crate) const WINDOWS_FIRST_LIMIT: Duration = Duration::from_secs(12);
 /// More disks than this is not a home machine; it is a script gone wrong.
 const MAX_DISKS: usize = 64;
 /// Names longer than this are cut, so odd output can't flood the screens.
@@ -187,7 +189,7 @@ fn explain(host: &str, system: &str, problem: &StatsError, output: &ExecOutput) 
 
 /// `sh` reads a stray carriage return as part of the command, so make sure none is sent
 /// even if this file was checked out with Windows line endings.
-fn unix_newlines(script: &str) -> String {
+pub(crate) fn unix_newlines(script: &str) -> String {
     script.replace("\r\n", "\n")
 }
 
@@ -206,17 +208,23 @@ fn compact_powershell(script: &str) -> String {
 /// server) or any other shell: base64 of the UTF-16 text has no character that needs
 /// quoting. cmd.exe refuses command lines over 8191 characters, so scripts must stay small.
 fn powershell_command(script: &str) -> String {
-    let utf16le: Vec<u8> = compact_powershell(script).encode_utf16().flat_map(u16::to_le_bytes).collect();
     format!(
         "powershell.exe -NoLogo -NoProfile -NonInteractive -InputFormat None -OutputFormat Text \
          -EncodedCommand {}",
-        BASE64.encode(&utf16le)
+        encoded_powershell(script)
     )
+}
+
+/// The text after `-EncodedCommand`: base64 of the compacted script in UTF-16. Also used
+/// to run the same script on this PC itself (localstats.rs).
+pub(crate) fn encoded_powershell(script: &str) -> String {
+    let utf16le: Vec<u8> = compact_powershell(script).encode_utf16().flat_map(u16::to_le_bytes).collect();
+    BASE64.encode(&utf16le)
 }
 
 /// Everything one run of a script reported, before it is boiled down for the screens.
 #[derive(Debug, Clone, PartialEq, Default)]
-struct Reading {
+pub(crate) struct Reading {
     os: Option<String>,
     /// First line of `pveversion` when the machine is a Proxmox host.
     pve: Option<String>,
@@ -251,7 +259,7 @@ struct RawDisk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum StatsError {
+pub(crate) enum StatsError {
     /// No start marker: the script never ran.
     NoStats,
     /// A start marker for a format newer than this code.
@@ -266,7 +274,7 @@ const END: &str = "@@end";
 /// Parse what a stats script printed. The text comes from another machine, so nothing
 /// in it is trusted: a line that makes no sense is skipped, never an error or a crash.
 /// Takes bytes because Windows may send text that is not valid UTF-8.
-fn parse_stats(stdout: &[u8]) -> Result<Reading, StatsError> {
+pub(crate) fn parse_stats(stdout: &[u8]) -> Result<Reading, StatsError> {
     let text = String::from_utf8_lossy(stdout);
     // Windows adds carriage returns if anything on the way does, and may put a
     // byte-order mark first.
@@ -358,7 +366,7 @@ fn two_numbers(value: &str) -> Option<(u64, u64)> {
 }
 
 /// Text from the machine, made safe to show: no control characters, not too long.
-fn clean(text: &str) -> String {
+pub(crate) fn clean(text: &str) -> String {
     text.trim().chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect()
 }
 
@@ -374,7 +382,7 @@ fn cpu_busy_pct(earlier: CpuTicks, later: CpuTicks) -> Option<f64> {
 
 /// Boil a reading down to what the screens show, and hand back the CPU counters for
 /// the next reading.
-fn summarise(reading: Reading, reduced: bool, prev: Option<CpuTicks>) -> (MachineStats, Option<CpuTicks>) {
+pub(crate) fn summarise(reading: Reading, reduced: bool, prev: Option<CpuTicks>) -> (MachineStats, Option<CpuTicks>) {
     let cpu_pct = reading.cpu_pct.or_else(|| cpu_busy_pct(prev?, reading.cpu_ticks?));
     let disks = reading
         .disks

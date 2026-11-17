@@ -288,6 +288,12 @@ pub async fn locate(targets: Vec<Target>) -> Vec<(i64, Located)> {
     locate_on(targets, own_ips(), status::os_lookup, status::NAME_WAIT, &status::KEPT.names).await
 }
 
+/// Every IPv4 address this PC has right now, worked out as `check` does it.
+/// Can block for a moment on Windows, so keep it off the async threads.
+pub fn own_ips_now() -> HashSet<Ipv4Addr> {
+    ifaces::own_ips(&netdev::get_interfaces())
+}
+
 /// Every IPv4 address this PC has right now.
 async fn own_ips() -> HashSet<Ipv4Addr> {
     // Listing the adapters can block for a moment on Windows.

@@ -73,6 +73,7 @@ Windows machine.
   - `net/` – finding the home network, scanning it, naming devices and
     checking they are up.
   - `ssh.rs`, `stats.rs` – SSH logins, and the machine stats read over them.
+    `localstats.rs` reads this PC's own stats with the same scripts, without SSH.
   - `monitor.rs` – the background timers for status checks and stats.
   - `commands.rs` – everything the screens can ask the back end to do.
 - `src-tauri/examples/` – small command-line programs for trying the network

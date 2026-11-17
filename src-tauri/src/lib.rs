@@ -5,6 +5,7 @@ pub mod error;
 pub mod history;
 mod hostkeys;
 pub mod inventory;
+mod localstats;
 mod monitor;
 pub mod net;
 mod secrets;

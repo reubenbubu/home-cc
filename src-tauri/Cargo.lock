@@ -2062,6 +2062,7 @@ dependencies = [
  "data-encoding",
  "dns-lookup",
  "keyring",
+ "libc",
  "netdev",
  "netlink-packet-core",
  "netlink-packet-route",

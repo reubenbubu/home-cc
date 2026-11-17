@@ -192,9 +192,9 @@ pub fn check_problem(monitor: State<Monitor>) -> Option<String> {
 
 // --- Machine stats ---
 
-#[tauri::command(async)]
-pub fn machine_stats(inv: State<Inventory>, monitor: State<Monitor>) -> Result<Vec<MachineStatsEntry>> {
-    monitor.stats_entries(&inv)
+#[tauri::command]
+pub async fn machine_stats(inv: State<'_, Inventory>, monitor: State<'_, Monitor>) -> Result<Vec<MachineStatsEntry>> {
+    monitor.stats_entries(&inv).await
 }
 
 #[tauri::command]
@@ -205,7 +205,10 @@ pub async fn refresh_stats(
     device_id: i64,
 ) -> Result<MachineStatsEntry> {
     let device = inv.get(device_id)?;
-    if device.ssh_user.as_deref().is_none_or(|u| u.trim().is_empty()) {
+    // This PC needs no SSH user: it is read here (localstats.rs).
+    if device.ssh_user.as_deref().is_none_or(|u| u.trim().is_empty())
+        && !crate::localstats::is_this_pc_now(&device).await
+    {
         return Err(Error::Invalid("Add an SSH user to this machine first".into()));
     }
     let entry = monitor.read_stats(&app, device_id).await;
