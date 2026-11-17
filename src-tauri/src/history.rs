@@ -5,12 +5,15 @@ use crate::error::Result;
 use crate::inventory::Inventory;
 use rusqlite::params;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 
 /// How long ping results are kept.
 pub const KEEP_SECS: i64 = 24 * 60 * 60;
 /// How many of the latest results the screens get for each device.
 pub const SAMPLES: usize = 120;
+/// Old results are cleared out once per this many seconds, not every round:
+/// clearing has to look through the whole table.
+const PURGE_EVERY_SECS: i64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +45,9 @@ pub struct DeviceStatus {
     pub checked_at: i64,
     /// Unix seconds of the last answer to a ping or scan.
     pub last_seen: Option<i64>,
+    /// True when this device is the PC home-cc runs on. The inventory can't
+    /// tell, so it is false here and filled in by whoever knows.
+    pub is_self: bool,
     /// Latest results, oldest first.
     pub history: Vec<Sample>,
 }
@@ -62,36 +68,46 @@ impl Inventory {
                 tx.execute("UPDATE devices SET last_seen = ?1 WHERE id = ?2", params![at, id])?;
             }
         }
-        tx.execute("DELETE FROM pings WHERE ts < ?1", [at - KEEP_SECS])?;
+        let slot = at.div_euclid(PURGE_EVERY_SECS);
+        let purge = self.purged.load(Ordering::Relaxed) != slot;
+        if purge {
+            tx.execute("DELETE FROM pings WHERE ts < ?1", [at - KEEP_SECS])?;
+        }
         tx.commit()?;
+        if purge {
+            self.purged.store(slot, Ordering::Relaxed);
+        }
         Ok(())
     }
 
     /// Latest status and recent history of every device that has been pinged.
     pub fn statuses(&self) -> Result<Vec<DeviceStatus>> {
         let conn = self.conn();
-        let mut by_device: BTreeMap<i64, Vec<Sample>> = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT device_id, ts, up, rtt_ms FROM pings ORDER BY device_id, ts")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, Sample { ts: r.get(1)?, up: r.get(2)?, rtt_ms: r.get(3)? }))
-        })?;
-        for row in rows {
-            let (id, sample) = row?;
-            by_device.entry(id).or_default().push(sample);
-        }
-        let mut seen = conn.prepare("SELECT last_seen FROM devices WHERE id = ?1")?;
-        let mut out = Vec::with_capacity(by_device.len());
-        for (device_id, mut history) in by_device {
+        // Read only what is returned: the newest few results of each device,
+        // found through the (device, time) index, never the whole table.
+        let mut devices = conn.prepare("SELECT id, last_seen FROM devices ORDER BY id")?;
+        let mut recent = conn.prepare(
+            "SELECT ts, up, rtt_ms FROM pings WHERE device_id = ?1 ORDER BY ts DESC, rowid DESC LIMIT ?2",
+        )?;
+        let known = devices.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)))?;
+        let mut out = Vec::new();
+        for device in known {
+            let (device_id, last_seen) = device?;
+            let mut history = recent
+                .query_map(params![device_id, SAMPLES as i64], |r| {
+                    Ok(Sample { ts: r.get(0)?, up: r.get(1)?, rtt_ms: r.get(2)? })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            history.reverse();
+            // A device that has never been checked has no status yet.
             let Some(latest) = history.last().cloned() else { continue };
-            if history.len() > SAMPLES {
-                history.drain(..history.len() - SAMPLES);
-            }
             out.push(DeviceStatus {
                 device_id,
                 up: latest.up,
                 rtt_ms: latest.rtt_ms,
                 checked_at: latest.ts,
-                last_seen: seen.query_row([device_id], |r| r.get(0))?,
+                last_seen,
+                is_self: false,
                 history,
             });
         }
@@ -126,6 +142,10 @@ mod tests {
         Check { device_id, up: false, rtt_ms: None }
     }
 
+    fn rows(inv: &Inventory) -> i64 {
+        inv.conn().query_row("SELECT COUNT(*) FROM pings", [], |r| r.get(0)).unwrap()
+    }
+
     #[test]
     fn up_then_down_keeps_last_seen() {
         let inv = Inventory::in_memory().unwrap();
@@ -139,6 +159,8 @@ mod tests {
         assert_eq!((s[0].device_id, s[0].up, s[0].checked_at, s[0].last_seen), (a, false, 1030, Some(1000)));
         assert_eq!(s[0].history.iter().map(|h| h.rtt_ms).collect::<Vec<_>>(), [Some(1.5), None]);
         assert_eq!((s[1].up, s[1].last_seen), (false, None));
+        // Which device is this PC is not the inventory's to say.
+        assert!(s.iter().all(|d| !d.is_self));
     }
 
     #[test]
@@ -160,8 +182,81 @@ mod tests {
         }
         let s = inv.statuses().unwrap().remove(0);
         assert_eq!(s.history.len(), SAMPLES);
-        let rows: i64 = inv.conn().query_row("SELECT COUNT(*) FROM pings", [], |r| r.get(0)).unwrap();
-        assert_eq!(rows, SAMPLES as i64 + 10);
+        assert_eq!(rows(&inv), SAMPLES as i64 + 10);
+    }
+
+    #[test]
+    fn each_device_gets_its_newest_results_oldest_first() {
+        let inv = Inventory::in_memory().unwrap();
+        let a = device(&inv, "a");
+        let never_checked = device(&inv, "never");
+        let b = device(&inv, "b");
+        let rounds = SAMPLES as i64 + 30;
+        for i in 0..rounds {
+            // "a" answers every round; "b" joins late, answers only the early
+            // rounds and is checked half as often.
+            let mut round = vec![up(a, i as f64)];
+            if i >= 20 && i % 2 == 0 {
+                round.push(if i < 40 { up(b, 0.5) } else { down(b) });
+            }
+            inv.record_pings(&round, 5000 + i * 30).unwrap();
+        }
+
+        let s = inv.statuses().unwrap();
+        assert_eq!(s.iter().map(|d| d.device_id).collect::<Vec<_>>(), [a, b]);
+        assert!(s.iter().all(|d| d.device_id != never_checked));
+
+        // The newest SAMPLES of "a", oldest first, ending with the latest round.
+        let last = 5000 + (rounds - 1) * 30;
+        let times: Vec<i64> = s[0].history.iter().map(|h| h.ts).collect();
+        let expected: Vec<i64> = (rounds - SAMPLES as i64..rounds).map(|i| 5000 + i * 30).collect();
+        assert_eq!(times, expected);
+        assert_eq!(s[0].history.first().map(|h| h.rtt_ms), Some(Some(30.0)));
+        assert_eq!((s[0].up, s[0].rtt_ms, s[0].checked_at, s[0].last_seen), (true, Some((rounds - 1) as f64), last, Some(last)));
+
+        // "b" has fewer than SAMPLES: all of them, in order, with its own last answer.
+        let checks = (20..rounds).filter(|i| i % 2 == 0).count();
+        assert_eq!(s[1].history.len(), checks);
+        assert!(s[1].history.windows(2).all(|pair| pair[0].ts < pair[1].ts));
+        assert_eq!(s[1].history.first().map(|h| (h.ts, h.up)), Some((5000 + 20 * 30, true)));
+        assert_eq!((s[1].up, s[1].rtt_ms, s[1].checked_at), (false, None, 5000 + (rounds - 2) * 30));
+        assert_eq!(s[1].last_seen, Some(5000 + 38 * 30));
+    }
+
+    #[test]
+    fn two_checks_in_the_same_second_keep_their_order() {
+        let inv = Inventory::in_memory().unwrap();
+        let a = device(&inv, "a");
+        inv.record_pings(&[down(a)], 700).unwrap();
+        inv.record_pings(&[up(a, 3.0)], 700).unwrap();
+        let s = inv.statuses().unwrap().remove(0);
+        assert_eq!((s.up, s.rtt_ms), (true, Some(3.0)));
+        assert_eq!(s.history.iter().map(|h| h.up).collect::<Vec<_>>(), [false, true]);
+    }
+
+    #[test]
+    fn old_results_are_cleared_now_and_then_not_every_round() {
+        let inv = Inventory::in_memory().unwrap();
+        let a = device(&inv, "a");
+        let start = 200 * PURGE_EVERY_SECS;
+        // The first round after start-up clears what an earlier run left behind.
+        inv.conn()
+            .execute("INSERT INTO pings (device_id, ts, up) VALUES (?1, ?2, 1)", params![a, start - 2 * KEEP_SECS])
+            .unwrap();
+        inv.record_pings(&[up(a, 1.0)], start - KEEP_SECS + 5).unwrap();
+        assert_eq!(rows(&inv), 1);
+
+        // A day later the first result is still just young enough to keep...
+        inv.record_pings(&[up(a, 1.0)], start).unwrap();
+        assert_eq!(rows(&inv), 2);
+        // ...ten seconds on it is too old, but clearing waits for its turn...
+        inv.record_pings(&[up(a, 1.0)], start + 10).unwrap();
+        assert_eq!(rows(&inv), 3);
+        // ...which comes within ten minutes.
+        inv.record_pings(&[up(a, 1.0)], start + PURGE_EVERY_SECS).unwrap();
+        assert_eq!(rows(&inv), 3);
+        let s = inv.statuses().unwrap().remove(0);
+        assert_eq!(s.history.iter().map(|h| h.ts).collect::<Vec<_>>(), [start, start + 10, start + PURGE_EVERY_SECS]);
     }
 
     #[test]

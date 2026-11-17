@@ -184,7 +184,7 @@ impl Monitor {
             progress_app.emit(EVENT_SCAN, p).ok();
         };
         let outcome = net::scan(&range, progress, self.cancel_scan.clone()).await?;
-        let saved = app.state::<Inventory>().record_scan(&outcome.found, now())?;
+        let saved = app.state::<Inventory>().record_scan(&outcome.found, now(), &std::collections::HashMap::new())?;
 
         drop(quiet);
 
@@ -260,7 +260,7 @@ impl Monitor {
                 Ok(collected) => {
                     if login.known_key.is_none() {
                         let inv = app.state::<Inventory>();
-                        if let Err(e) = inv.remember_host_key(&login.host, login.port, &collected.host_key) {
+                        if let Err(e) = inv.remember_host_key(device.id, &collected.host_key) {
                             eprintln!("home-cc: could not store the identity of {}: {e}", login.host);
                         }
                     }
@@ -301,7 +301,7 @@ impl Monitor {
 async fn login_for(app: &AppHandle, device: &Device) -> Result<Login> {
     let inv = app.state::<Inventory>();
     let settings = inv.settings()?;
-    let known_key = inv.host_key(&device.host, device.ssh_port)?;
+    let known_key = inv.host_key(device.id)?;
     let device_id = device.id;
     // The keychain can be slow to answer, so keep it off the async threads.
     // If it can't be read at all (locked, or no keychain service running),

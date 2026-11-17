@@ -52,6 +52,17 @@ impl Settings {
 
 const KEY: &str = "settings";
 
+/// A path without the quotes that came along when it was copied: Windows'
+/// "Copy as path" wraps it in double quotes, and a file dragged into a Linux
+/// terminal gets single ones. Only one matching pair is taken off.
+fn unquote(path: &str) -> &str {
+    let path = path.trim();
+    ['"', '\'']
+        .into_iter()
+        .find_map(|quote| path.strip_prefix(quote)?.strip_suffix(quote))
+        .map_or(path, str::trim)
+}
+
 impl Inventory {
     /// Missing or unreadable settings fall back to the defaults.
     pub fn settings(&self) -> Result<Settings> {
@@ -65,7 +76,7 @@ impl Inventory {
 
     pub fn save_settings(&self, mut settings: Settings) -> Result<Settings> {
         settings.scan_range = settings.scan_range.trim().to_string();
-        settings.ssh_key_path = settings.ssh_key_path.trim().to_string();
+        settings.ssh_key_path = unquote(&settings.ssh_key_path).to_string();
         settings.validate()?;
         let json = serde_json::to_string(&settings).expect("settings serialise");
         self.conn().execute(
@@ -89,6 +100,35 @@ mod tests {
         inv.save_settings(s).unwrap();
         let got = inv.settings().unwrap();
         assert_eq!((got.ping_interval_secs, got.scan_range.as_str()), (10, "10.0.0.0/24"));
+    }
+
+    #[test]
+    fn a_key_path_pasted_with_quotes_is_stored_without_them() {
+        let inv = Inventory::in_memory().unwrap();
+        let cases = [
+            // Windows 11 "Copy as path".
+            (r#""C:\Users\jim\.ssh\id_ed25519""#, r"C:\Users\jim\.ssh\id_ed25519"),
+            (r#"  "C:\Users\jim\My Keys\home key"  "#, r"C:\Users\jim\My Keys\home key"),
+            // A file dragged into a Linux terminal.
+            ("'/home/jim/.ssh/id_ed25519'", "/home/jim/.ssh/id_ed25519"),
+            ("\" /home/jim/.ssh/id_rsa \"", "/home/jim/.ssh/id_rsa"),
+            // Nothing to take off.
+            ("/home/jim/.ssh/id_ed25519", "/home/jim/.ssh/id_ed25519"),
+            ("  ~/.ssh/it's mine  ", "~/.ssh/it's mine"),
+            ("", ""),
+            // Only a matching pair around the whole path counts, and only one.
+            ("\"/home/jim/key", "\"/home/jim/key"),
+            ("/home/jim/key'", "/home/jim/key'"),
+            ("\"/home/jim/key'", "\"/home/jim/key'"),
+            ("\"", "\""),
+            ("\"\"", ""),
+            ("\"'/home/jim/key'\"", "'/home/jim/key'"),
+        ];
+        for (typed, stored) in cases {
+            let saved = inv.save_settings(Settings { ssh_key_path: typed.into(), ..Settings::default() }).unwrap();
+            assert_eq!(saved.ssh_key_path, stored, "returned for {typed:?}");
+            assert_eq!(inv.settings().unwrap().ssh_key_path, stored, "stored for {typed:?}");
+        }
     }
 
     #[test]

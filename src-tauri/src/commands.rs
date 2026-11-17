@@ -154,6 +154,5 @@ pub async fn refresh_stats(
 /// the stored one, so the next reading trusts what the machine presents.
 #[tauri::command]
 pub fn forget_host_key(inv: State<Inventory>, device_id: i64) -> Result<()> {
-    let device = inv.get(device_id)?;
-    inv.forget_host_key(&device.host, device.ssh_port)
+    inv.forget_host_key(device_id)
 }

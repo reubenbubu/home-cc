@@ -1,35 +1,52 @@
 //! SSH server identities, stored the first time a machine is reached so a
 //! later change is noticed.
+//!
+//! An identity belongs to a device, not to an address: it follows the device
+//! when a scan finds it at a new IP address, and it goes when the device is
+//! removed or the owner points the device at another address or port.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::inventory::Inventory;
 use crate::ssh::HostKey;
 use rusqlite::{OptionalExtension, params};
 
 impl Inventory {
-    pub fn host_key(&self, host: &str, port: u16) -> Result<Option<HostKey>> {
+    pub fn host_key(&self, device_id: i64) -> Result<Option<HostKey>> {
         Ok(self
             .conn()
-            .query_row(
-                "SELECT algorithm, fingerprint FROM ssh_host_keys WHERE host = ?1 AND port = ?2",
-                params![host, port],
-                |r| Ok(HostKey { algorithm: r.get(0)?, fingerprint: r.get(1)? }),
-            )
+            .query_row("SELECT algorithm, fingerprint FROM ssh_host_keys WHERE device_id = ?1", [device_id], |r| {
+                Ok(HostKey { algorithm: r.get(0)?, fingerprint: r.get(1)? })
+            })
             .optional()?)
     }
 
     /// Remember a machine's identity. An identity already stored is kept: it
-    /// only changes after the owner asks to forget the old one.
-    pub fn remember_host_key(&self, host: &str, port: u16, key: &HostKey) -> Result<()> {
+    /// only changes when the owner approves the new one. Nothing is stored
+    /// for a device that was removed in the meantime.
+    pub fn remember_host_key(&self, device_id: i64, key: &HostKey) -> Result<()> {
         self.conn().execute(
-            "INSERT OR IGNORE INTO ssh_host_keys (host, port, algorithm, fingerprint) VALUES (?1, ?2, ?3, ?4)",
-            params![host, port, key.algorithm, key.fingerprint],
+            "INSERT OR IGNORE INTO ssh_host_keys (device_id, algorithm, fingerprint)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM devices WHERE id = ?1)",
+            params![device_id, key.algorithm, key.fingerprint],
         )?;
         Ok(())
     }
 
-    pub fn forget_host_key(&self, host: &str, port: u16) -> Result<()> {
-        self.conn().execute("DELETE FROM ssh_host_keys WHERE host = ?1 AND port = ?2", params![host, port])?;
+    /// Store the identity the owner approved, in place of any stored before.
+    pub fn replace_host_key(&self, device_id: i64, key: &HostKey) -> Result<()> {
+        let stored = self.conn().execute(
+            "INSERT OR REPLACE INTO ssh_host_keys (device_id, algorithm, fingerprint)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM devices WHERE id = ?1)",
+            params![device_id, key.algorithm, key.fingerprint],
+        )?;
+        if stored == 0 {
+            return Err(Error::NotFound(format!("device {device_id}")));
+        }
+        Ok(())
+    }
+
+    pub fn forget_host_key(&self, device_id: i64) -> Result<()> {
+        self.conn().execute("DELETE FROM ssh_host_keys WHERE device_id = ?1", [device_id])?;
         Ok(())
     }
 }
@@ -37,23 +54,138 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inventory::{DeviceInput, DeviceKind, Found, Os};
+    use std::collections::HashMap;
 
     fn key(fp: &str) -> HostKey {
         HostKey { algorithm: "ssh-ed25519".into(), fingerprint: fp.into() }
     }
 
-    #[test]
-    fn first_identity_is_kept_until_forgotten() {
-        let inv = Inventory::in_memory().unwrap();
-        assert_eq!(inv.host_key("nas.lan", 22).unwrap(), None);
-        inv.remember_host_key("nas.lan", 22, &key("SHA256:first")).unwrap();
-        inv.remember_host_key("nas.lan", 22, &key("SHA256:second")).unwrap();
-        assert_eq!(inv.host_key("nas.lan", 22).unwrap(), Some(key("SHA256:first")));
-        // Another port on the same machine is a different server.
-        assert_eq!(inv.host_key("nas.lan", 2222).unwrap(), None);
+    fn input(name: &str, host: &str) -> DeviceInput {
+        DeviceInput {
+            name: name.into(),
+            host: host.into(),
+            kind: DeviceKind::Server,
+            os: Os::Linux,
+            ssh_user: Some("jim".into()),
+            ssh_port: None,
+            notes: String::new(),
+            mac: None,
+        }
+    }
 
-        inv.forget_host_key("nas.lan", 22).unwrap();
-        inv.remember_host_key("nas.lan", 22, &key("SHA256:second")).unwrap();
-        assert_eq!(inv.host_key("nas.lan", 22).unwrap(), Some(key("SHA256:second")));
+    fn pins(inv: &Inventory) -> i64 {
+        inv.conn().query_row("SELECT COUNT(*) FROM ssh_host_keys", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn first_identity_is_kept_until_forgotten_or_replaced() {
+        let inv = Inventory::in_memory().unwrap();
+        let nas = inv.add(input("NAS", "nas.lan")).unwrap().id;
+        let other = inv.add(input("Homelab", "192.168.68.21")).unwrap().id;
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+        inv.remember_host_key(nas, &key("SHA256:first")).unwrap();
+        inv.remember_host_key(nas, &key("SHA256:second")).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:first")));
+        // Each device has its own.
+        assert_eq!(inv.host_key(other).unwrap(), None);
+
+        inv.replace_host_key(nas, &key("SHA256:approved")).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:approved")));
+        assert_eq!(pins(&inv), 1);
+
+        inv.forget_host_key(nas).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+        inv.remember_host_key(nas, &key("SHA256:second")).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:second")));
+        // Replacing also works when nothing was stored, and forgetting twice is fine.
+        inv.replace_host_key(other, &key("SHA256:other")).unwrap();
+        assert_eq!(inv.host_key(other).unwrap(), Some(key("SHA256:other")));
+        inv.forget_host_key(other).unwrap();
+        inv.forget_host_key(other).unwrap();
+    }
+
+    #[test]
+    fn a_removed_device_has_no_identity() {
+        let inv = Inventory::in_memory().unwrap();
+        let nas = inv.add(input("NAS", "192.168.68.20")).unwrap().id;
+        inv.remember_host_key(nas, &key("SHA256:nas")).unwrap();
+        inv.remove(nas).unwrap();
+        assert_eq!(pins(&inv), 0);
+
+        // A reading that finishes after the device was removed stores nothing.
+        inv.remember_host_key(nas, &key("SHA256:late")).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+        assert!(matches!(inv.replace_host_key(nas, &key("SHA256:late")), Err(Error::NotFound(_))));
+        assert_eq!(pins(&inv), 0);
+
+        // A machine added later at the same address starts fresh.
+        let again = inv.add(input("Another", "192.168.68.20")).unwrap().id;
+        assert_eq!(inv.host_key(again).unwrap(), None);
+    }
+
+    #[test]
+    fn the_identity_follows_a_device_the_scan_finds_at_a_new_address() {
+        let inv = Inventory::in_memory().unwrap();
+        let mut nas = input("NAS", "192.168.68.20");
+        nas.mac = Some("aa:bb:cc:00:00:20".into());
+        let nas = inv.add(nas).unwrap().id;
+        let mut lab = input("Homelab", "192.168.68.21");
+        lab.mac = Some("aa:bb:cc:00:00:21".into());
+        let lab = inv.add(lab).unwrap().id;
+        inv.remember_host_key(nas, &key("SHA256:nas")).unwrap();
+        inv.remember_host_key(lab, &key("SHA256:lab")).unwrap();
+
+        // The router hands the NAS a new address and gives its old one to the homelab.
+        let found = |ip: &str, mac: &str| Found {
+            ip: ip.into(),
+            mac: Some(mac.into()),
+            vendor: None,
+            hostname: None,
+            looks_like_mesh: false,
+            rtt_ms: None,
+            is_self: false,
+        };
+        inv.record_scan(
+            &[found("192.168.68.20", "aa:bb:cc:00:00:21"), found("192.168.68.25", "aa:bb:cc:00:00:20")],
+            100,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(inv.get(nas).unwrap().host, "192.168.68.25");
+        assert_eq!(inv.get(lab).unwrap().host, "192.168.68.20");
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:nas")));
+        assert_eq!(inv.host_key(lab).unwrap(), Some(key("SHA256:lab")));
+    }
+
+    #[test]
+    fn pointing_a_device_somewhere_else_forgets_its_identity() {
+        let inv = Inventory::in_memory().unwrap();
+        let nas = inv.add(input("NAS", "192.168.68.20")).unwrap().id;
+        inv.remember_host_key(nas, &key("SHA256:nas")).unwrap();
+
+        // A new name or type is the same machine.
+        let mut renamed = input("Big NAS", "192.168.68.20");
+        renamed.kind = DeviceKind::Pc;
+        inv.update(nas, renamed).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:nas")));
+
+        // Another address is not.
+        inv.update(nas, input("Big NAS", "192.168.68.30")).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+
+        // Nor is another port at the same address.
+        inv.remember_host_key(nas, &key("SHA256:nas")).unwrap();
+        let mut other_port = input("Big NAS", "192.168.68.30");
+        other_port.ssh_port = Some(2222);
+        inv.update(nas, other_port).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+
+        // Saving the same address and port again keeps it.
+        inv.remember_host_key(nas, &key("SHA256:nas")).unwrap();
+        let mut same = input("Big NAS", " 192.168.68.30 ");
+        same.ssh_port = Some(2222);
+        inv.update(nas, same).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:nas")));
     }
 }
