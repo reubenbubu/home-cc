@@ -49,9 +49,9 @@
 <span class="address {className}" class:stack>
   {#if part !== "name"}<Copyable class="ip mono" value={host} title="Address" />{/if}
   {#if shown?.copy}
-    <Copyable class="hostname" value={shown.copy} title={shown.tip}>
-      {#if part !== "name"}<span class="sr-only">hostname </span>{/if}{shown.text}
-    </Copyable>
+    <!-- Said before the name to a screen reader, and kept outside what a double-click selects. -->
+    {#if part !== "name"}<span class="sr-only">hostname </span>{/if}
+    <Copyable class="hostname" value={shown.copy} title={shown.tip}>{shown.text}</Copyable>
   {:else if shown}
     <span class="hostname quiet" title={shown.tip}>{shown.text}</span>
   {/if}
