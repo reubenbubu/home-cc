@@ -225,7 +225,7 @@
   <div class="panel stat">
     <div class="muted">Mesh nodes up</div>
     <div class="value mono">{upOf(meshNodes)}<span class="of">of {meshNodes.length}</span></div>
-    <div class="muted small">Deco</div>
+    <div class="muted small">Points of the Wi-Fi mesh</div>
   </div>
   <a class="panel stat link" href="/network">
     <div class="muted">New devices</div>
@@ -306,9 +306,9 @@
       {/if}
     </section>
     <section class="panel">
-      <h2 class="section-title">Deco mesh</h2>
+      <h2 class="section-title">Mesh nodes</h2>
       {#if meshNodes.length === 0}
-        <p class="muted">A network scan finds your 4 Deco nodes. You can also add them by hand as "Mesh node".</p>
+        <p class="muted">A network scan picks out TP-Link Deco nodes by their maker. For any other kind, set a device's type to "Mesh node" on the Network screen.</p>
       {:else}
         <div class="mesh">
           {#each meshNodes as n (n.id)}

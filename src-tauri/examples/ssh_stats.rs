@@ -2,7 +2,7 @@
 //! app does and prints what the app would see. Nothing is stored.
 //!
 //! ```text
-//! cargo run --example ssh_stats -- --host 192.168.68.20 --user jim [options]
+//! cargo run --example ssh_stats -- --host 192.168.68.20 --user you [options]
 //!
 //!   --port N             SSH port (default 22)
 //!   --os KIND            linux (default), windows, proxmox or other

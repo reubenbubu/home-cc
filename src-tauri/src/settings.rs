@@ -20,6 +20,9 @@ pub struct Settings {
     pub ram_warn_pct: u8,
     /// Private key file for SSH. Empty means the usual ones in ~/.ssh.
     pub ssh_key_path: String,
+    /// The SSH user a machine added by hand starts with, for the owner to change. Only fills in the
+    /// form: a machine saved without one has none. Empty means the field starts empty.
+    pub default_ssh_user: String,
 }
 
 impl Default for Settings {
@@ -31,6 +34,7 @@ impl Default for Settings {
             disk_warn_pct: 85,
             ram_warn_pct: 90,
             ssh_key_path: String::new(),
+            default_ssh_user: String::new(),
         }
     }
 }
@@ -77,6 +81,7 @@ impl Inventory {
     pub fn save_settings(&self, mut settings: Settings) -> Result<Settings> {
         settings.scan_range = settings.scan_range.trim().to_string();
         settings.ssh_key_path = unquote(&settings.ssh_key_path).to_string();
+        settings.default_ssh_user = settings.default_ssh_user.trim().to_string();
         settings.validate()?;
         let json = serde_json::to_string(&settings).expect("settings serialise");
         self.conn().execute(
@@ -132,6 +137,18 @@ mod tests {
     }
 
     #[test]
+    fn the_default_ssh_user_is_stored_trimmed_and_starts_empty() {
+        let inv = Inventory::in_memory().unwrap();
+        assert_eq!(inv.settings().unwrap().default_ssh_user, "");
+        let saved = inv.save_settings(Settings { default_ssh_user: "  sam \t".into(), ..Settings::default() }).unwrap();
+        assert_eq!(saved.default_ssh_user, "sam");
+        assert_eq!(inv.settings().unwrap().default_ssh_user, "sam");
+        let cleared = inv.save_settings(Settings { default_ssh_user: "   ".into(), ..Settings::default() }).unwrap();
+        assert_eq!(cleared.default_ssh_user, "");
+        assert_eq!(inv.settings().unwrap().default_ssh_user, "");
+    }
+
+    #[test]
     fn rejects_out_of_range_values() {
         let inv = Inventory::in_memory().unwrap();
         let bad = Settings { ping_interval_secs: 1, ..Settings::default() };
@@ -147,6 +164,6 @@ mod tests {
             .execute("INSERT INTO settings (key, value) VALUES ('settings', '{\"pingIntervalSecs\":45}')", [])
             .unwrap();
         let got = inv.settings().unwrap();
-        assert_eq!((got.ping_interval_secs, got.disk_warn_pct), (45, 85));
+        assert_eq!((got.ping_interval_secs, got.disk_warn_pct, got.default_ssh_user.as_str()), (45, 85, ""));
     }
 }

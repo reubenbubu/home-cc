@@ -2263,6 +2263,46 @@ async function checkFlows(browser, url) {
         await expectValue(page.getByLabel("Passphrase for the key file"), "", "the passphrase after Discard");
       },
     },
+    {
+      what: "No one's name in the app: a new machine's SSH user is empty until a Default SSH user is saved in Settings, then starts as it (but not for an appliance)",
+      path: "/machines",
+      async run(page) {
+        const form = page.locator("form");
+        const user = form.getByLabel("SSH user");
+        const type = form.getByRole("combobox", { name: /^Type\b/ });
+        await page.getByRole("button", { name: "Add machine" }).click();
+        await expectValue(user, "", "the SSH user of a new machine with no default set");
+        const hint = await user.getAttribute("placeholder");
+        if (hint) throw new Error(`the SSH user of a new machine has the hint "${hint}"`);
+        await form.getByRole("button", { name: "Cancel", exact: true }).click();
+
+        await page.getByRole("link", { name: "Settings", exact: true }).click();
+        const field = page.getByLabel("Default SSH user");
+        await expectValue(field, "", "the Default SSH user before one is set");
+        await field.fill("  sam ");
+        await page.getByRole("button", { name: "Save settings" }).click();
+        await page.getByText("Saved", { exact: true }).waitFor();
+        await expectValue(field, "sam", "the Default SSH user after Save (spaces taken off)");
+
+        await page.getByRole("link", { name: "Machines", exact: true }).click();
+        await page.getByRole("button", { name: "Add machine" }).click();
+        await expectValue(user, "sam", "the SSH user of a new machine");
+        if (await form.getByText("Unsaved changes").count()) throw new Error("the filled-in SSH user counts as typed");
+        await type.selectOption("appliance");
+        await expectValue(user, "", "the SSH user of a new appliance");
+        await type.selectOption("pc");
+        await expectValue(user, "sam", "the SSH user after going back from Appliance to PC");
+        await user.fill("root");
+        await type.selectOption("appliance");
+        await expectValue(user, "root", "an SSH user typed by the owner, after choosing Appliance");
+        await form.getByRole("button", { name: "Cancel", exact: true }).click();
+
+        // Only a new machine is filled in: one already added keeps its own, or none.
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        await expectValue(user, "admin", "the NAS's own SSH user");
+        await form.getByRole("button", { name: "Cancel", exact: true }).click();
+      },
+    },
     // --- Pi-hole ---
     {
       what: "Pi-hole: a first connection waits for the certificate, and approving it reads the Pi-hole",

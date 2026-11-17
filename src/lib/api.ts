@@ -60,6 +60,8 @@ export interface Settings {
   ramWarnPct: number;
   /** Private key file for SSH. Empty means the usual ones in the .ssh folder. */
   sshKeyPath: string;
+  /** The SSH user a machine added by hand starts with (only fills in the form). Empty means none. */
+  defaultSshUser: string;
 }
 
 /** A local network the app could scan. */

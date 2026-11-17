@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: Settings = {
   diskWarnPct: 85,
   ramWarnPct: 90,
   sshKeyPath: "",
+  defaultSshUser: "",
 };
 
 class SettingsStore {

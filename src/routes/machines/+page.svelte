@@ -38,6 +38,8 @@
   import { macToSend, repointed } from "$lib/net";
   import { collapsedGroups, machineOrder, NO_GROUP } from "$lib/order.svelte";
   import { names } from "$lib/names.svelte";
+  import { startingUser, userAfterKind } from "$lib/newmachine";
+  import { settings } from "$lib/settings.svelte";
   import { status } from "$lib/status.svelte";
   import type { Column } from "$lib/table";
   import { TableView } from "$lib/table.svelte";
@@ -55,12 +57,13 @@
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
 
+  /** A new machine's form. The SSH user starts as the default chosen in Settings (none when it isn't set). */
   const blank = (): DeviceInput => ({
     name: "",
     host: "",
     kind: "vm",
     os: "linux",
-    sshUser: "",
+    sshUser: startingUser("vm", settings.value.defaultSshUser),
     sshPort: 22,
     notes: "",
     mac: "",
@@ -180,6 +183,7 @@
     // the owner didn't change takes what is saved now, so a group given meanwhile with the card's menu isn't
     // undone by a form kept from before.
     const draft = drafts.get<MachineDraft>(draftKey(id));
+    newKind = null;
     base = { ...input };
     form = draft ? rebased(draft.form, draft.base, input) : input;
     restored = !!draft;
@@ -209,6 +213,33 @@
   function startAdd() {
     open("new", blank());
   }
+
+  // A new machine's SSH user, while it still holds the default from Settings, follows the type: an appliance
+  // (most have no SSH) starts without one. The type it had before, to tell what it changed from.
+  let newKind: DeviceKind | null = null;
+  $effect(() => {
+    const kind = form.kind;
+    if (editing !== "new") return;
+    untrack(() => {
+      if (newKind !== null && newKind !== kind) {
+        form.sshUser = userAfterKind(form.sshUser ?? "", newKind, kind, settings.value.defaultSshUser);
+      }
+      newKind = kind;
+    });
+  });
+
+  // The saved settings can arrive after a new machine's form has opened (a link to /machines?add=1 as the app
+  // starts): the default SSH user is filled in then, unless the owner has typed one meanwhile.
+  $effect(() => {
+    if (!settings.loaded || editing !== "new") return;
+    untrack(() => {
+      const user = startingUser(base.kind, settings.value.defaultSshUser);
+      if (!restored && user && !base.sshUser && !form.sshUser && form.kind === base.kind) {
+        base.sshUser = user;
+        form.sshUser = user;
+      }
+    });
+  });
 
   function startEdit(d: Device) {
     return open(d.id, {
@@ -1080,8 +1111,8 @@
       {#if renameForm}
         <p class="hint">The rename of {renameForm.from} you started is kept, and comes back when you save or cancel this.</p>
       {/if}
-      <label>Name <input bind:value={form.name} placeholder="Homelab VM" required /></label>
-      <label>Address (IP or hostname) <input class="mono" bind:value={form.host} placeholder="192.168.68.21" required /></label>
+      <label>Name <input bind:value={form.name} placeholder="Office PC" required /></label>
+      <label>Address (IP or hostname) <input class="mono" bind:value={form.host} placeholder="192.168.1.20" required /></label>
       {#if isIpv4(form.host.trim()) || isIpv6(form.host.trim())}
         <!-- Only ever the name of the address in the field: while it is being typed, not the last one's. -->
         <p class="hint under resolved">Hostname
@@ -1107,7 +1138,7 @@
           bind:value={form.group}
           list="group-names"
           maxlength={GROUP_MAX}
-          placeholder="Proxmox lab"
+          placeholder="Upstairs"
           autocomplete="off"
           spellcheck="false"
         />
@@ -1128,7 +1159,7 @@
         <p class="hint under">Saving removes the hardware address. The next scan that finds this machine fills it in again.</p>
       {/if}
       <div class="row">
-        <label>SSH user <input class="mono" bind:value={form.sshUser} placeholder="jim" autocomplete="off" spellcheck="false" /></label>
+        <label>SSH user <input class="mono" bind:value={form.sshUser} autocomplete="off" spellcheck="false" /></label>
         <label>SSH port <input class="mono" type="number" min="1" max="65535" bind:value={form.sshPort} /></label>
       </div>
       <label>SSH password (optional)
