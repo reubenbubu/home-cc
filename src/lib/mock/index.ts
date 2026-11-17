@@ -21,6 +21,7 @@ import type {
   StatsErrorKind,
   Subnet,
 } from "../api";
+import { dockerMock } from "./docker";
 
 /** How a sample device behaves when it is checked. */
 type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
@@ -746,6 +747,9 @@ export function installMock() {
       pinned.set(d.id, offered);
       approved.add(d.id);
     },
+
+    // --- Docker (spec 5.5), see docker.ts ---
+    ...dockerMock({ devices: () => devices, idOf }),
   };
 
   mockIPC(
