@@ -107,7 +107,7 @@ fn error_kind(e: &SshError) -> StatsErrorKind {
         SshError::HostKeyChanged { .. } => StatsErrorKind::HostKeyChanged,
         SshError::AuthFailed(_) => StatsErrorKind::Auth,
         SshError::Unreachable(_) => StatsErrorKind::Unreachable,
-        SshError::Other(_) => StatsErrorKind::Other,
+        SshError::NewHost(_) | SshError::Other(_) => StatsErrorKind::Other,
     }
 }
 
@@ -256,7 +256,7 @@ impl Monitor {
     pub async fn read_stats(&self, app: &AppHandle, device: &Device) -> MachineStatsEntry {
         let prev_ticks = self.stats.lock().unwrap().get(&device.id).and_then(|s| s.ticks);
         let outcome = match login_for(app, device).await {
-            Ok(login) => match stats::collect(&login, device.os, prev_ticks).await {
+            Ok(login) => match stats::collect(&login, device.os, prev_ticks, &|_| {}).await {
                 Ok(collected) => {
                     if login.known_key.is_none() {
                         let inv = app.state::<Inventory>();

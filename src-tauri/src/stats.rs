@@ -61,7 +61,7 @@ pub struct CpuTicks {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Collected {
     pub stats: MachineStats,
-    /// The identity the server presented, to store if it is new.
+    /// The identity the server presented.
     pub host_key: HostKey,
     /// Pass back in as `prev` next time.
     pub cpu_ticks: Option<CpuTicks>,
@@ -94,10 +94,19 @@ const MAX_TEXT: usize = 200;
 /// (also Proxmox) or Windows command; other systems are tried as Linux,
 /// unless the server introduces itself as Windows' own SSH server.
 /// `prev` is the `cpu_ticks` from the previous reading of the same machine.
+/// `first_use` is handed the machine's identity on a first connection (no
+/// `login.known_key`), once and before anything is offered to the machine, so
+/// it can be stored even if the login or the reading then fails; see
+/// [`ssh::connect`].
 /// Bounded by timeouts: never takes more than about 30 seconds.
-pub async fn collect(login: &Login, os: Os, prev: Option<CpuTicks>) -> Result<Collected, SshError> {
+pub async fn collect(
+    login: &Login,
+    os: Os,
+    prev: Option<CpuTicks>,
+    first_use: &(dyn Fn(&HostKey) + Send + Sync),
+) -> Result<Collected, SshError> {
     let deadline = Instant::now() + TOTAL_LIMIT;
-    let session = ssh::connect(login).await?;
+    let session = ssh::connect(login, first_use).await?;
     // A machine of unknown type that greets as Windows' own SSH server gets the Windows
     // command straight away: the Linux one could only fail there.
     let windows = match os {
@@ -812,7 +821,27 @@ disk=\n\
             key_passphrase: None,
             password: None,
         };
-        sendable(&collect(&login, Os::Linux, None));
+        sendable(&collect(&login, Os::Linux, None, &|_| {}));
+    }
+
+    /// The identity reaches the caller on a first connection even when the login then
+    /// fails, so it can be stored whatever happens next.
+    #[tokio::test]
+    async fn first_connection_identity_is_handed_over_before_the_login() {
+        use crate::ssh::test_server;
+        let server = test_server::start(&[russh::MethodKind::Password]).await;
+        let seen = std::sync::Mutex::new(Vec::new());
+        let first_use = |key: &HostKey| seen.lock().unwrap().push((key.clone(), server.attempts().len()));
+        let result = collect(&server.login(), Os::Linux, None, &first_use).await;
+        assert!(matches!(result, Err(SshError::AuthFailed(_))), "{result:?}");
+        assert_eq!(*seen.lock().unwrap(), [(server.host_key.clone(), 0)]);
+
+        // A machine whose identity is stored is not a first connection.
+        let mut known = server.login();
+        known.known_key = Some(server.host_key.clone());
+        let result = collect(&known, Os::Linux, None, &first_use).await;
+        assert!(matches!(result, Err(SshError::AuthFailed(_))), "{result:?}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[test]
