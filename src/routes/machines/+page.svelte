@@ -1408,25 +1408,26 @@
   .c-ip { width: 10rem; }
   .c-host { width: 11rem; }
   .c-type { width: 7.5rem; }
-  .c-os { width: 8rem; }
+  /* Room for "Proxmox VE (guessed)". The columns below give way 5rem sooner for it. */
+  .c-os { width: 13rem; }
   .c-ssh { width: 12rem; }
   .c-actions { width: 19.5rem; }
   td.c-actions { overflow: visible; }
   .row-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .host-line { display: none; font-size: 0.85rem; line-height: 1.3; }
-  @container (max-width: 80rem) {
+  @container (max-width: 85rem) {
     .c-host { display: none; }
     .host-line { display: block; overflow: hidden; }
     td.c-ip { line-height: 1.3; }
   }
-  @container (max-width: 72rem) {
+  @container (max-width: 77rem) {
     .c-notes { display: none; }
   }
   /* The cards above show the groups, so the column gives way before the system does. */
-  @container (max-width: 69rem) {
+  @container (max-width: 74rem) {
     .c-group { display: none; }
   }
-  @container (max-width: 66rem) {
+  @container (max-width: 71rem) {
     .c-os { display: none; }
   }
   /* Too narrow for columns (a small window zoomed in): the name on one line, the address, type and SSH

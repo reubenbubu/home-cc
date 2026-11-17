@@ -1026,6 +1026,8 @@ async function checkFlows(browser, url) {
         if (shown.text !== "Windows (guessed)" || shown.title !== "System: Windows · Guessed from the network") {
           throw new Error(`Media PC's System reads "${shown.text}" ("${shown.title}")`);
         }
+        // The whole of it shows in the column, not "Windows (g…".
+        if (await row.evaluate((td) => td.scrollWidth > td.clientWidth)) throw new Error(`"${shown.text}" is cut short in the System column`);
         await page.getByRole("button", { name: "Edit Media PC" }).click();
         await page.locator("form").getByText(/^Guessed from the network\./).waitFor();
         const media = card(page, "Media PC");
