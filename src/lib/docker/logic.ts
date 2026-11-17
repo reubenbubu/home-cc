@@ -15,6 +15,14 @@ export function portText(p: Port): string {
   return `${host}→${inside}`;
 }
 
+/** A published port as the list shows it: "1900→1900/udp", and the address it is published on when that is
+ *  one address rather than all of them, which the list shows beside it with its hostname (Address). */
+export function portShown(p: Port): { text: string; ip: string | null } {
+  const inside = `${p.containerPort}/${p.protocol}`;
+  if (p.hostPort == null) return { text: inside, ip: null };
+  return { text: `${p.hostPort}→${inside}`, ip: p.hostIp?.trim() || null };
+}
+
 /** Published ports only, as the list shows them; the rest are only in the details. */
 export function publishedPorts(c: Container): Port[] {
   return c.ports.filter((p) => p.hostPort != null);
@@ -223,9 +231,34 @@ export function isLoginProblem(kind: string | undefined | null): boolean {
   return kind === "newHost" || kind === "hostKeyChanged" || kind === "auth";
 }
 
-/** The command a terminal into this container would run (for the Terminals module, once it is there). */
-export function execCommand(c: Container): string {
-  return `docker exec -it ${c.id.slice(0, 12)} sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
+/** The names Docker gives containers, and full or short container ids. Nothing else goes into a command. */
+const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const CONTAINER_ID = /^[0-9a-f]{12,64}$/;
+
+/** Where docker is looked for on a Docker host besides the login's own PATH, /snap/bin among them: a command
+ *  sent over SSH gets no login shell, so on Debian with the docker snap, for one, /snap/bin isn't on its
+ *  PATH. The same list as PREAMBLE in src-tauri/src/docker/scripts.rs, whose tests check that they agree. */
+export const DOCKER_PATH = "/usr/local/bin:/usr/bin:/bin:/snap/bin";
+
+/** Put before docker in a command run on a Docker host. `env`, because `PATH=… docker` isn't understood by
+ *  csh or tcsh, which can be the login shell that runs the command. */
+const DOCKER_ENV = `env PATH="$PATH:${DOCKER_PATH}" `;
+
+/** The command a terminal into this running container runs on its Docker host: bash if the container has it,
+ *  else sh. It is run the way the Docker screen runs docker: as the SSH user, who must be allowed to use
+ *  Docker, and with docker looked for in the same places. The container goes in by its name (easier to
+ *  read), or by its id; anything that isn't a name or id Docker could have given is refused (null) rather
+ *  than quoted, so nothing odd ever reaches a shell. */
+export function execCommand(c: { id: string; name: string }): string | null {
+  const target = CONTAINER_NAME.test(c.name) && c.name.length <= 255 ? c.name : CONTAINER_ID.test(c.id) ? c.id : null;
+  if (!target) return null;
+  return `${DOCKER_ENV}docker exec -it ${target} sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
+}
+
+/** A command as shown beside a terminal's tabs: without the PATH that `execCommand` puts first, so the part
+ *  that says what runs is the part still in view when the line is cut short. */
+export function commandShown(command: string): string {
+  return command.startsWith(DOCKER_ENV) ? command.slice(DOCKER_ENV.length) : command;
 }
 
 /** The last part of a path, for tabs and titles. */

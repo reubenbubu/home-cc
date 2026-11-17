@@ -7,7 +7,7 @@ use crate::inventory::{Device, DeviceKind, Found, Inventory, now};
 use crate::localstats;
 use crate::net::{self, Located, ScanProgress, Target};
 use crate::secrets;
-use crate::ssh::{HostKey, Login, SshError};
+use crate::ssh::{self, HostKey, Login, Session, SshError};
 use crate::stats::{self, CpuTicks, MachineStats};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
@@ -310,6 +310,12 @@ impl Monitor {
         self.scanning.load(Ordering::SeqCst)
     }
 
+    /// What the last reading of one machine found, if it has been read: without
+    /// the work `stats_entries` does, for callers that can't wait for it.
+    pub fn stats_entry(&self, device_id: i64) -> Option<MachineStatsEntry> {
+        self.stats.lock().unwrap().get(&device_id).map(|s| s.entry.clone())
+    }
+
     /// One entry per machine with an SSH user, and one for this PC, read or
     /// not. Which device is this PC is worked out off the async threads: listing
     /// the network adapters can take a moment (see `localstats::this_pc_ids`).
@@ -456,32 +462,21 @@ impl Monitor {
         // A machine reached for the first time has its identity remembered
         // before anything else happens, so a later change is noticed even if
         // the login never works. Remembered is not approved: the password
-        // stays back until the owner has seen the fingerprint and said yes.
-        let shown: Arc<Mutex<Option<HostKey>>> = Arc::default();
+        // stays back until the owner has seen the fingerprint and said yes, and
+        // the owner is asked for that only where the password would otherwise
+        // have been tried (see Prepared::connect).
         let outcome = match &login {
             Ok(prepared) => {
-                let (seen, first_app) = (shown.clone(), app.clone());
+                let first_app = app.clone();
                 let (host, port) = (prepared.login.host.clone(), prepared.login.port);
-                let first_use = move |key: &HostKey| {
-                    *seen.lock().unwrap() = Some(key.clone());
-                    remember(&first_app, device_id, &host, port, key);
-                };
-                stats::collect(&prepared.login, device.os, prev_ticks, &first_use).await
-            }
-            Err(e) => Err(SshError::Other(e.to_string())),
-        };
-        let outcome = match (outcome, &login) {
-            // No key got in and the password was held back because the owner
-            // hasn't approved this machine's identity yet: ask them.
-            (Err(SshError::AuthFailed(_)), Ok(prepared)) if prepared.password_held_back => {
-                match prepared.login.known_key.clone().or_else(|| shown.lock().unwrap().clone()) {
-                    Some(key) => Err(SshError::NewHost(key)),
-                    None => Err(SshError::AuthFailed(
-                        "Could not log in, and the machine did not show an identity to approve.".into(),
-                    )),
+                let first_use = move |key: &HostKey| remember(&first_app, device_id, &host, port, key);
+                let deadline = tokio::time::Instant::now() + stats::TOTAL_LIMIT;
+                match prepared.connect(&first_use).await {
+                    Ok(session) => stats::read(session, prepared.login.host.trim(), device.os, prev_ticks, deadline).await,
+                    Err(e) => Err(e),
                 }
             }
-            (other, _) => other,
+            Err(e) => Err(SshError::Other(e.to_string())),
         };
 
         // The owner may have pointed the device somewhere else, or changed
@@ -624,30 +619,53 @@ async fn named_devices(app: &AppHandle, found: &[Found]) -> Result<HashMap<Strin
     Ok(named)
 }
 
-// --- For other modules that log in to machines (Docker) ---
+// --- Logging in to machines (stats, terminals, Docker) ---
 
-/// The login to use for a machine, with the same identity and password rules as the
-/// stats, and whether the stored password was held back because the owner hasn't
-/// approved the machine's identity yet.
-pub(crate) async fn prepared_login(app: &AppHandle, device: &Device) -> Result<(Login, bool)> {
-    let prepared = login_for(app, device).await?;
-    Ok((prepared.login, prepared.password_held_back))
-}
-
-/// A login ready to try, and whether the stored password was left out of it.
+/// A login ready to try. The stored password is kept apart from `login`, so code that
+/// hands `login` to `ssh::connect` itself can never send it: connect with
+/// [`Prepared::connect`], which sends it only to an identity the owner approved.
 pub(crate) struct Prepared {
+    /// Where and as whom to log in, with the stored identity and the key settings, but
+    /// without the stored password.
     pub(crate) login: Login,
-    /// A password is stored, but the owner hasn't approved this machine's
-    /// identity yet, so it must not be sent.
-    pub(crate) password_held_back: bool,
+    /// The password stored for this machine, if any.
+    password: Option<String>,
+    /// The owner approved the identity in `login.known_key`.
+    identity_approved: bool,
 }
 
-/// Gather what is needed to log in: stored identity, key file and secrets.
+impl Prepared {
+    /// Connect and log in by the identity rules (spec section 7). The stored password
+    /// goes only to an identity the owner approved. Otherwise it is held back, and the
+    /// login fails with [`SshError::NewHost`] (the owner is asked to approve) only if
+    /// the password would have been tried: a server that takes keys only gives an
+    /// ordinary [`SshError::AuthFailed`] with its advice, because approving would
+    /// change nothing. A stored identity that no longer matches is
+    /// [`SshError::HostKeyChanged`]. `first_use` is as for [`ssh::connect`]; callers
+    /// here only remember the identity it is given, unapproved.
+    pub(crate) async fn connect(
+        &self,
+        first_use: &(dyn Fn(&HostKey) + Send + Sync),
+    ) -> std::result::Result<Session, SshError> {
+        let login = Login { password: self.password.clone(), ..self.login.clone() };
+        if self.identity_approved {
+            ssh::connect(&login, first_use).await
+        } else {
+            ssh::connect_holding_password_back(&login, first_use).await
+        }
+    }
+}
+
+/// Gather what is needed to log in to a machine: stored identity, key file and
+/// secrets. Every login home-cc makes with a machine's stored details (stats,
+/// terminals, Docker) starts here and connects with [`Prepared::connect`], so the
+/// identity and password rules are the same for all of them.
 pub(crate) async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepared> {
     let inv = app.state::<Inventory>();
     let settings = inv.settings()?;
     let known_key = inv.host_key(device.id)?;
-    let approved = inv.host_key_approved(device.id)?;
+    // Only an identity that is stored can have been approved.
+    let approved = known_key.is_some() && inv.host_key_approved(device.id)?;
     let device_id = device.id;
     // The keychain can be slow to answer, so keep it off the async threads.
     // If it can't be read at all (locked, or no keychain service running),
@@ -664,7 +682,6 @@ pub(crate) async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepar
     })
     .await
     .unwrap_or((None, None));
-    let has_password = password.as_deref().is_some_and(|p| !p.is_empty());
     Ok(Prepared {
         login: Login {
             host: device.host.clone(),
@@ -673,10 +690,11 @@ pub(crate) async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepar
             known_key,
             key_path: Some(settings.ssh_key_path).filter(|p| !p.is_empty()).map(PathBuf::from),
             key_passphrase,
-            // A password only ever goes to an identity the owner approved.
-            password: password.filter(|_| approved),
+            // Kept apart: see Prepared.
+            password: None,
         },
-        password_held_back: has_password && !approved,
+        password: password.filter(|p| !p.is_empty()),
+        identity_approved: approved,
     })
 }
 
@@ -723,6 +741,53 @@ mod tests {
         assert!(!reads_stats(&device(DeviceKind::Pc, None), &BTreeSet::new()), "not this PC, no SSH user");
         assert!(!reads_stats(&device(DeviceKind::Pc, None), &BTreeSet::from([2])), "this PC is another device");
         assert!(reads_stats(&device(DeviceKind::Pc, Some("sam")), &BTreeSet::new()));
+    }
+
+    /// A stored password and a stored identity, approved or not, for the test server.
+    fn prepared(server: &crate::ssh::test_server::TestServer, identity_approved: bool) -> Prepared {
+        Prepared {
+            login: Login { known_key: Some(server.host_key.clone()), ..server.login() },
+            password: Some(crate::ssh::test_server::PASSWORD.into()),
+            identity_approved,
+        }
+    }
+
+    fn passwords_sent(server: &crate::ssh::test_server::TestServer) -> usize {
+        server.attempts().iter().filter(|a| a.starts_with("password") || a.starts_with("answer")).count()
+    }
+
+    #[tokio::test]
+    async fn a_stored_password_goes_only_to_an_approved_identity() {
+        use crate::ssh::test_server;
+        use russh::MethodKind;
+        let server = test_server::start(&[MethodKind::Password]).await;
+
+        // Remembered on first contact, not approved: nothing is sent, and the owner is asked.
+        let held = prepared(&server, false).connect(&|_| {}).await;
+        assert!(matches!(&held, Err(SshError::NewHost(key)) if *key == server.host_key), "{held:?}");
+        assert_eq!(passwords_sent(&server), 0);
+
+        // The login handed out has no password in it, so connecting with it directly sends none.
+        let direct = ssh::connect(&prepared(&server, true).login, &|_| {}).await;
+        assert!(matches!(direct, Err(SshError::AuthFailed(_))), "{direct:?}");
+        assert_eq!(passwords_sent(&server), 0);
+
+        // Approved: the password is sent and gets in.
+        let session = prepared(&server, true).connect(&|_| {}).await.unwrap();
+        session.close().await;
+        assert_eq!(passwords_sent(&server), 1);
+    }
+
+    /// A server that takes keys only would never be sent the password, so approving its
+    /// identity would change nothing: the owner is told the login failed, not asked to approve.
+    #[tokio::test]
+    async fn a_key_only_server_is_a_plain_failed_login() {
+        use crate::ssh::test_server;
+        use russh::MethodKind;
+        let server = test_server::start(&[MethodKind::PublicKey]).await;
+        let failed = prepared(&server, false).connect(&|_| {}).await;
+        assert!(matches!(failed, Err(SshError::AuthFailed(_))), "{failed:?}");
+        assert_eq!(passwords_sent(&server), 0);
     }
 
     #[test]

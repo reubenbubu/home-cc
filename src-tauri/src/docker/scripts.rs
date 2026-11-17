@@ -9,7 +9,13 @@ use data_encoding::BASE64;
 
 /// Put first in every script. The usual places for docker (also the snap one) even
 /// when the SSH login didn't set up a full PATH.
+/// The same list is DOCKER_PATH in src/lib/docker/logic.ts, for the terminal into a
+/// container; a test below checks that they agree.
 const PREAMBLE: &str = "PATH=\"$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin\"; export PATH\n";
+
+/// The same places for a single command that runs through the login shell rather than
+/// `sh -s`. `env`, because `PATH=… docker` isn't understood by csh or tcsh.
+const DOCKER_ENV: &str = "env PATH=\"$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin\" ";
 
 /// `s` as a single word for `sh`, whatever it holds.
 pub fn quote(s: &str) -> String {
@@ -225,10 +231,11 @@ pub fn disk_usage() -> String {
 
 /// The command that follows a container's log, run with a terminal so it stops when
 /// the channel closes. Runs through the login shell, so it is kept to plain words:
-/// `id` must already be checked to be a container id.
+/// `id` must already be checked to be a container id. Docker is looked for where the
+/// scripts look for it.
 pub fn follow_logs(id: &str, tail: Option<u32>) -> String {
     let tail = tail.map_or_else(|| "all".to_string(), |n| n.to_string());
-    format!("docker logs --follow --timestamps --tail {tail} {id}")
+    format!("{DOCKER_ENV}docker logs --follow --timestamps --tail {tail} {id}")
 }
 
 #[cfg(test)]
@@ -392,7 +399,35 @@ mod tests {
 
     #[test]
     fn logs_command_is_plain_words() {
-        assert_eq!(follow_logs("abc123abc123", Some(500)), "docker logs --follow --timestamps --tail 500 abc123abc123");
-        assert_eq!(follow_logs("abc123abc123", None), "docker logs --follow --timestamps --tail all abc123abc123");
+        let env = "env PATH=\"$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin\" ";
+        assert_eq!(follow_logs("abc123abc123", Some(500)), format!("{env}docker logs --follow --timestamps --tail 500 abc123abc123"));
+        assert_eq!(follow_logs("abc123abc123", None), format!("{env}docker logs --follow --timestamps --tail all abc123abc123"));
+    }
+
+    /// The scripts, the log command and the terminal into a container (built in the
+    /// front end) all look for docker in the same places, the snap's among them.
+    #[test]
+    fn docker_is_looked_for_in_the_same_places_everywhere() {
+        let path = "/usr/local/bin:/usr/bin:/bin:/snap/bin";
+        assert_eq!(PREAMBLE, format!("PATH=\"$PATH:{path}\"; export PATH\n"));
+        assert_eq!(DOCKER_ENV, format!("env PATH=\"$PATH:{path}\" "));
+        let logic = include_str!("../../../src/lib/docker/logic.ts");
+        assert!(
+            logic.contains(&format!("export const DOCKER_PATH = \"{path}\";")),
+            "DOCKER_PATH in src/lib/docker/logic.ts is not {path}"
+        );
+    }
+
+    /// A command run through the login shell gets the added places on its PATH.
+    #[cfg(unix)]
+    #[test]
+    fn a_single_command_gets_the_added_places() {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{DOCKER_ENV}sh -c 'echo \"$PATH\"'"))
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "/usr/bin:/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin");
     }
 }

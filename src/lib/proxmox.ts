@@ -1,6 +1,6 @@
 // Words and rules for the Proxmox screen. Kept apart from the store and the
 // components so they can be tested without a browser (proxmox.test.mjs).
-import type { GuestRef, PowerAction, ProxmoxGuest } from "./api";
+import type { Device, GuestRef, PowerAction, ProxmoxGuest } from "./api";
 
 /** What the owner is told to run on the Proxmox host to read its certificate's fingerprint. */
 export const CERT_COMMAND = "openssl x509 -noout -fingerprint -sha256 -in /etc/pve/local/pve-ssl.pem";
@@ -177,6 +177,27 @@ export function snapshotNameProblem(name: string): string | null {
 export function suggestedSnapshotName(at: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `snap_${at.getFullYear()}${p(at.getMonth() + 1)}${p(at.getDate())}_${p(at.getHours())}${p(at.getMinutes())}`;
+}
+
+/** The command, run on the Proxmox host in a terminal over SSH, that opens a guest's text console: "pct enter 101"
+ *  for a container, "qm terminal 110" for a VM (which works only if the VM has a serial port set up). Null for
+ *  an ID Proxmox can't have given (100 to 999999999), so nothing odd is ever run. */
+export function consoleCommand(g: { kind: GuestRef["kind"]; vmid: number }): string | null {
+  if (!Number.isInteger(g.vmid) || g.vmid < 100 || g.vmid > 999_999_999) return null;
+  return g.kind === "lxc" ? `pct enter ${g.vmid}` : `qm terminal ${g.vmid}`;
+}
+
+/** The terminal tab's name for a guest's console: "pihole1 (CT 101)", "homeassistant (VM 110)". */
+export function consoleTitle(g: ProxmoxGuest): string {
+  return `${guestName(g)} (${g.kind === "lxc" ? "CT" : "VM"} ${g.vmid})`;
+}
+
+/** Each of a guest's addresses with the home-cc device at it, if there is one (ignored devices don't count). */
+export function devicesAt(addresses: string[], list: Device[]): { ip: string; device: Device | null }[] {
+  return addresses.map((ip) => ({
+    ip,
+    device: list.find((d) => d.kind !== "ignore" && d.host.trim().toLowerCase() === ip.toLowerCase()) ?? null,
+  }));
 }
 
 /** The two commands that make a token for home-cc on the Proxmox host and give it what it needs. */

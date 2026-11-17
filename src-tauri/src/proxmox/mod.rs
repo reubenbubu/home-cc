@@ -29,7 +29,7 @@ use crate::error::{Error, Result};
 use crate::inventory::{Device, Inventory, Os, now};
 use crate::secrets;
 use client::{ApiError, Endpoint, Token, encode};
-use model::{GuestKind, Overview, SnapshotList, TaskState};
+use model::{GuestAddresses, GuestKind, Overview, SnapshotList, TaskState};
 use pin::same_fingerprint;
 use store::HostConfig;
 
@@ -469,6 +469,29 @@ impl Proxmox {
         };
         let what = format!("{verb} {}", guest.label());
         self.run_task(device_id, &ep, (Method::POST, &path, &[]), &guest.node, &what).await
+    }
+
+    /// A running guest's IPv4 addresses: a VM's from its QEMU guest agent, a
+    /// container's from Proxmox itself. A VM without the agent running isn't an
+    /// error: `unknown_why` says so.
+    pub async fn guest_addresses(&self, inv: &Inventory, device_id: i64, guest: &GuestRef) -> Result<GuestAddresses> {
+        let (path, read): (String, fn(&serde_json::Value) -> Vec<String>) = match guest.kind {
+            GuestKind::Qemu => (format!("{}/agent/network-get-interfaces", guest.path()?), model::parse_agent_addresses),
+            GuestKind::Lxc => (format!("{}/interfaces", guest.path()?), model::parse_lxc_addresses),
+        };
+        let ep = self.ready(inv, device_id).await?;
+        match self.call(device_id, &ep, Method::GET, &path, &[]).await {
+            Ok(data) => Ok(GuestAddresses { addresses: read(&data), unknown_why: None }),
+            Err(f) if f.kind == ProxmoxErrorKind::Other && guest.kind == GuestKind::Qemu && model::no_guest_agent(&f.message) => {
+                Ok(GuestAddresses {
+                    addresses: Vec::new(),
+                    unknown_why: Some(
+                        "Proxmox can't tell this VM's address: the QEMU guest agent isn't running in it.".into(),
+                    ),
+                })
+            }
+            Err(f) => Err(f.into()),
+        }
     }
 
     pub async fn snapshots(&self, inv: &Inventory, device_id: i64, guest: &GuestRef) -> Result<SnapshotList> {

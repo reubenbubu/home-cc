@@ -542,6 +542,15 @@ export interface SnapshotList {
   currentParent: string | null;
 }
 
+/** A running guest's addresses as Proxmox knows them: a VM's from its QEMU guest agent, a container's
+ *  from Proxmox itself. */
+export interface GuestAddresses {
+  /** IPv4, without loopback and link-local ones. */
+  addresses: string[];
+  /** Why Proxmox can't tell, when that is normal (no guest agent running in the VM). */
+  unknownWhy: string | null;
+}
+
 /** finished is false if Proxmox was still at it when home-cc stopped waiting; it carries on there. */
 export interface TaskOutcome {
   finished: boolean;
@@ -562,6 +571,9 @@ export const proxmoxApi = {
     invoke<void>("proxmox_trust_certificate", { deviceId, fingerprint }),
   power: (deviceId: number, guest: GuestRef, action: PowerAction) =>
     invoke<TaskOutcome>("proxmox_power", { deviceId, guest, action }),
+  /** A running guest's IPv4 addresses. Rejects for a real failure, not for a VM without the guest agent. */
+  guestAddresses: (deviceId: number, guest: GuestRef) =>
+    invoke<GuestAddresses>("proxmox_guest_addresses", { deviceId, guest }),
   snapshots: (deviceId: number, guest: GuestRef) => invoke<SnapshotList>("proxmox_snapshots", { deviceId, guest }),
   /** withRam only applies to VMs. */
   takeSnapshot: (deviceId: number, guest: GuestRef, name: string, description: string, withRam: boolean) =>

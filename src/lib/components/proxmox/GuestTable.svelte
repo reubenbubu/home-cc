@@ -217,6 +217,13 @@
   @container (max-width: 52rem) {
     .c-id { display: none; }
   }
+  /* The smallest window zoomed right in: name, state and the buttons are what matter (Manage shows the rest). */
+  @container (max-width: 44rem) {
+    .c-cpu { display: none; }
+  }
+  @container (max-width: 36rem) {
+    .c-ram { display: none; }
+  }
 
   .stale tbody { opacity: 0.6; }
 </style>

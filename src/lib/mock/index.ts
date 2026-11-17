@@ -156,7 +156,8 @@ export function installMock() {
     dev("NAS", "192.168.68.10", "server", "windows", "noPing", { sshUser: "admin", mac: "d8:bb:c1:7a:02:6e", vendor: "Micro-Star INTL Co., Ltd.", hostname: "NAS" }),
     dev("Homelab VM", "192.168.68.21", "vm", "linux", "wired", { sshUser: "sam", mac: "00:15:5d:44:0a:01", vendor: "Microsoft Corporation", hostname: "homelab" }),
     dev("Dev VM", "192.168.68.22", "vm", "linux", "wired", { sshUser: "sam", mac: "00:15:5d:44:0a:02", vendor: "Microsoft Corporation", hostname: "dev" }),
-    dev("Proxmox", "192.168.68.30", "server", "proxmox", "wired", { sshUser: "root", mac: "b0:7b:25:1c:9e:40", vendor: "Dell Inc.", hostname: "pve" }),
+    // "?pvenossh": no SSH user for the Proxmox host, so its consoles can't be opened (the API token is separate).
+    dev("Proxmox", "192.168.68.30", "server", "proxmox", "wired", { sshUser: query.has("pvenossh") ? null : "root", mac: "b0:7b:25:1c:9e:40", vendor: "Dell Inc.", hostname: "pve" }),
     dev("Pi-hole 1", "192.168.68.31", "container", "linux", "wired", { sshUser: "root", mac: "bc:24:11:3a:55:01", vendor: "Proxmox Server Solutions GmbH", hostname: "pihole1" }),
     dev("Pi-hole 2", "192.168.68.32", "container", "linux", "wired", { mac: "bc:24:11:3a:55:02", vendor: "Proxmox Server Solutions GmbH", hostname: "pihole2" }),
     dev("Monitoring", "192.168.68.33", "container", "linux", "wired", { sshUser: "root", mac: "bc:24:11:3a:55:03", vendor: "Proxmox Server Solutions GmbH", hostname: "monitoring", notes: "Prometheus and Grafana" }),

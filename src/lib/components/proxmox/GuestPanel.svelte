@@ -1,11 +1,17 @@
 <script lang="ts">
-  // One VM or container: start, resume, shut down, restart and force stop, and its snapshots (take, roll
-  // back, delete). Everything that stops it, rolls it back or deletes asks first (spec section 7).
-  import { errorText, proxmoxApi, type Device, type ProxmoxGuest, type SnapshotList } from "$lib/api";
+  // One VM or container: start, resume, shut down, restart and force stop, its console, and its snapshots
+  // (take, roll back, delete). Everything that stops it, rolls it back or deletes asks first (spec section 7).
+  import { errorText, proxmoxApi, type Device, type GuestAddresses, type ProxmoxGuest, type SnapshotList } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
+  import { devices } from "$lib/devices.svelte";
+  import { icons } from "$lib/icons";
+  import { openTerminal } from "$lib/terminals.svelte";
   import { relTime, share, uptime, usedOfTotal } from "$lib/format";
   import {
     actionWords,
+    consoleCommand,
+    consoleTitle,
+    devicesAt,
     guestId,
     guestKey,
     guestName,
@@ -22,7 +28,9 @@
   } from "$lib/proxmox";
   import { proxmox } from "$lib/proxmox.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
+  import Address from "../Address.svelte";
   import ConfirmButton from "../ConfirmButton.svelte";
+  import Icon from "../Icon.svelte";
   import Meter from "../Meter.svelte";
   import Problem from "../Problem.svelte";
 
@@ -124,6 +132,43 @@
     return /ago|now|yesterday/.test(rel) ? `Taken ${rel}, ${when}` : `Taken ${when}`;
   }
 
+  // --- Console: a terminal on the Proxmox host over SSH that runs pct enter (a container) or qm terminal (a
+  // VM's serial console), or, for a VM whose address is a machine in home-cc, a terminal on that machine.
+  const running = $derived(guest.status === "running" && !guest.template);
+  /** The Proxmox host's own SSH login, which the console needs; the API token is separate. */
+  const sshUser = $derived(device.sshUser?.trim() || null);
+  const command = $derived(consoleCommand(guest));
+
+  let addrs = $state<GuestAddresses | null>(null);
+  let addrsFor = $state<string | null>(null);
+  let addrsError = $state<string | null>(null);
+  const atAddresses = $derived(devicesAt(addrs?.addresses ?? [], devices.list));
+
+  async function loadAddresses(forKey: string) {
+    try {
+      const found = await proxmoxApi.guestAddresses(device.id, ref);
+      if (forKey !== addrsFor) return;
+      addrs = found;
+      addrsError = null;
+    } catch (e) {
+      if (forKey === addrsFor) addrsError = errorText(e);
+    }
+  }
+
+  // Asked once for each guest while it runs (and again when it starts).
+  $effect(() => {
+    const want = running ? key : null;
+    if (want === addrsFor) return;
+    addrsFor = want;
+    addrs = null;
+    addrsError = null;
+    if (want) loadAddresses(want);
+  });
+
+  function openConsole() {
+    if (command && sshUser) void openTerminal({ deviceId: device.id, title: consoleTitle(guest), command });
+  }
+
   const newestFirst = $derived(snaps ? [...snaps.snapshots].reverse() : []);
   const canSnapshot = $derived(!guest.template);
 </script>
@@ -206,6 +251,68 @@
     {:else}
       <Problem problem={problem(`Changing ${guestId(guest)} ("${guestName(guest)}")`, outcome.text)} />
     {/if}
+  {/if}
+
+  {#if running}
+    <section class="console" aria-label="Console">
+      <h3 class="section-title">Console</h3>
+      {#if addrsError}
+        <Problem tone="warn" problem={problem(`Reading the address of ${guestId(guest)} ("${guestName(guest)}")`, addrsError)} />
+      {:else if addrs?.unknownWhy}
+        <p class="muted small">{addrs.unknownWhy}</p>
+      {:else if atAddresses.length}
+        <ul class="addrs" aria-label="Addresses">
+          {#each atAddresses as at (at.ip)}
+            <li>
+              <Address host={at.ip} known={at.device?.hostname ?? null} />
+              {#if at.device}
+                <span class="muted small">
+                  · {at.device.name} in home-cc{#if !at.device.sshUser?.trim()}, with no SSH user:
+                    <a href="/machines?edit={at.device.id}">add one</a>{guest.kind === "qemu" ? " to open a terminal on it" : ""}{/if}
+                </span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <div class="buttons">
+        <button
+          class="btn small"
+          disabled={!sshUser || !command}
+          title={sshUser ? `A terminal on ${device.name} that runs ${command}` : `Needs an SSH user for ${device.name}`}
+          onclick={openConsole}
+        >
+          <Icon path={icons.terminal} size={15} />
+          {guest.kind === "lxc" ? "Open console" : "Serial console"}
+        </button>
+        {#if guest.kind === "qemu"}
+          {#each atAddresses as at (at.ip)}
+            {#if at.device?.sshUser?.trim()}
+              {@const target = at.device}
+              <button class="btn small" title="A terminal on {target.name} over its own SSH login" onclick={() => openTerminal({ deviceId: target.id, title: target.name })}>
+                <Icon path={icons.terminal} size={15} /> Terminal on {target.name}
+              </button>
+            {/if}
+          {/each}
+        {/if}
+      </div>
+      {#if !sshUser}
+        <p class="muted small">
+          The console is a terminal on {device.name} over SSH, which needs an SSH user for it (the API token is only for
+          Proxmox's web API). <a href="/machines?edit={device.id}">Add an SSH user to {device.name}</a>
+        </p>
+      {:else}
+        {#if guest.kind === "qemu"}
+          <p class="muted small">The serial console needs a serial port set up on the VM. Ctrl+O leaves it.</p>
+        {/if}
+        {#if sshUser !== "root"}
+          <p class="muted small">
+            {guest.kind === "lxc" ? "pct" : "qm"} needs root on {device.name}, and home-cc logs in there as {sshUser}, so it
+            may be refused.
+          </p>
+        {/if}
+      {/if}
+    </section>
   {/if}
 
   {#if canSnapshot}
@@ -301,6 +408,12 @@
   .buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .done { color: var(--ok); }
   .bad { color: var(--bad); margin-top: -0.5rem; }
+
+  .console { display: flex; flex-direction: column; gap: 0.55rem; border-top: 1px solid var(--border); padding-top: 0.9rem; }
+  .console .section-title { margin: 0; }
+  .console .btn { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .addrs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+  .addrs li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.2rem 0.7rem; min-width: 0; }
 
   .snaps { display: flex; flex-direction: column; gap: 0.8rem; border-top: 1px solid var(--border); padding-top: 0.9rem; }
   .snaps .section-title { margin: 0; }

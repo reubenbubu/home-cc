@@ -153,7 +153,7 @@
     gap: 0.6rem;
     padding: 0.85rem 1rem 0.8rem;
     min-width: 0;
-    --cols: minmax(9rem, 1.6fr) minmax(7.5rem, 1.1fr) minmax(6rem, 1fr) 3.6rem 4.8rem 12.8rem;
+    --cols: minmax(8rem, 1.6fr) minmax(7.5rem, 1.1fr) minmax(5rem, 1fr) 3.6rem 4.8rem 15.1rem;
   }
   header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; min-width: 0; }
   .title { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; }
@@ -207,7 +207,9 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
-  @container stack (max-width: 46rem) {
+  /* Below what the columns need: the minimums in --cols (44rem) and five gaps of 0.9rem. Change it with them,
+     here and in ContainerRow.svelte. */
+  @container stack (max-width: 49rem) {
     .head { display: none; }
   }
 </style>

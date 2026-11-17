@@ -10,6 +10,7 @@
   import { proxmox } from "$lib/proxmox.svelte";
   import { deviceDetails } from "$lib/problems.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
+  import Address from "../Address.svelte";
   import Icon from "../Icon.svelte";
   import Problem from "../Problem.svelte";
   import CertCheck from "./CertCheck.svelte";
@@ -80,7 +81,7 @@
   <div class="bar">
     <span class="muted small">
       <strong class="name">{device.name}</strong>
-      <span class="mono">· {device.host}</span>
+      <span>·</span> <Address host={device.host} known={device.hostname} />
       {#if good}
         <span>· {stale ? "Last good reading" : "Updated"} {relTime(good.fetchedAt, clock.now)}</span>
       {/if}

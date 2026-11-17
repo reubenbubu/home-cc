@@ -6,6 +6,7 @@
   import { DEFAULT_TOKEN_ID, tokenCommands } from "$lib/proxmox";
   import { proxmox } from "$lib/proxmox.svelte";
   import type { Problem as ProblemInfo } from "$lib/report";
+  import Address from "../Address.svelte";
   import ConfirmButton from "../ConfirmButton.svelte";
   import Icon from "../Icon.svelte";
   import Problem from "../Problem.svelte";
@@ -102,7 +103,7 @@
       {/if}
       <label class="port">API port <input class="mono" type="number" min="1" max="65535" bind:value={port} /></label>
       <p class="hint">
-        home-cc talks to {device.host} on this port (Proxmox uses 8006). The secret is kept in your system's keychain,
+        home-cc talks to <Address host={device.host} known={device.hostname} /> on this port (Proxmox uses 8006). The secret is kept in your system's keychain,
         never shown again, and only sent once you have approved the host's certificate.
       </p>
       {#if error}<Problem problem={error} />{/if}

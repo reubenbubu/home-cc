@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   containerKey,
+  commandShown,
   defaultPick,
+  DOCKER_PATH,
+  execCommand,
   keptSelection,
   highlight,
   keepLast,
@@ -11,6 +14,7 @@ import {
   logLine,
   matches,
   pickTotals,
+  portShown,
   portText,
   shownHosts,
   stackKey,
@@ -41,6 +45,10 @@ test("ports read like docker's own list", () => {
   assert.equal(portText({ hostPort: 53, hostIp: "192.168.68.21", containerPort: 53, protocol: "udp" }), "192.168.68.21:53→53/udp");
   assert.equal(portText({ hostPort: 80, hostIp: "fe80::1", containerPort: 80, protocol: "tcp" }), "[fe80::1]:80→80/tcp");
   assert.equal(portText({ hostPort: null, hostIp: null, containerPort: 8920, protocol: "tcp" }), "8920/tcp");
+  // On screen the address is a field of its own, with its hostname.
+  assert.deepEqual(portShown({ hostPort: 53, hostIp: "192.168.68.21", containerPort: 53, protocol: "udp" }), { text: "53→53/udp", ip: "192.168.68.21" });
+  assert.deepEqual(portShown({ hostPort: 8096, hostIp: null, containerPort: 8096, protocol: "tcp" }), { text: "8096→8096/tcp", ip: null });
+  assert.deepEqual(portShown({ hostPort: null, hostIp: null, containerPort: 8920, protocol: "tcp" }), { text: "8920/tcp", ip: null });
 });
 
 test("state words and colours", () => {
@@ -166,4 +174,28 @@ test("cleanup picks everything but named volumes, and adds up what it frees", ()
   assert.deepEqual(pickTotals(preview, { containers: [], images: [], volumes: ["photos_db"], buildCache: false }), { count: 1, bytes: 5000 });
   const empty = { containers: [], images: [], volumes: [], buildCacheCount: 0, buildCacheBytes: 0 };
   assert.equal(defaultPick(empty).buildCache, false);
+});
+
+test("a terminal into a container names it only as Docker could have", () => {
+  const env = 'env PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/snap/bin" ';
+  const shell = "sh -c 'command -v bash >/dev/null && exec bash || exec sh'";
+  assert.equal(execCommand({ id: "a".repeat(64), name: "media-jellyfin-1" }), `${env}docker exec -it media-jellyfin-1 ${shell}`);
+  assert.equal(execCommand({ id: "a".repeat(64), name: "web_2.old" }), `${env}docker exec -it web_2.old ${shell}`);
+  // A name that isn't one Docker gives: the id instead, if it is one.
+  assert.equal(execCommand({ id: "0123456789ab", name: "x; rm -rf ~" }), `${env}docker exec -it 0123456789ab ${shell}`);
+  for (const name of ["", "-it", "--privileged", "a b", "a'b", "$(id)", "/web", "ünïcode", "a\nb"]) {
+    assert.equal(execCommand({ id: "not-hex!", name }), null, JSON.stringify(name));
+  }
+  for (const id of ["ABCDEF012345", "abc", "a".repeat(65), "0123456789ab;id"]) {
+    assert.equal(execCommand({ id, name: "" }), null, id);
+  }
+});
+
+test("a container's terminal looks for docker where the Docker module does, and that PATH isn't shown by the tab", () => {
+  // The same list as PREAMBLE in src-tauri/src/docker/scripts.rs (a Rust test there checks this file).
+  assert.equal(DOCKER_PATH, "/usr/local/bin:/usr/bin:/bin:/snap/bin");
+  const command = execCommand({ id: "a".repeat(64), name: "web" });
+  assert.equal(commandShown(command), "docker exec -it web sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
+  assert.equal(commandShown("pct enter 101"), "pct enter 101");
+  assert.equal(commandShown('PATH="$PATH:/x" docker ps'), 'PATH="$PATH:/x" docker ps');
 });

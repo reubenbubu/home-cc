@@ -110,6 +110,7 @@ pub fn run() {
             proxmox::commands::proxmox_status,
             proxmox::commands::proxmox_trust_certificate,
             proxmox::commands::proxmox_power,
+            proxmox::commands::proxmox_guest_addresses,
             proxmox::commands::proxmox_snapshots,
             proxmox::commands::proxmox_take_snapshot,
             proxmox::commands::proxmox_rollback,

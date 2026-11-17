@@ -10,6 +10,7 @@
   import { docker, REFRESH_SECS } from "$lib/docker/store.svelte";
   import { count, relTime } from "$lib/format";
   import { icons } from "$lib/icons";
+  import Address from "$lib/components/Address.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Problem from "$lib/components/Problem.svelte";
   import CleanupPanel from "$lib/components/docker/CleanupPanel.svelte";
@@ -143,7 +144,7 @@
         </div>
       {:else if host}
         <p class="summary muted small">
-          <span class="mono">{device?.host}</span>
+          {#if device}<Address host={device.host} known={device.hostname} />{/if}
           {#if host.version}<span>Docker {host.version}</span>{/if}
           {#if overview}
             <span>{count(overview.stacks.length, "stack")}, {count(all.length, "container")} ({running} running)</span>
