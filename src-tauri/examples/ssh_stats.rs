@@ -8,8 +8,11 @@
 //!   --os KIND            linux (default), windows, proxmox or other
 //!   --key FILE           private key file; without it the usual ones in ~/.ssh are tried
 //!   --known-alg A --known-fp F
-//!                        the identity stored for the machine ("ssh-ed25519", "SHA256:...");
-//!                        without them whatever the machine shows is trusted
+//!                        the identity stored for the machine ("ssh-ed25519", "SHA256:...").
+//!                        Without them this is a first connection: the identity the machine
+//!                        shows is printed as `first use: ...` before anything is offered
+//!                        to it, a key or the agent may log in, and the password is not
+//!                        sent (the run ends with `error[newHost]` if only it could get in)
 //!   --again SECS         read the stats a second time after SECS seconds, checking the
 //!                        identity from the first reading (this one has a CPU percentage)
 //!   --exec CMD           run CMD instead of reading stats and print what it printed
@@ -20,7 +23,8 @@
 //! show up in the process list: SSH_STATS_PASSWORD and SSH_STATS_PASSPHRASE.
 //!
 //! Exit code 0 if everything worked, 1 if not. Failures print as `error[kind]: message`,
-//! where kind is hostKeyChanged, auth, unreachable or other, as on the screens.
+//! where kind is newHost, hostKeyChanged, auth, unreachable or other, as on the screens.
+//! newHost and hostKeyChanged also print the identity the machine showed (`offered:`).
 
 use home_cc_lib::inventory::Os;
 use home_cc_lib::ssh::{self, HostKey, Login, SshError};
@@ -39,14 +43,30 @@ fn secret(name: &str) -> Option<String> {
 
 fn fail(e: &SshError, took: Duration) -> ExitCode {
     let kind = match e {
+        SshError::NewHost(_) => "newHost",
         SshError::HostKeyChanged { .. } => "hostKeyChanged",
         SshError::AuthFailed(_) => "auth",
         SshError::Unreachable(_) => "unreachable",
         SshError::Other(_) => "other",
     };
     println!("error[{kind}]: {e}");
+    match e {
+        SshError::NewHost(offered) => println!("  offered: {} {}", offered.algorithm, offered.fingerprint),
+        SshError::HostKeyChanged { expected, got } => {
+            println!("  stored: {} {}", expected.algorithm, expected.fingerprint);
+            println!("  offered: {} {}", got.algorithm, got.fingerprint);
+        }
+        _ => {}
+    }
     println!("  after {took:.1?}");
     ExitCode::FAILURE
+}
+
+/// On a first connection the app stores the identity here, unless a password is stored
+/// for the machine: then it waits for the owner to approve it (see `ssh::connect`). Here
+/// it is printed, straight away, so the output shows it came before the login.
+fn first_use(key: &HostKey) {
+    println!("first use: {} {}", key.algorithm, key.fingerprint);
 }
 
 fn show(reading: &Collected, took: Duration) {
@@ -106,7 +126,7 @@ async fn main() -> ExitCode {
         };
         let limit = Duration::from_secs(arg("--timeout").and_then(|t| t.parse().ok()).unwrap_or(10));
         let started = Instant::now();
-        let session = match ssh::connect(&login).await {
+        let session = match ssh::connect(&login, &first_use).await {
             Ok(session) => session,
             Err(e) => return fail(&e, started.elapsed()),
         };
@@ -143,7 +163,7 @@ async fn main() -> ExitCode {
     }
 
     let started = Instant::now();
-    let first = match stats::collect(&login, os, None).await {
+    let first = match stats::collect(&login, os, None, &first_use).await {
         Ok(reading) => reading,
         Err(e) => return fail(&e, started.elapsed()),
     };
@@ -154,7 +174,7 @@ async fn main() -> ExitCode {
         // What the app does: the identity from the first reading is now the stored one.
         login.known_key = Some(first.host_key.clone());
         let started = Instant::now();
-        match stats::collect(&login, os, first.cpu_ticks).await {
+        match stats::collect(&login, os, first.cpu_ticks, &first_use).await {
             Ok(reading) => show(&reading, started.elapsed()),
             Err(e) => return fail(&e, started.elapsed()),
         }

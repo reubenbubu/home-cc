@@ -4,12 +4,14 @@
 //! [`connect`] checks the server's identity first and only then logs in, with
 //! whatever works: keys held by an SSH agent, key files, then the stored
 //! password. A key file the owner set up in Settings goes before the agent.
-//! Everything is bounded by time limits, and text from the server is treated
-//! as untrusted. Nothing here needs administrator rights.
+//! The stored password is only ever sent to a machine whose identity is
+//! already stored; on a first connection it is held back (see
+//! [`SshError::NewHost`]). Everything is bounded by time limits, and text from
+//! the server is treated as untrusted. Nothing here needs administrator rights.
 
 use std::borrow::Cow;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -39,7 +41,10 @@ pub struct Login {
     pub port: u16,
     pub user: String,
     /// The identity stored for this machine, if it has been reached before.
-    /// None means trust whatever the server presents (first use).
+    /// None means a first connection: whatever the server presents is accepted for
+    /// logging in with a key, but the stored password is not sent to it. An identity in
+    /// here is what lets the stored password out, so [`connect`] says when one may be
+    /// stored.
     pub known_key: Option<HostKey>,
     /// Private key file chosen in settings. None means try the usual files
     /// in the user's .ssh folder.
@@ -49,11 +54,35 @@ pub struct Login {
     pub password: Option<String>,
 }
 
+impl Login {
+    /// True if a password is stored for this machine; an empty one does not count. On a
+    /// first connection this decides whether the identity handed to `first_use` may be
+    /// stored without asking the owner: see [`connect`].
+    pub fn has_password(&self) -> bool {
+        self.password.as_deref().is_some_and(|p| !p.is_empty())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
-    /// The server's identity is not the one stored. Never ignored silently.
-    #[error("This machine's identity has changed since home-cc first reached it (was {expected}, now {got})")]
-    HostKeyChanged { expected: String, got: String },
+    /// The server's identity is not the one stored. Never ignored silently, and nothing
+    /// is offered to the server. `got` is what it shows now, for the owner to check.
+    #[error(
+        "This machine's identity has changed since home-cc first reached it (was {}, now {})",
+        .expected.fingerprint,
+        .got.fingerprint
+    )]
+    HostKeyChanged { expected: HostKey, got: HostKey },
+    /// A first connection (no identity stored) that could only get in with the stored
+    /// password, to a server that takes passwords. The password was not sent: the owner
+    /// has to approve the identity in here first, and it then comes back in as
+    /// [`Login::known_key`].
+    #[error(
+        "This is the first connection to this machine, so the stored password was not sent. Approve this \
+         machine's identity ({}) first.",
+        .0.fingerprint
+    )]
+    NewHost(HostKey),
     /// No key, agent or password was accepted. The text says what was tried.
     #[error("{0}")]
     AuthFailed(String),
@@ -127,9 +156,33 @@ impl std::fmt::Debug for Session {
 
 /// Connect and log in. If `login.known_key` is set and the server shows a different
 /// identity, this fails with [`SshError::HostKeyChanged`] before any key or password is
-/// offered. If it is not set, whatever the server shows is accepted: read it from
-/// [`Session::host_key`] and store it.
-pub async fn connect(login: &Login) -> Result<Session, SshError> {
+/// offered.
+///
+/// If it is not set, this is a first connection. `first_use` is called once with the
+/// identity the server showed, before anything is offered to it, so the caller has it
+/// even if the login or what follows then fails. Key files and the agent are then tried
+/// as usual: they give the server nothing it could use elsewhere. The stored password is
+/// not sent. If nothing else gets in and the password is all that is left to try (one
+/// is stored and the server takes passwords), this fails with [`SshError::NewHost`]; the
+/// password gets its turn once the owner has approved the identity and it comes back in
+/// `login.known_key`. If the password would have had no turn anyway (the server takes
+/// keys only, or closed the connection first), approving would change nothing, so the
+/// failure is [`SshError::AuthFailed`] as on any other connection.
+///
+/// What `first_use` may do with the identity depends on [`Login::has_password`], because
+/// an identity in `login.known_key` counts as approved by the owner, wherever it came
+/// from, and the stored password is sent to it:
+/// - No password stored: store it there and then. Nothing that could be used elsewhere
+///   is ever sent to this machine, and a later change of identity is noticed.
+/// - A password stored: do NOT store it from `first_use`. It would come back as
+///   `known_key` on the next connection and the password would go to a machine nobody
+///   has looked at. Store it only once the owner has approved the identity shown with
+///   [`SshError::NewHost`], or once this function has returned a [`Session`] (a key got
+///   in without the password; the identity is in [`Session::host_key`]).
+pub async fn connect(
+    login: &Login,
+    first_use: &(dyn Fn(&HostKey) + Send + Sync),
+) -> Result<Session, SshError> {
     let deadline = Instant::now() + CONNECT_LIMIT;
     let host = login.host.trim();
     let user = login.user.trim();
@@ -144,8 +197,7 @@ pub async fn connect(login: &Login) -> Result<Session, SshError> {
 
     let stream = open_tcp(host, login.port).await?;
     let seen = Arc::new(Mutex::new(Seen::default()));
-    let handler =
-        Handler { expected: login.known_key.as_ref().map(|k| k.fingerprint.clone()), seen: seen.clone() };
+    let handler = Handler { expected: login.known_key.clone(), seen: seen.clone() };
     let config = Arc::new(config(login.known_key.as_ref()));
     // Version exchange, key exchange and the identity check. Nothing secret is sent yet.
     let mut handle = match timeout_at(deadline, client::connect_stream(config, stream, handler)).await {
@@ -169,6 +221,10 @@ pub async fn connect(login: &Login) -> Result<Session, SshError> {
     let Some(host_key) = host_key else {
         return Err(SshError::Other(format!("{host} did not show its identity, so home-cc did not log in.")));
     };
+    // Still nothing has been offered to the server, not even the user name.
+    if login.known_key.is_none() {
+        first_use(&host_key);
+    }
 
     let mut auth = Auth::new(&mut handle, user);
     let logged_in = match timeout_at(deadline, auth.run(login)).await {
@@ -181,17 +237,26 @@ pub async fn connect(login: &Login) -> Result<Session, SshError> {
         }
     };
     if !logged_in {
-        let password_stored = login.password.as_deref().is_some_and(|p| !p.is_empty());
-        let windows_server = server_version.contains("Windows");
-        let message = auth_message(host, user, &auth.tried, password_stored, windows_server);
+        // The stored password would have been sent, and was held back only because nobody
+        // has approved this identity. It may well be what gets in, so ask for the
+        // approval instead of calling the login failed. Where the password had no turn
+        // anyway (the server takes keys only, or hung up first) approving would change
+        // nothing, so that is a failed login like any other, with its advice.
+        let error = if auth.tried.contains(&Tried::PasswordWithheld) {
+            SshError::NewHost(host_key)
+        } else {
+            let windows_server = server_version.contains("Windows");
+            SshError::AuthFailed(auth_message(host, user, &auth.tried, login.has_password(), windows_server))
+        };
         say_goodbye(&handle).await;
-        return Err(SshError::AuthFailed(message));
+        return Err(error);
     }
     Ok(Session { handle, host: host.to_string(), host_key, server_version })
 }
 
 impl Session {
-    /// The identity the server showed. Store it if the machine had none stored.
+    /// The identity the server showed. On a first connection it is the one that was
+    /// handed to `first_use`.
     pub fn host_key(&self) -> &HostKey {
         &self.host_key
     }
@@ -357,6 +422,14 @@ async fn open_tcp(host: &str, port: u16) -> Result<TcpStream, SshError> {
             "The name {host} was not found. Check the spelling, or use the machine's IP address."
         ))
     };
+    // The system would read "192.168.1" as 192.168.0.1 and connect to a machine nobody
+    // typed, so text like that never reaches the name lookup.
+    if incomplete_address(host) {
+        return Err(SshError::Unreachable(format!(
+            "{host} is not a full address. An address needs four numbers, like 192.168.1.20: correct it \
+             for this machine."
+        )));
+    }
     let deadline = Instant::now() + TCP_LIMIT;
     let addrs: Vec<SocketAddr> = match timeout_at(deadline, tokio::net::lookup_host((host, port))).await {
         Ok(Ok(addrs)) => addrs.collect(),
@@ -371,6 +444,14 @@ async fn open_tcp(host: &str, port: u16) -> Result<TcpStream, SshError> {
     // Terminals send single key presses; don't let the system hold them back to batch them.
     let _ = stream.set_nodelay(true);
     Ok(stream)
+}
+
+/// True for text made only of digits and dots that is not a full IPv4 address, such as
+/// "192.168.1" or "10.5". Systems accept these old short forms and fill in the gaps.
+fn incomplete_address(host: &str) -> bool {
+    !host.is_empty()
+        && host.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && host.parse::<Ipv4Addr>().is_err()
 }
 
 /// Try each address in turn until one connects, all of it over by `deadline`. An address
@@ -478,7 +559,7 @@ fn host_key_preference(stored: &str) -> Cow<'static, [Algorithm]> {
 /// into the handler's error type, which is why this is not [`SshError`].
 #[derive(Debug)]
 enum Fail {
-    HostKeyChanged { expected: String, got: String },
+    HostKeyChanged { expected: HostKey, got: HostKey },
     Russh(russh::Error),
 }
 
@@ -501,8 +582,8 @@ fn lock(seen: &Mutex<Seen>) -> MutexGuard<'_, Seen> {
 }
 
 struct Handler {
-    /// The fingerprint the server must show. None until the first one is seen.
-    expected: Option<String>,
+    /// The identity the server must show. None until the first one is seen.
+    expected: Option<HostKey>,
     seen: Arc<Mutex<Seen>>,
 }
 
@@ -521,12 +602,14 @@ impl client::Handler for Handler {
             PublicKeyOrCertificate::Certificate(_) => return Err(Fail::Russh(russh::Error::UnknownKey)),
         };
         if let Some(expected) = &self.expected {
-            if *expected != key.fingerprint {
-                return Err(Fail::HostKeyChanged { expected: expected.clone(), got: key.fingerprint });
+            // The fingerprint is worked out from the kind of key as well as the key, so
+            // comparing it is enough.
+            if expected.fingerprint != key.fingerprint {
+                return Err(Fail::HostKeyChanged { expected: expected.clone(), got: key });
             }
         }
         // Keys are exchanged again on a long connection: the identity must stay the same.
-        self.expected = Some(key.fingerprint.clone());
+        self.expected = Some(key.clone());
         lock(&self.seen).key = Some(key);
         Ok(true)
     }
@@ -567,6 +650,9 @@ enum Tried {
     /// The key file was left out because the server allows only a few tries.
     KeyNotTried(String),
     PasswordRefused,
+    /// A password is stored and the server would have been sent it, but its identity is
+    /// new, so it was held back. The login then ends as [`SshError::NewHost`].
+    PasswordWithheld,
     /// A password is stored but the server takes keys only.
     PasswordNotTaken,
     /// The server takes a password only.
@@ -852,14 +938,26 @@ impl<'a> Auth<'a> {
     }
 
     async fn password(&mut self, login: &Login) -> bool {
-        let password = login.password.as_deref().filter(|p| !p.is_empty());
-        let (Some(password), false) = (password, self.gone) else {
-            if self.gone {
-                self.tried.push(Tried::CutOff);
-            }
+        if self.gone {
+            self.tried.push(Tried::CutOff);
+            return false;
+        }
+        let stored = password_to_send(login);
+        if stored == Password::NotStored {
+            return false;
+        }
+        // Whether the server would be sent the password at all comes first, so that
+        // "held back" is only ever said of a server that takes passwords.
+        let plain = self.allows(MethodKind::Password);
+        if !plain && !self.allows(MethodKind::KeyboardInteractive) {
+            self.tried.push(Tried::PasswordNotTaken);
+            return false;
+        }
+        let Password::Send(password) = stored else {
+            self.tried.push(Tried::PasswordWithheld);
             return false;
         };
-        let logged_in = if self.allows(MethodKind::Password) {
+        let logged_in = if plain {
             match self.handle.authenticate_password(self.user, password).await {
                 Ok(result) => self.accepted(result),
                 Err(_) => {
@@ -867,11 +965,8 @@ impl<'a> Auth<'a> {
                     return false;
                 }
             }
-        } else if self.allows(MethodKind::KeyboardInteractive) {
-            self.typed_password(password).await
         } else {
-            self.tried.push(Tried::PasswordNotTaken);
-            return false;
+            self.typed_password(password).await
         };
         if !logged_in {
             self.tried.push(Tried::PasswordRefused);
@@ -880,7 +975,8 @@ impl<'a> Auth<'a> {
     }
 
     /// Some servers take the password only as the typed answer to a question (their
-    /// "keyboard-interactive" way). Answer the hidden-input question with it.
+    /// "keyboard-interactive" way). Answer the hidden-input question with it. Only ever
+    /// given what [`password_to_send`] let through.
     async fn typed_password(&mut self, password: &str) -> bool {
         let mut reply = self.handle.authenticate_keyboard_interactive_start(self.user, None::<String>).await;
         let mut answered = false;
@@ -913,6 +1009,28 @@ impl<'a> Auth<'a> {
             }
         }
         false
+    }
+}
+
+/// Whether there is a password for this login and whether it may leave this PC.
+#[derive(Debug, PartialEq, Eq)]
+enum Password<'a> {
+    Send(&'a str),
+    /// One is stored, but the server's identity has not been seen and approved before.
+    /// Whoever receives a password can use it again, so it stays here.
+    Withheld,
+    NotStored,
+}
+
+/// The one place that decides whether the stored password is sent, for the plain
+/// password login and for the typed answer alike. With an identity in `known_key` the
+/// server has already shown exactly that one by the time anything is sent, or the
+/// connection would have ended with [`SshError::HostKeyChanged`].
+fn password_to_send(login: &Login) -> Password<'_> {
+    match login.password.as_deref().filter(|p| !p.is_empty()) {
+        None => Password::NotStored,
+        Some(_) if login.known_key.is_none() => Password::Withheld,
+        Some(password) => Password::Send(password),
     }
 }
 
@@ -1112,6 +1230,12 @@ fn auth_message(
                 "The key file {name} was not tried, because that machine allows only a few attempts: choose \
                  it as the key file in Settings."
             )),
+            // Not shown as things stand, because `connect` answers with `NewHost` instead.
+            // Kept true, so the sentence is right if that ever changes.
+            Tried::PasswordWithheld => notes.push(
+                "The stored password was not sent, because this is the first connection to this machine."
+                    .into(),
+            ),
             Tried::PasswordNotTaken => notes.push("This machine does not take passwords, only keys.".into()),
             Tried::KeysNotTaken if !password_stored => {
                 notes.push("This machine takes a password only, not keys: store a password for it.".into())
@@ -1172,9 +1296,205 @@ fn join_list(items: &[String]) -> String {
     }
 }
 
+/// A small SSH server that runs inside the test process, so the rules about what is
+/// offered to a machine, and when, are checked against what a server really received.
+/// It listens on 127.0.0.1 only and writes down every login attempt it is sent.
+#[cfg(test)]
+pub(crate) mod test_server {
+    use super::*;
+    use russh::keys::ssh_key::LineEnding;
+    use russh::keys::ssh_key::private::Ed25519Keypair;
+    use russh::server::{self, Auth, PublicKeyOffer, Response, VerifiedPublicKey};
+
+    /// The only user the server lets in.
+    pub(crate) const USER: &str = "jim";
+    /// The only password it accepts, sent plainly or typed as an answer.
+    pub(crate) const PASSWORD: &str = "correct horse battery";
+
+    /// A key made from fixed bytes, so no key text has to live in the source.
+    fn key(seed: u8) -> PrivateKey {
+        PrivateKey::from(Ed25519Keypair::from_seed(&[seed; 32]))
+    }
+
+    /// The private key the server accepts for [`USER`], as the text of a key file.
+    pub(crate) fn client_key_file() -> String {
+        key(2).to_openssh(LineEnding::LF).unwrap().to_string()
+    }
+
+    pub(crate) struct TestServer {
+        pub(crate) port: u16,
+        /// The identity it shows, as [`connect`] reports it.
+        pub(crate) host_key: HostKey,
+        attempts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestServer {
+        /// Every login attempt received so far, oldest first: "none" (the question
+        /// about what is accepted), "key offered", "key signed", "password <text>",
+        /// "question asked" and "answer <text>".
+        pub(crate) fn attempts(&self) -> Vec<String> {
+            self.attempts.lock().unwrap().clone()
+        }
+
+        /// A login for this server: [`USER`], no stored identity, no password and a
+        /// key file that does not exist, so that no real key on this PC is ever read.
+        pub(crate) fn login(&self) -> Login {
+            Login {
+                host: "127.0.0.1".into(),
+                port: self.port,
+                user: USER.into(),
+                known_key: None,
+                key_path: Some("/nonexistent/home-cc/test-key".into()),
+                key_passphrase: None,
+                password: None,
+            }
+        }
+    }
+
+    /// Start a server that offers these ways of logging in. Keep `PublicKey` out of
+    /// `methods` unless the login's key file is the accepted one: a refused key is
+    /// followed by the keys of whatever SSH agent the person running the tests has.
+    pub(crate) async fn start(methods: &[MethodKind]) -> TestServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_key = key(1);
+        let host_key = HostKey {
+            algorithm: server_key.algorithm().to_string(),
+            fingerprint: fingerprint(server_key.public_key()),
+        };
+        let methods = MethodSet::from(methods);
+        let config = Arc::new(server::Config {
+            keys: vec![server_key],
+            methods: methods.clone(),
+            // The real thing answers a refusal slowly on purpose; tests need not wait.
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let seen = attempts.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let handler = ServerHandler {
+                    attempts: seen.clone(),
+                    methods: methods.clone(),
+                    accepted_key: fingerprint(key(2).public_key()),
+                };
+                let config = config.clone();
+                tokio::spawn(async move {
+                    if let Ok(session) = server::run_stream(config, socket, handler).await {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+        TestServer { port, host_key, attempts }
+    }
+
+    struct ServerHandler {
+        attempts: Arc<Mutex<Vec<String>>>,
+        methods: MethodSet,
+        accepted_key: String,
+    }
+
+    impl ServerHandler {
+        fn note(&self, attempt: String) {
+            self.attempts.lock().unwrap().push(attempt);
+        }
+
+        fn answer(&self, accept: bool) -> Auth {
+            if accept {
+                Auth::Accept
+            } else {
+                Auth::Reject { proceed_with_methods: Some(self.methods.clone()), partial_success: false }
+            }
+        }
+    }
+
+    impl server::Handler for ServerHandler {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, russh::Error> {
+            self.note("none".into());
+            Ok(self.answer(false))
+        }
+
+        async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, russh::Error> {
+            self.note(format!("password {password}"));
+            Ok(self.answer(user == USER && password == PASSWORD))
+        }
+
+        async fn auth_publickey_offered(
+            &mut self,
+            user: &str,
+            offer: PublicKeyOffer<'_>,
+        ) -> Result<Auth, russh::Error> {
+            self.note("key offered".into());
+            Ok(self.answer(user == USER && fingerprint(offer.public_key) == self.accepted_key))
+        }
+
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            key: VerifiedPublicKey<'_>,
+        ) -> Result<Auth, russh::Error> {
+            self.note("key signed".into());
+            Ok(self.answer(user == USER && fingerprint(key.public_key) == self.accepted_key))
+        }
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            user: &str,
+            _submethods: &str,
+            response: Option<Response<'a>>,
+        ) -> Result<Auth, russh::Error> {
+            let Some(mut answers) = response else {
+                self.note("question asked".into());
+                return Ok(Auth::Partial {
+                    name: Cow::Borrowed(""),
+                    instructions: Cow::Borrowed(""),
+                    prompts: Cow::Owned(vec![(Cow::Borrowed("Password: "), false)]),
+                });
+            };
+            let answer = answers.next().map(|a| String::from_utf8_lossy(&a).into_owned()).unwrap_or_default();
+            self.note(format!("answer {answer}"));
+            Ok(self.answer(user == USER && answer == PASSWORD))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_server::{self, PASSWORD};
     use super::*;
+
+    /// For connections that must not get as far as a first connection.
+    fn never(key: &HostKey) {
+        panic!("first_use was called with {key:?}");
+    }
+
+    /// Writes down each identity handed to `first_use`, with how many login attempts
+    /// the server had received by then.
+    struct FirstUse<'a> {
+        server: &'a test_server::TestServer,
+        calls: Mutex<Vec<(HostKey, usize)>>,
+    }
+
+    impl<'a> FirstUse<'a> {
+        fn new(server: &'a test_server::TestServer) -> Self {
+            Self { server, calls: Mutex::new(Vec::new()) }
+        }
+
+        fn call(&self, key: &HostKey) {
+            self.calls.lock().unwrap().push((key.clone(), self.server.attempts().len()));
+        }
+
+        /// Called exactly once, with the server's identity, before any login attempt.
+        fn assert_called_once_before_the_login(&self) {
+            let calls = self.calls.lock().unwrap();
+            assert_eq!(*calls, [(self.server.host_key.clone(), 0)]);
+        }
+    }
 
     fn login() -> Login {
         Login {
@@ -1523,10 +1843,10 @@ mod tests {
     async fn missing_address_or_user_fails_without_connecting() {
         let mut no_host = login();
         no_host.host = "  ".into();
-        assert!(matches!(connect(&no_host).await, Err(SshError::Unreachable(_))));
+        assert!(matches!(connect(&no_host, &never).await, Err(SshError::Unreachable(_))));
         let mut no_user = login();
         no_user.user = String::new();
-        assert!(matches!(connect(&no_user).await, Err(SshError::AuthFailed(_))));
+        assert!(matches!(connect(&no_user, &never).await, Err(SshError::AuthFailed(_))));
     }
 
     #[tokio::test]
@@ -1537,7 +1857,7 @@ mod tests {
         drop(listener);
         let mut closed = login();
         closed.port = port;
-        match connect(&closed).await {
+        match connect(&closed, &never).await {
             Err(SshError::Unreachable(m)) => assert!(m.contains("refused the connection"), "{m}"),
             other => panic!("expected a refused connection, got {other:?}"),
         }
@@ -1546,7 +1866,7 @@ mod tests {
         // not a name at all, so this fails without asking anyone on the network.
         let mut unknown = login();
         unknown.host = format!("{}.invalid", "x".repeat(70));
-        match connect(&unknown).await {
+        match connect(&unknown, &never).await {
             Err(SshError::Unreachable(m)) => assert!(m.contains("was not found"), "{m}"),
             other => panic!("expected a name that is not found, got {other:?}"),
         }
@@ -1564,11 +1884,296 @@ mod tests {
         });
         let mut web = login();
         web.port = port;
-        match connect(&web).await {
+        match connect(&web, &never).await {
             Err(SshError::Unreachable(m)) => assert!(m.contains("closed it before the login"), "{m}"),
             other => panic!("expected a failed handshake, got {other:?}"),
         }
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn half_typed_address_is_refused_without_connecting() {
+        for text in ["192.168.1", "10.5", "22", "1.2.3.4.5", "256.1.1.1", "192.168.1.", "..", "192.168.010.5"]
+        {
+            assert!(incomplete_address(text), "{text}");
+        }
+        for text in ["192.168.1.20", "10.0.0.5", "nas", "nas.lan", "pc-2", "3com.lan", "2001:db8::1", ""] {
+            assert!(!incomplete_address(text), "{text}");
+        }
+        // The system reads "127.1" as 127.0.0.1, this PC itself. Nothing may be sent there.
+        let mut short = login();
+        short.host = "127.1".into();
+        match connect(&short, &never).await {
+            Err(SshError::Unreachable(m)) => assert!(m.starts_with("127.1 is not a full address"), "{m}"),
+            other => panic!("expected the address to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stored_password_is_only_for_a_machine_whose_identity_is_stored() {
+        let mut login = login();
+        assert_eq!(password_to_send(&login), Password::NotStored);
+        login.password = Some(String::new());
+        assert_eq!(password_to_send(&login), Password::NotStored, "an empty password is no password");
+        login.password = Some("secret".into());
+        assert_eq!(password_to_send(&login), Password::Withheld, "first connection");
+
+        login.known_key = Some(HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:abc".into() });
+        assert_eq!(password_to_send(&login), Password::Send("secret"));
+        login.password = Some(String::new());
+        assert_eq!(password_to_send(&login), Password::NotStored);
+    }
+
+    #[test]
+    fn an_empty_password_is_not_a_stored_password() {
+        let mut login = login();
+        assert!(!login.has_password());
+        login.password = Some(String::new());
+        assert!(!login.has_password());
+        login.password = Some("secret".into());
+        assert!(login.has_password());
+    }
+
+    #[test]
+    fn identity_problems_read_as_plain_words() {
+        let old = HostKey { algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:old".into() };
+        let new = HostKey { algorithm: "ssh-rsa".into(), fingerprint: "SHA256:new".into() };
+        assert_eq!(
+            SshError::HostKeyChanged { expected: old, got: new.clone() }.to_string(),
+            "This machine's identity has changed since home-cc first reached it (was SHA256:old, now \
+             SHA256:new)"
+        );
+        assert_eq!(
+            SshError::NewHost(new).to_string(),
+            "This is the first connection to this machine, so the stored password was not sent. Approve this \
+             machine's identity (SHA256:new) first."
+        );
+    }
+
+    #[test]
+    fn login_failure_never_says_a_withheld_password_was_tried() {
+        let tried = [Tried::KeyRefused("id_ed25519".into()), Tried::PasswordWithheld];
+        let after_key = auth_message("nas", "jim", &tried, true, false);
+        assert_eq!(
+            after_key,
+            "Could not log in to nas as jim. The key file id_ed25519 was not accepted. The stored password \
+             was not sent, because this is the first connection to this machine. Check the user name, and \
+             that this PC's public key has been added to that machine."
+        );
+        let alone = auth_message("nas", "jim", &[Tried::KeysNotTaken, Tried::PasswordWithheld], true, false);
+        assert_eq!(
+            alone,
+            "Could not log in to nas as jim. The stored password was not sent, because this is the first \
+             connection to this machine."
+        );
+        for message in [after_key, alone] {
+            assert!(!message.contains("password was not accepted"), "{message}");
+            assert!(!message.contains("and the password"), "{message}");
+            assert!(!message.contains("no password is stored"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn first_connection_hands_over_the_identity_before_the_login() {
+        let server = test_server::start(&[MethodKind::PublicKey, MethodKind::Password]).await;
+        let key_file = std::env::temp_dir().join(format!("home-cc-ssh-first-use-{}", std::process::id()));
+        std::fs::write(&key_file, test_server::client_key_file()).unwrap();
+        let mut login = server.login();
+        login.key_path = Some(key_file.clone());
+        // A password is stored as well. The key gets in, so it is neither sent nor asked about.
+        login.password = Some(PASSWORD.into());
+
+        let first_use = FirstUse::new(&server);
+        let session = connect(&login, &|key: &HostKey| first_use.call(key)).await;
+        std::fs::remove_file(&key_file).unwrap();
+        let session = session.expect("the key is accepted");
+        first_use.assert_called_once_before_the_login();
+        assert_eq!(*session.host_key(), server.host_key);
+        let attempts = server.attempts();
+        assert_eq!(attempts.first().map(String::as_str), Some("none"), "{attempts:?}");
+        assert_eq!(attempts.last().map(String::as_str), Some("key signed"), "{attempts:?}");
+        assert!(attempts.iter().all(|a| a == "none" || a.starts_with("key ")), "{attempts:?}");
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn first_connection_never_sends_the_stored_password() {
+        // Neither plainly nor typed as the answer to the server's question.
+        for method in [MethodKind::Password, MethodKind::KeyboardInteractive] {
+            let server = test_server::start(&[method]).await;
+            let mut login = server.login();
+            login.password = Some(PASSWORD.into());
+            let first_use = FirstUse::new(&server);
+            match connect(&login, &|key: &HostKey| first_use.call(key)).await {
+                Err(SshError::NewHost(key)) => assert_eq!(key, server.host_key),
+                other => panic!("expected to be asked to approve the identity, got {other:?}"),
+            }
+            first_use.assert_called_once_before_the_login();
+            // Only the question about what the server accepts ever reached it.
+            assert_eq!(server.attempts(), ["none"], "{method:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_identity_lets_the_password_through() {
+        let ways = [
+            (MethodKind::Password, format!("password {PASSWORD}")),
+            (MethodKind::KeyboardInteractive, format!("answer {PASSWORD}")),
+        ];
+        for (method, sent) in ways {
+            let server = test_server::start(&[method]).await;
+            let mut login = server.login();
+            login.password = Some(PASSWORD.into());
+            login.known_key = Some(server.host_key.clone());
+            let session = connect(&login, &never).await.expect("the password is accepted");
+            assert_eq!(server.attempts().last(), Some(&sent));
+            session.close().await;
+        }
+
+        // A wrong one is still a plain login failure.
+        let server = test_server::start(&[MethodKind::Password]).await;
+        let mut login = server.login();
+        login.password = Some("not the password".into());
+        login.known_key = Some(server.host_key.clone());
+        match connect(&login, &never).await {
+            Err(SshError::AuthFailed(m)) => assert_eq!(
+                m,
+                "Could not log in to 127.0.0.1 as jim. The stored password was not accepted. Check the user \
+                 name and the password."
+            ),
+            other => panic!("expected a failed login, got {other:?}"),
+        }
+        assert_eq!(server.attempts(), ["none", "password not the password"]);
+    }
+
+    /// Approving the identity is asked for only where it would let the password
+    /// through. A machine that would not be sent the password anyway gets the ordinary
+    /// login failure, with its advice, on a first connection as on any other.
+    #[tokio::test]
+    async fn first_connection_asks_for_approval_only_if_the_password_would_be_sent() {
+        // Takes no passwords in either form ("hostbased" stands in for keys here: with
+        // keys on offer the SSH agent of whoever runs the tests would be asked).
+        let keys_only = test_server::start(&[MethodKind::HostBased]).await;
+        // Offers nothing to carry on with, as when a machine ends the login early.
+        let hangs_up = test_server::start(&[]).await;
+        let cases = [
+            (&keys_only, "This machine does not take passwords, only keys."),
+            (&hangs_up, "The machine closed the connection before everything could be tried."),
+        ];
+        for (server, advice) in cases {
+            let mut login = server.login();
+            login.password = Some(PASSWORD.into());
+            let first_use = FirstUse::new(server);
+            match connect(&login, &|key: &HostKey| first_use.call(key)).await {
+                Err(SshError::AuthFailed(m)) => {
+                    assert_eq!(m, format!("Could not log in to 127.0.0.1 as jim. {advice}"));
+                }
+                other => panic!("expected a failed login, got {other:?}"),
+            }
+            first_use.assert_called_once_before_the_login();
+            assert_eq!(server.attempts(), ["none"]);
+
+            // With the identity stored the outcome is the same: approving changes nothing.
+            login.known_key = Some(server.host_key.clone());
+            match connect(&login, &never).await {
+                Err(SshError::AuthFailed(m)) => assert!(m.ends_with(advice), "{m}"),
+                other => panic!("expected a failed login, got {other:?}"),
+            }
+            assert_eq!(server.attempts(), ["none", "none"]);
+        }
+    }
+
+    /// The rule for callers in the notes on [`connect`], followed over several
+    /// connections the way a background reading makes them: with a password stored the
+    /// identity is not stored from `first_use`, so the password stays here until the
+    /// owner approves, however many times the machine is tried.
+    #[tokio::test]
+    async fn storing_the_identity_by_the_rule_keeps_the_password_back_until_approved() {
+        let server = test_server::start(&[MethodKind::Password]).await;
+        let stored: Mutex<Option<HostKey>> = Mutex::new(None);
+        let mut login = server.login();
+        login.password = Some(PASSWORD.into());
+        for _ in 0..3 {
+            login.known_key = stored.lock().unwrap().clone();
+            let first_use = |key: &HostKey| {
+                if !login.has_password() {
+                    *stored.lock().unwrap() = Some(key.clone());
+                }
+            };
+            match connect(&login, &first_use).await {
+                Err(SshError::NewHost(key)) => assert_eq!(key, server.host_key),
+                other => panic!("expected to be asked to approve the identity, got {other:?}"),
+            }
+        }
+        assert_eq!(*stored.lock().unwrap(), None);
+        assert_eq!(server.attempts(), ["none", "none", "none"]);
+
+        // The owner approves what was shown: only now does the password leave this PC.
+        login.known_key = Some(server.host_key.clone());
+        let session = connect(&login, &never).await.expect("the password is accepted");
+        assert_eq!(server.attempts().last(), Some(&format!("password {PASSWORD}")));
+        session.close().await;
+
+        // With no password stored the same rule stores the identity on the spot, even
+        // though the login then fails, and the next connection is checked against it.
+        let server = test_server::start(&[MethodKind::Password]).await;
+        let mut login = server.login();
+        let first_use = |key: &HostKey| {
+            if !login.has_password() {
+                *stored.lock().unwrap() = Some(key.clone());
+            }
+        };
+        assert!(matches!(connect(&login, &first_use).await, Err(SshError::AuthFailed(_))));
+        assert_eq!(*stored.lock().unwrap(), Some(server.host_key.clone()));
+        login.known_key = stored.lock().unwrap().clone();
+        assert!(matches!(connect(&login, &never).await, Err(SshError::AuthFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn changed_identity_stops_before_anything_is_offered() {
+        // Stored as the same kind of key, and as a kind the machine no longer shows.
+        for algorithm in ["ssh-ed25519", "ssh-rsa"] {
+            let server = test_server::start(&[
+                MethodKind::PublicKey,
+                MethodKind::Password,
+                MethodKind::KeyboardInteractive,
+            ])
+            .await;
+            let stored =
+                HostKey { algorithm: algorithm.into(), fingerprint: "SHA256:what-was-stored".into() };
+            let mut login = server.login();
+            login.password = Some(PASSWORD.into());
+            login.known_key = Some(stored.clone());
+            match connect(&login, &never).await {
+                Err(SshError::HostKeyChanged { expected, got }) => {
+                    assert_eq!(expected, stored);
+                    assert_eq!(got, server.host_key, "what it shows now, with its kind of key");
+                }
+                other => panic!("expected a changed identity, got {other:?}"),
+            }
+            // Not even the question about what the server accepts, which names the user.
+            assert!(server.attempts().is_empty(), "{:?}", server.attempts());
+        }
+    }
+
+    #[tokio::test]
+    async fn first_connection_with_no_password_stored_is_a_plain_login_failure() {
+        for password in [None, Some(String::new())] {
+            let server = test_server::start(&[MethodKind::Password]).await;
+            let mut login = server.login();
+            login.password = password;
+            let first_use = FirstUse::new(&server);
+            match connect(&login, &|key: &HostKey| first_use.call(key)).await {
+                Err(SshError::AuthFailed(m)) => assert_eq!(
+                    m,
+                    "Could not log in to 127.0.0.1 as jim. This machine takes a password only, not keys: \
+                     store a password for it."
+                ),
+                other => panic!("expected a failed login, got {other:?}"),
+            }
+            first_use.assert_called_once_before_the_login();
+            assert_eq!(server.attempts(), ["none"]);
+        }
     }
 
     /// Tauri commands run on several threads, so everything here has to be movable
@@ -1580,7 +2185,7 @@ mod tests {
         shareable::<Session>();
         shareable::<SshError>();
         let login = login();
-        sendable(&connect(&login));
+        sendable(&connect(&login, &never));
         fn exec_is_sendable(session: &Session) {
             sendable(&session.exec("true", None, Duration::from_secs(1)));
             sendable(&session.open_channel());
