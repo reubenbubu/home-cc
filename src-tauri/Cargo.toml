@@ -39,6 +39,17 @@ rand = "0.10"
 # clipboard. Text only, which leaves out the image libraries.
 arboard = { version = "3", default-features = false }
 
+# Proxmox API over HTTPS. rustls with the ring provider only (no aws-lc-rs,
+# so no NASM or cmake on Windows); the certificate is pinned by hand in
+# src/proxmox/pin.rs. hyper and hyper-util are already used by Tauri.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+ring = "0.17"
+
 # Same versions netdev already uses on Linux, for reading the neighbour table.
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-packet-core = "0.9"

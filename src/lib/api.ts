@@ -245,6 +245,8 @@ export const secretKeys = {
   sshPassword: (deviceId: number) => `ssh-password:${deviceId}`,
   /** Passphrase for the SSH private key. */
   sshKeyPassphrase: "ssh-key-passphrase",
+  /** Proxmox: the API token's secret for one Proxmox host. Removed with the device. */
+  proxmoxToken: (deviceId: number) => `proxmox-token:${deviceId}`,
 };
 
 export interface AppInfo {
@@ -409,6 +411,170 @@ export const api = {
   approveKeySetupIdentity: (deviceId: number, fingerprint: string) =>
     invoke<void>("approve_key_setup_identity", { deviceId, fingerprint }),
 };
+
+// --- Proxmox (spec 5.6; back end in src-tauri/src/proxmox/) ---
+
+/** Why a Proxmox reading failed.
+ *  - noToken: no token ID, or no secret stored for it.
+ *  - newCert: first contact. offeredFingerprint is the host's certificate; nothing (not even the token)
+ *    was sent. Approve it with proxmoxApi.trustCertificate once the owner has checked it.
+ *  - certChanged: the certificate isn't the approved one (expectedFingerprint); nothing was sent.
+ *  - auth: the token wasn't accepted. permission: the token lacks a permission.
+ *  - unreachable: no connection. */
+export type ProxmoxErrorKind = "noToken" | "newCert" | "certChanged" | "auth" | "permission" | "unreachable" | "other";
+
+export type GuestKind = "qemu" | "lxc";
+
+export interface ProxmoxStorage {
+  name: string;
+  /** Proxmox's type name, such as "dir", "lvmthin", "zfspool", "cifs". */
+  kind: string | null;
+  /** What it holds, such as "images", "rootdir", "iso", "backup". */
+  content: string[];
+  shared: boolean;
+  /** False when Proxmox can't reach it or it is switched off. */
+  active: boolean;
+  /** Bytes. */
+  used: number | null;
+  total: number | null;
+}
+
+export interface ProxmoxNode {
+  name: string;
+  /** "online", "offline" or "unknown". */
+  status: string;
+  /** 0 to 100. */
+  cpuPct: number | null;
+  cpuCount: number | null;
+  /** Bytes. */
+  memUsed: number | null;
+  memTotal: number | null;
+  /** The node's own system disk, in bytes. */
+  diskUsed: number | null;
+  diskTotal: number | null;
+  uptimeSecs: number | null;
+  storages: ProxmoxStorage[];
+}
+
+/** A VM (qemu) or container (lxc). */
+export interface ProxmoxGuest {
+  vmid: number;
+  kind: GuestKind;
+  /** Empty if it has none. */
+  name: string;
+  node: string;
+  /** "running", "stopped" or "paused" (Proxmox may give others, such as "suspended" or "io-error"). */
+  status: string;
+  /** A template can't be started. */
+  template: boolean;
+  /** Set while Proxmox is busy with it, such as "backup" or "snapshot". */
+  lock: string | null;
+  /** 0 to 100, of the processors given to it. */
+  cpuPct: number | null;
+  cpuCount: number | null;
+  /** Bytes. */
+  memUsed: number | null;
+  memTotal: number | null;
+  /** Containers only; Proxmox doesn't know what a VM's disk holds. */
+  diskUsed: number | null;
+  diskTotal: number | null;
+  uptimeSecs: number | null;
+  tags: string[];
+}
+
+export interface ProxmoxOverview {
+  nodes: ProxmoxNode[];
+  guests: ProxmoxGuest[];
+}
+
+/** One Proxmox host. Either overview or error is set. */
+export interface ProxmoxStatus {
+  deviceId: number;
+  overview: ProxmoxOverview | null;
+  /** Unix seconds of the reading in overview. */
+  fetchedAt: number | null;
+  error: string | null;
+  errorKind: ProxmoxErrorKind | null;
+  /** With newCert and certChanged: SHA-256 of the certificate the host showed, "AB:CD:…". */
+  offeredFingerprint: string | null;
+  /** With certChanged: the approved one. */
+  expectedFingerprint: string | null;
+  /** The approved certificate, if any. */
+  pinnedFingerprint: string | null;
+}
+
+export interface ProxmoxSettings {
+  deviceId: number;
+  /** Such as "root@pam!homecc". */
+  tokenId: string | null;
+  /** The API port, normally 8006. */
+  port: number;
+  pinnedFingerprint: string | null;
+  /** Whether the token's secret is in the keychain (it is never sent back). */
+  hasSecret: boolean;
+}
+
+/** Which VM or container an action is for. */
+export interface GuestRef {
+  node: string;
+  kind: GuestKind;
+  vmid: number;
+}
+
+/** start (also resumes a hibernated VM), resume (a paused one), shutdown (asks the guest's system), reboot,
+ *  stop (pulls the plug). Shut down, restart and force stop are confirmed first. */
+export type PowerAction = "start" | "resume" | "shutdown" | "reboot" | "stop";
+
+export interface ProxmoxSnapshot {
+  name: string;
+  description: string;
+  /** Unix seconds. */
+  takenAt: number | null;
+  parent: string | null;
+  /** The VM's memory was saved too, so a rollback returns it running. */
+  withRam: boolean;
+}
+
+export interface SnapshotList {
+  /** Oldest first. */
+  snapshots: ProxmoxSnapshot[];
+  /** The snapshot the guest's present state comes from, if any. */
+  currentParent: string | null;
+}
+
+/** finished is false if Proxmox was still at it when home-cc stopped waiting; it carries on there. */
+export interface TaskOutcome {
+  finished: boolean;
+}
+
+export const proxmoxApi = {
+  /** Token ID, port and approved certificate of one Proxmox host. The secret goes through
+   *  api.setSecret(secretKeys.proxmoxToken(id), …). */
+  settings: (deviceId: number) => invoke<ProxmoxSettings>("proxmox_settings", { deviceId }),
+  /** An empty tokenId removes it. Rejects with a readable message for a token ID that can't be right. */
+  saveSettings: (deviceId: number, tokenId: string, port: number) =>
+    invoke<ProxmoxSettings>("proxmox_save_settings", { deviceId, tokenId, port }),
+  /** Every node, VM, container and storage. A failed reading comes back inside the answer. */
+  status: (deviceId: number) => invoke<ProxmoxStatus>("proxmox_status", { deviceId }),
+  /** Approve the certificate in status.offeredFingerprint, once the owner has checked it. Rejects if the
+   *  host has shown a different one since; read the status again and ask again. */
+  trustCertificate: (deviceId: number, fingerprint: string) =>
+    invoke<void>("proxmox_trust_certificate", { deviceId, fingerprint }),
+  power: (deviceId: number, guest: GuestRef, action: PowerAction) =>
+    invoke<TaskOutcome>("proxmox_power", { deviceId, guest, action }),
+  snapshots: (deviceId: number, guest: GuestRef) => invoke<SnapshotList>("proxmox_snapshots", { deviceId, guest }),
+  /** withRam only applies to VMs. */
+  takeSnapshot: (deviceId: number, guest: GuestRef, name: string, description: string, withRam: boolean) =>
+    invoke<TaskOutcome>("proxmox_take_snapshot", { deviceId, guest, name, description, withRam }),
+  /** Proxmox stops a running guest to roll it back to a snapshot without RAM, and leaves it stopped;
+   *  startAfter starts it again once the rollback is done. */
+  rollback: (deviceId: number, guest: GuestRef, name: string, startAfter: boolean) =>
+    invoke<TaskOutcome>("proxmox_rollback", { deviceId, guest, name, startAfter }),
+  deleteSnapshot: (deviceId: number, guest: GuestRef, name: string) =>
+    invoke<TaskOutcome>("proxmox_delete_snapshot", { deviceId, guest, name }),
+};
+
+// --- end Proxmox ---
 
 /** Events from the back end. Each returns a function that stops listening. */
 export const events = {

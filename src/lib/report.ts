@@ -21,7 +21,9 @@ export type Area =
   // Terminals
   | "terminal"
   // Docker (spec 5.5)
-  | "docker";
+  | "docker"
+  // Proxmox (spec 5.6)
+  | "proxmox";
 
 /** Source files to start from for each area. Paths are from the root of the repository. */
 export const AREA_FILES: Record<Area, string[]> = {
@@ -92,6 +94,13 @@ export const AREA_FILES: Record<Area, string[]> = {
     "src-tauri/src/docker/logs.rs (following a log) and src-tauri/src/docker/store.rs (Docker hosts and stacks remembered)",
     "src-tauri/src/ssh.rs and src-tauri/src/monitor.rs (prepared_login: logging in)",
     "src/routes/docker/+page.svelte, src/lib/docker/ and src/lib/components/docker/ (the screen)",
+  ],
+  // --- Proxmox ---
+  proxmox: [
+    "src-tauri/src/proxmox/client.rs (the HTTPS calls to the Proxmox API) and src-tauri/src/proxmox/pin.rs (the approved certificate)",
+    "src-tauri/src/proxmox/mod.rs (what each action asks Proxmox, and how failures are worded) and src-tauri/src/proxmox/model.rs (reading Proxmox's answers)",
+    "src-tauri/src/proxmox/store.rs (token ID, port and certificate per device)",
+    "src/lib/proxmox.svelte.ts, src/lib/proxmox.ts and src/routes/proxmox/ with src/lib/components/proxmox/ (the screen)",
   ],
 };
 

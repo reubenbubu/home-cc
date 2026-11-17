@@ -54,6 +54,8 @@ pub fn add_device(inv: State<Inventory>, monitor: State<Monitor>, input: DeviceI
     // Ids start again in a new database, so a password left in the keychain
     // by an earlier one must not end up belonging to this device.
     secrets::delete(&monitor::password_key(device.id)).ok();
+    // Proxmox: the same goes for an API token secret.
+    secrets::delete(&crate::proxmox::token_key(device.id)).ok();
     monitor.wake();
     Ok(device)
 }
@@ -62,6 +64,7 @@ pub fn add_device(inv: State<Inventory>, monitor: State<Monitor>, input: DeviceI
 pub fn update_device(
     inv: State<Inventory>,
     monitor: State<Monitor>,
+    proxmox: State<crate::proxmox::Proxmox>,
     id: i64,
     input: DeviceInput,
 ) -> Result<Device> {
@@ -72,6 +75,11 @@ pub fn update_device(
         != (&device.host, device.ssh_port, &device.ssh_user, device.os)
     {
         monitor.forget(id);
+    }
+    // Proxmox: another address is another server, so its certificate is
+    // checked as at first contact (as Inventory::update does for SSH).
+    if !before.host.eq_ignore_ascii_case(&device.host) {
+        proxmox.address_changed(&inv, id)?;
     }
     monitor.wake();
     Ok(device)
@@ -84,6 +92,8 @@ pub fn remove_device(app: AppHandle, inv: State<Inventory>, monitor: State<Monit
     // Its stored password goes with it. A keychain hiccup here shouldn't
     // stop the device being removed.
     secrets::delete(&monitor::password_key(id)).ok();
+    // Proxmox: its API token secret goes too.
+    secrets::delete(&crate::proxmox::token_key(id)).ok();
     app.emit(monitor::EVENT_STATUS, ()).ok();
     app.emit(monitor::EVENT_STATS, ()).ok();
     Ok(())

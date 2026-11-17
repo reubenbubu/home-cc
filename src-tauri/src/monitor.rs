@@ -280,6 +280,8 @@ impl Monitor {
             tauri::async_runtime::spawn_blocking(move || {
                 for id in added {
                     secrets::delete(&password_key(id)).ok();
+                    // Proxmox: the same goes for an API token secret.
+                    secrets::delete(&crate::proxmox::token_key(id)).ok();
                 }
             })
             .await

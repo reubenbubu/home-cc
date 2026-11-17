@@ -1,0 +1,5 @@
+{"data":[
+ {"name":"after_setup","description":"Fresh install\nwith add-ons\n","snaptime":1731000000,"vmstate":0},
+ {"name":"before_update","description":"","snaptime":1731800000,"parent":"after_setup","vmstate":1},
+ {"name":"current","description":"You are here!","parent":"before_update","running":1,"digest":"0d5c1e2a3b"}
+]}

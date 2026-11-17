@@ -25,6 +25,8 @@ import type {
 } from "../api";
 import { terminalCommands } from "./terminal";
 import { dockerMock } from "./docker";
+// Proxmox
+import { proxmoxMock } from "./proxmox";
 
 /** How a sample device behaves when it is checked. */
 type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
@@ -933,6 +935,10 @@ export function installMock() {
     // --- Docker (spec 5.5), see docker.ts ---
     ...dockerMock({ devices: () => devices, idOf }),
   };
+
+  // --- Proxmox: its sample host and commands live in mock/proxmox.ts ---
+  Object.assign(commands, proxmoxMock({ find, secrets, query }, idOf("Proxmox")));
+  // --- end Proxmox ---
 
   mockIPC(
     (cmd, payload) => {
