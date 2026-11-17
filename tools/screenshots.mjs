@@ -59,6 +59,8 @@ const SCREENS = [
     name: "machines",
     path: "/machines",
     ready: "article",
+    // Its many drives make its card much taller than those beside it, which must still be packed (cardPacking).
+    tall: "Main PC",
     async before(page) {
       // The sample data has one machine in each state that waits for the owner; all must be in the picture.
       await page.getByText("This machine's identity has changed").waitFor();
@@ -737,6 +739,68 @@ function inspect() {
   return { overflow, cut, tall: content ? content.scrollHeight - content.clientHeight : 0 };
 }
 
+/** Runs in the page. Says where the Machines cards aren't packed: a card taller than what it shows (made as
+ *  tall as a card beside it), or one that doesn't start at the top of its group or right under the card
+ *  above it in its column. With `tall`, the name of a card much taller than others, also that, in a window
+ *  with room for two columns or more, cards beside it are much shorter and (when its group has more cards
+ *  than columns) another card is right under one of them. Nothing to say on a screen without cards. */
+function cardPacking(tall) {
+  const problems = [];
+  const px = (v) => `${Math.round(v)}px`;
+  let columnsSeen = 0;
+  let tallSeen = null;
+  for (const grid of document.querySelectorAll(".cards")) {
+    const own = grid.getBoundingClientRect();
+    const scale = grid.offsetWidth ? own.width / grid.offsetWidth : 1;
+    const gap = (parseFloat(getComputedStyle(grid).columnGap) || 0) * scale;
+    const cards = [...grid.querySelectorAll(":scope > .slot")].map((slot) => {
+      const card = slot.firstElementChild;
+      return { name: slot.querySelector("h3")?.textContent.trim() || "a", slot: slot.getBoundingClientRect(), card, box: card.getBoundingClientRect() };
+    });
+    for (const c of cards) {
+      if (Math.abs(c.box.height - c.slot.height) > 1.5) problems.push(`the ${c.name} card is ${px(c.box.height)} tall in a ${px(c.slot.height)} place`);
+      // What the card shows, one part under another: anything more is space it was stretched by.
+      const style = getComputedStyle(c.card);
+      const parts = [...c.card.children]
+        .filter((el) => !["absolute", "fixed"].includes(getComputedStyle(el).position) && el.getClientRects().length > 0)
+        .map((el) => el.getBoundingClientRect());
+      const frame = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"].reduce((sum, p) => sum + (parseFloat(style[p]) || 0), 0);
+      const between = (parseFloat(style.rowGap) || 0) * Math.max(0, parts.length - 1);
+      const spare = c.box.height - parts.reduce((sum, b) => sum + b.height, 0) - (frame + between) * scale;
+      if (spare > 4 * scale) problems.push(`the ${c.name} card has ${px(spare)} of empty space (stretched to the cards beside it)`);
+    }
+    // The cards of each column, top to bottom.
+    const columns = new Map();
+    for (const c of cards) {
+      const left = Math.round(c.slot.left);
+      columns.set(left, [...(columns.get(left) ?? []), c]);
+    }
+    columnsSeen = Math.max(columnsSeen, columns.size);
+    for (const column of columns.values()) {
+      column.sort((a, b) => a.slot.top - b.slot.top);
+      if (Math.abs(column[0].slot.top - own.top) > 1.5) problems.push(`the ${column[0].name} card starts ${px(column[0].slot.top - own.top)} below the top of its group`);
+      for (let i = 1; i < column.length; i++) {
+        const space = column[i].slot.top - column[i - 1].slot.bottom;
+        if (Math.abs(space - gap) > 1.5) problems.push(`the ${column[i].name} card starts ${px(space)} under the ${column[i - 1].name} card, not ${px(gap)}`);
+      }
+    }
+    const big = cards.find((c) => c.name === tall);
+    if (big && columns.size > 1) {
+      const beside = cards.filter((c) => c !== big && Math.round(c.slot.left) !== Math.round(big.slot.left) && c.slot.top < big.slot.bottom && c.slot.bottom > big.slot.top);
+      const short = beside.filter((c) => c.slot.height * 2 < big.slot.height);
+      const under = short.some((s) => cards.some((c) => Math.round(c.slot.left) === Math.round(s.slot.left) && c.slot.top > s.slot.bottom && c.slot.top - s.slot.bottom < gap + 1.5));
+      // With as many columns as cards, they are all in one row and none can be under another.
+      tallSeen = { short: short.length, under: under || cards.length <= columns.size };
+    }
+  }
+  if (tall && columnsSeen > 1) {
+    if (!tallSeen) problems.push(`no ${tall} card in a group of two columns or more`);
+    else if (tallSeen.short === 0) problems.push(`no card beside the ${tall} card is less than half as tall: it isn't much taller than them, or they were stretched`);
+    else if (!tallSeen.under) problems.push(`no card is right under the short cards beside the ${tall} card`);
+  }
+  return problems;
+}
+
 /** Readings that are allowed but unusual (the sample back end adds them for "?awkward": two disks on one
  *  folder) must not break a screen. Returns what went wrong. */
 async function checkAwkward(browser, url) {
@@ -847,6 +911,8 @@ async function checkFlows(browser, url) {
   const cardsIn = (page, name) => group(page, name).locator("article h3").allTextContents();
   // Pi-hole: one Pi-hole's card on the Pi-hole screen.
   const piholeCard = (page, name) => page.getByRole("article", { name: `Pi-hole ${name}`, exact: true });
+  /** Runs in the page: no Machines card is sliding to a new place. */
+  const settled = () => !document.getAnimations().some((a) => a.effect?.target?.classList?.contains("slot"));
   const flows = [
     {
       what: "approving a first connection stores that identity and reads the machine",
@@ -1443,6 +1509,84 @@ async function checkFlows(browser, url) {
         await page.getByRole("button", { name: "Reset order" }).click();
         const reset = (await cardsIn(page, "Proxmox lab")).join();
         if (reset !== "Main PC,Monitoring,Pi-hole 1,Pi-hole 2,Proxmox") throw new Error(`after Reset order, Proxmox lab reads ${reset}`);
+      },
+    },
+    // Packed cards (masonry.ts): each only as tall as what it shows, each under the one above it in its column.
+    {
+      what: "packed cards: a dragged card shows where it lands, lands there, and the cards are packed after it",
+      path: "/machines",
+      // Tall enough to show every card of Other machines, which the drag goes among.
+      viewport: { width: 1920, height: 1600 },
+      async run(page) {
+        await card(page, "Main PC").getByText("Offsite copy").waitFor();
+        const grip = page.getByRole("button", { name: /^Move Printer,/ });
+        const from = await grip.boundingBox();
+        const onto = await card(page, "Living room TV").boundingBox();
+        await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(onto.x + onto.width / 2, onto.y + onto.height / 2, { steps: 12 });
+        await page.locator(".ghost").waitFor();
+        // Once the cards have slid to their new places.
+        await page.waitForFunction(settled);
+        // The place it would land is under the pointer, and the cards around it are packed.
+        const shown = await page.evaluate(
+          ([x, y]) => {
+            const place = document.querySelector(".slot.landing")?.getBoundingClientRect();
+            return place ? place.left <= x && x <= place.right && place.top <= y && y <= place.bottom : null;
+          },
+          [onto.x + onto.width / 2, onto.y + onto.height / 2],
+        );
+        if (!shown) throw new Error(shown === null ? "no place shows where the card lands" : "the place it lands isn't under the pointer");
+        const during = await page.evaluate(cardPacking, null);
+        if (during.length) throw new Error(`while dragging: ${during.join("; ")}`);
+        await page.mouse.up();
+        await page.locator("p[aria-live]", { hasText: "Printer moved to place 1 of 5." }).waitFor({ state: "attached" });
+        const order = (await cardsIn(page, "Other machines")).join();
+        if (order !== "Printer,Living room TV,Main PC,Media PC,Old laptop") throw new Error(`Other machines reads ${order}`);
+        if (!(await grip.evaluate((el) => el === document.activeElement))) throw new Error("the moved card's grip lost the focus");
+        await page.waitForFunction(settled);
+        const after = await page.evaluate(cardPacking, "Main PC");
+        if (after.length) throw new Error(`after the drop: ${after.join("; ")}`);
+        // The arrow keys move it back, and the cards are packed again.
+        await page.keyboard.press("ArrowRight");
+        await page.locator("p[aria-live]", { hasText: "Printer moved to place 2 of 5." }).waitFor({ state: "attached" });
+        await page.waitForFunction(settled);
+        const keyed = await page.evaluate(cardPacking, "Main PC");
+        if (keyed.length) throw new Error(`after a move with the keys: ${keyed.join("; ")}`);
+      },
+    },
+    {
+      what: "packed cards: packed again when a card changes height, a group is opened again, the form opens and the window narrows",
+      path: "/machines",
+      async run(page) {
+        await card(page, "Main PC").getByText("Offsite copy").waitFor();
+        const packed = async (when) => {
+          const problems = await page.evaluate(cardPacking, "Main PC");
+          if (problems.length) throw new Error(`${when}: ${problems.join("; ")}`);
+        };
+        await packed("at first");
+        // A card changes height while it is shown: approved, its readings come in place of the question.
+        const media = card(page, "Media PC");
+        const before = (await media.boundingBox()).height;
+        await media.getByRole("button", { name: "Approve and use the password" }).click();
+        await media.getByRole("button", { name: "Yes, it matches" }).click();
+        await media.getByText("RAM", { exact: true }).waitFor();
+        if (Math.abs((await media.boundingBox()).height - before) < 10) throw new Error("the Media PC card is as tall as before, so this proves nothing");
+        await packed("after the Media PC card changed height");
+        const toggle = group(page, "Other machines").getByRole("button", { name: /^Other machines/ });
+        await toggle.click();
+        await card(page, "Main PC").waitFor({ state: "detached" });
+        await toggle.click();
+        await card(page, "Main PC").getByText("Offsite copy").waitFor();
+        await packed("after the group was opened again");
+        await page.getByRole("button", { name: "Edit NAS" }).click();
+        await page.getByText("A password is stored").waitFor();
+        await packed("with the form open");
+        for (const width of [1500, 1200, 1000, 2600]) {
+          await page.setViewportSize({ width, height: 900 });
+          await page.waitForTimeout(150);
+          await packed(`in a ${width}px window`);
+        }
       },
     },
     {
@@ -3369,11 +3513,13 @@ async function main() {
 
         const label = `${screen.name} @ ${size.name}`;
         const found = await page.evaluate(inspect);
-        for (const problem of found.overflow) failures.push(`${label}: ${problem}`);
+        // The Machines cards, wherever a screen shows them, are packed rather than stretched to a row.
+        const unpacked = await page.evaluate(cardPacking, screen.tall ?? null);
+        for (const problem of [...found.overflow, ...unpacked]) failures.push(`${label}: ${problem}`);
         for (const error of errors) failures.push(`${label}: error in the page: ${error}`);
         const file = join(out, `${screen.name}-${size.name}.png`);
         await page.screenshot({ path: file });
-        console.log(`${found.overflow.length ? "FAIL" : "ok  "} ${label}${found.cut.length ? `  (${found.cut.length} texts cut short)` : ""}`);
+        console.log(`${found.overflow.length || unpacked.length ? "FAIL" : "ok  "} ${label}${found.cut.length ? `  (${found.cut.length} texts cut short)` : ""}`);
         if (process.env.SHOW_CUT) for (const c of found.cut) console.log(`       … ${c}`);
 
         await screen.after?.(page);

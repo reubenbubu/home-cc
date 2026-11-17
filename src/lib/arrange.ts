@@ -71,24 +71,6 @@ export function remember(shown: number[], saved: number[], existing: Iterable<nu
   return [...new Set(next)];
 }
 
-/** Where a dragged card would land: the card under the pointer, or else the nearest card in the nearest
- *  row, so the empty space after the last card means "at the end". -1 when there are no cards. */
-export function slotAt(boxes: Box[], x: number, y: number): number {
-  let best = -1;
-  let bestDy = Infinity;
-  let bestDx = Infinity;
-  boxes.forEach((b, i) => {
-    const dx = x < b.x ? b.x - x : x > b.x + b.w ? x - (b.x + b.w) : 0;
-    const dy = y < b.y ? b.y - y : y > b.y + b.h ? y - (b.y + b.h) : 0;
-    if (dy < bestDy || (dy === bestDy && dx < bestDx)) {
-      best = i;
-      bestDy = dy;
-      bestDx = dx;
-    }
-  });
-  return best;
-}
-
 // Groups: the owner can give machines a group name ("Proxmox lab"), and the cards are then shown under a
 // heading per group. The saved order above is kept per card for all of them together; each group shows
 // its own cards in that order, so moving a card only ever changes its place among its own group.

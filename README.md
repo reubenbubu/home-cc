@@ -92,6 +92,13 @@ Windows machine.
   silenced on the Overview (`src/lib/silence.svelte.ts`, its rules in
   `overview.ts`). That storage can be missing, so every read and write is in a
   try/catch and the screen still works without it.
+  The Machines cards are packed rather than laid in rows (`src/lib/masonry.ts`,
+  tested by `masonry.test.mjs`): the screen measures each card as it changes
+  and places it in a CSS grid, in the column that is shortest so far, so no
+  card is stretched to a tall card beside it. The cards stay in the owner's
+  order in the page, for the keys and screen readers. The screenshot tool
+  checks every Machines picture for cards stretched or not right under the
+  one above (`cardPacking`); the sample Main PC has many drives for that.
   Every table can be sorted, grouped and filtered the same way. The rules are
   in `src/lib/table.ts` (tested by `table.test.mjs`): text in a person's order
   ("PC 2" before "PC 10"), numbers by value, IP addresses number by number,

@@ -13,7 +13,6 @@ import {
   remember,
   sameGroup,
   sections,
-  slotAt,
   tidyGroup,
   toEndOfGroup,
 } from "./arrange.ts";
@@ -87,32 +86,6 @@ test("a hidden machine keeps its place among the others when another card is mov
   assert.deepEqual(remember([3, 1], [5, 1, 6, 7, 3], [1, 3, 5, 6, 7]), [5, 3, 1, 6, 7]);
   // A machine that only shows up now (no saved place yet) stays where it is on screen.
   assert.deepEqual(remember([8, 1, 3], [1, 2, 3], [1, 2, 3, 8]), [8, 1, 2, 3]);
-});
-
-// Three cards in a row and two below, 100 wide with 10 between them.
-const grid = [
-  { x: 0, y: 0, w: 100, h: 80 },
-  { x: 110, y: 0, w: 100, h: 80 },
-  { x: 220, y: 0, w: 100, h: 80 },
-  { x: 0, y: 90, w: 100, h: 120 },
-  { x: 110, y: 90, w: 100, h: 120 },
-];
-
-test("a dragged card lands on the card under the pointer", () => {
-  assert.equal(slotAt(grid, 50, 40), 0);
-  assert.equal(slotAt(grid, 300, 10), 2);
-  assert.equal(slotAt(grid, 150, 200), 4);
-});
-
-test("between cards or past the end, it lands on the nearest card in the nearest row", () => {
-  assert.equal(slotAt(grid, 104, 40), 0);
-  assert.equal(slotAt(grid, 107, 40), 1);
-  // The empty space after the last card is the end, not the card above it.
-  assert.equal(slotAt(grid, 300, 150), 4);
-  assert.equal(slotAt(grid, 230, 92), 4);
-  assert.equal(slotAt(grid, 60, 500), 3);
-  assert.equal(slotAt(grid, -40, -40), 0);
-  assert.equal(slotAt([], 10, 10), -1);
 });
 
 test("arrow keys move a card one place, Home and End to the start and the end", () => {

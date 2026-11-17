@@ -279,7 +279,24 @@ export function installMock() {
       cpuCount: 16,
       memTotalKb: kb(31.9),
       memUsedKb: kb(14.6),
-      disks: [disk("C:", "", 930.5, 512.2), disk("D:", "", 1862.9, 1204.7)],
+      // Many drives, so its card is much taller than the ones beside it, and the cards after those are
+      // packed under them (the Machines screen; tools/screenshots.mjs checks it).
+      disks: [
+        disk("C:", "", 930.5, 512.2),
+        disk("D:", "", 1862.9, 1204.7),
+        disk("E:", "Photos", 3725.8, 2104.3),
+        disk("F:", "Films", 7450.6, 5201.8),
+        disk("G:", "Series", 7450.6, 4987.2),
+        disk("H:", "Music", 1862.9, 702.6),
+        disk("I:", "Games", 1862.9, 1311.4),
+        disk("J:", "VMs", 1862.9, 905.7),
+        disk("K:", "Archive", 3725.8, 2890.1),
+        disk("L:", "Scratch", 931.5, 120.8),
+        disk("M:", "Cameras", 3725.8, 2466.5),
+        disk("N:", "Software", 931.5, 388.2),
+        disk("O:", "Backups", 7450.6, 3120.4),
+        disk("P:", "Offsite copy", 7450.6, 4410.9),
+      ],
       reduced: false,
     }],
     // Its SSH account isn't an administrator there, so the readings are limited.
