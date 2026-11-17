@@ -1,7 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { byKind, keepSilences, kindHeading, parseSilences, stillSilenced } from "./overview.ts";
+import { byKind, keepSilences, kindHeading, parseSilences, stillSilenced, tileGroups } from "./overview.ts";
 
 test("the Overview's cards come under a heading per type, PCs first, appliances left for the tiles", () => {
   const list = [
@@ -22,6 +22,31 @@ test("the Overview's cards come under a heading per type, PCs first, appliances 
   // A type with nothing in it has no heading.
   assert.deepEqual(byKind([{ kind: "vm" }, { kind: "appliance" }]).map((g) => g.kind), ["vm"]);
   assert.deepEqual(byKind([]), []);
+});
+
+test("appliances, handhelds and other devices are small tiles under a heading each, in that order", () => {
+  const list = [
+    { name: "Tablet", kind: "handheld", reviewed: true },
+    { name: "Doorbell", kind: "other", reviewed: true },
+    { name: "Printer", kind: "appliance", reviewed: true },
+    { name: "Main PC", kind: "pc", reviewed: true },
+    { name: "Deco", kind: "mesh", reviewed: true },
+    { name: "Smart plug", kind: "ignore", reviewed: true },
+    { name: "Sam's phone", kind: "handheld", reviewed: true },
+    // Just found by a scan: under New devices, not a tile yet.
+    { name: "Galaxy-S24", kind: "other", reviewed: false },
+  ];
+  const got = tileGroups(list).map((g) => [g.heading, g.items.map((d) => d.name)]);
+  assert.deepEqual(got, [
+    ["Appliances", ["Printer"]],
+    ["Handhelds", ["Tablet", "Sam's phone"]],
+    ["Other devices", ["Doorbell"]],
+  ]);
+  // A type with nothing in it has no heading.
+  assert.deepEqual(tileGroups([{ kind: "handheld", reviewed: true }]).map((g) => g.kind), ["handheld"]);
+  assert.deepEqual(tileGroups([{ kind: "pc", reviewed: true }, { kind: "other", reviewed: false }]), []);
+  // Handhelds are never cards.
+  assert.deepEqual(byKind([{ kind: "handheld" }]), []);
 });
 
 test("a type's heading says one or many", () => {

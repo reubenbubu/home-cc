@@ -86,6 +86,16 @@ Windows machine.
   Network screen) keeps what was typed, unsaved, when it is left for a link to
   another screen, and comes back with the caret after it. The screenshot
   tool's "Drafts:" flows check each form this way.
+  What each device type means for the screens is in `src/lib/kinds.ts`
+  (tested by `kinds.test.mjs`): the types that usually have no SSH
+  (appliances and handhelds, which start without an SSH user and show only up
+  or down), the types a found device can be added as, and the Handheld
+  suggestion from a hostname, which is only ever offered, never saved. Which
+  types are machines is `isMachine` in `devices.svelte.ts` (handhelds are not),
+  and the Overview's cards and tiles per type are in `overview.ts`. A new type
+  goes in `DeviceKind` in `inventory.rs` and `api.ts`, in `KIND_LABELS`, and
+  then in each of those. A pure module that uses another imports it with its
+  `.ts` ending (`./kinds.ts`), so that `npm test` can load it.
   Choices that are about this PC's screen rather than the machines are kept in
   the window's own storage, never in the back end: the order of the Machines
   cards and collapsed groups (`src/lib/order.svelte.ts`) and the machines

@@ -20,7 +20,7 @@
   import DockerSummary from "$lib/components/docker/DockerSummary.svelte";
   import { summarise } from "$lib/docker/logic";
   import { docker } from "$lib/docker/store.svelte";
-  import { byKind, kindHeading } from "$lib/overview";
+  import { byKind, kindHeading, tileGroups } from "$lib/overview";
   // Pi-hole
   import PiholeSummary from "$lib/components/pihole/PiholeSummary.svelte";
   import { piholeIssues } from "$lib/pihole/logic";
@@ -31,10 +31,10 @@
   const machines = $derived(shown.filter(isMachine).sort(byName));
   /** PCs, servers, VMs and containers, as cards under a heading for their type. */
   const kinds = $derived(byKind(machines));
-  /** Printers, TVs and the like: mostly no stats to show, so a small tile like the other devices. */
-  const appliances = $derived(machines.filter((d) => d.kind === "appliance"));
+  /** Appliances (printers, TVs), handhelds (phones, tablets) and other devices: mostly no stats to show, so
+   *  small tiles under a heading for their type. */
+  const tiles = $derived(tileGroups([...shown].sort(byName)));
   const meshNodes = $derived(shown.filter((d) => d.kind === "mesh").sort(byName));
-  const others = $derived(shown.filter((d) => d.kind === "other" && d.reviewed).sort(byName));
   const fresh = $derived(shown.filter((d) => !d.reviewed));
 
   const upOf = (list: Device[]) => list.filter((d) => status.health(d) === "up").length;
@@ -311,28 +311,18 @@
     {/if}
 
     <!-- Below the cards, always on a line of their own; side by side when they fit. -->
-    {#if appliances.length > 0 || others.length > 0}
+    {#if tiles.length > 0}
       <div class="tile-groups">
-        {#if appliances.length > 0}
-          <section class="tile-group" style="--n: {appliances.length}">
-            <h2 class="section-title">Appliances</h2>
+        {#each tiles as g (g.kind)}
+          <section class="tile-group" style="--n: {g.items.length}">
+            <h2 class="section-title">{g.heading}</h2>
             <div class="chips">
-              {#each appliances as d (d.id)}
+              {#each g.items as d (d.id)}
                 {@render tile(d)}
               {/each}
             </div>
           </section>
-        {/if}
-        {#if others.length > 0}
-          <section class="tile-group" style="--n: {others.length}">
-            <h2 class="section-title">Other devices</h2>
-            <div class="chips">
-              {#each others as d (d.id)}
-                {@render tile(d)}
-              {/each}
-            </div>
-          </section>
-        {/if}
+        {/each}
       </div>
     {/if}
   </div>

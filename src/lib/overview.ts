@@ -1,6 +1,7 @@
 // How the Overview screen lays out the machines: a card for each PC, server, VM and container, under a
-// heading for its type, and appliances (printers, TVs and the like, which mostly have no stats to show) as
-// small tiles like the other devices. Kept apart from the screen so it can be tested without a browser.
+// heading for its type, and appliances (printers, TVs and the like, which mostly have no stats to show) and
+// handhelds (phones, tablets, handheld consoles) as small tiles like the other devices. Kept apart from the
+// screen so it can be tested without a browser.
 import type { DeviceKind } from "./api";
 
 /** The kinds shown as cards, in the order their headings come. */
@@ -19,9 +20,35 @@ export interface KindGroup<T> {
 }
 
 /** The cards under a heading per type, in CARD_KINDS order, each keeping the order it was given. Types
- *  with nothing in them have no heading. Anything not shown as a card (appliances) is left out. */
+ *  with nothing in them have no heading. Anything not shown as a card (appliances, handhelds) is left out. */
 export function byKind<T extends { kind: DeviceKind }>(items: T[]): KindGroup<T>[] {
   return CARD_KINDS.map((kind) => ({ kind, items: items.filter((d) => d.kind === kind) })).filter((g) => g.items.length > 0);
+}
+
+/** The kinds shown as small tiles under the cards, each under its own heading, in this order. */
+export const TILE_KINDS = ["appliance", "handheld", "other"] as const satisfies readonly DeviceKind[];
+export type TileKind = (typeof TILE_KINDS)[number];
+
+export const TILE_HEADINGS: Record<TileKind, string> = {
+  appliance: "Appliances",
+  handheld: "Handhelds",
+  other: "Other devices",
+};
+
+export interface TileGroup<T> {
+  kind: TileKind;
+  heading: string;
+  items: T[];
+}
+
+/** The tiles under a heading per type, in TILE_KINDS order, each keeping the order it was given. Only devices
+ *  the owner has looked at: one a scan has just found (Other until then) is counted under New devices
+ *  instead. Types with nothing in them have no heading, and cards, mesh nodes and ignored devices are left
+ *  out. */
+export function tileGroups<T extends { kind: DeviceKind; reviewed: boolean }>(items: T[]): TileGroup<T>[] {
+  return TILE_KINDS.map((kind) => ({ kind, heading: TILE_HEADINGS[kind], items: items.filter((d) => d.kind === kind && d.reviewed) })).filter(
+    (g) => g.items.length > 0,
+  );
 }
 
 /** A down machine the owner has silenced on the Overview (one known to be off, say); `at` is when, in Unix

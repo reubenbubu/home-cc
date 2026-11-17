@@ -22,6 +22,9 @@ pub enum DeviceKind {
     /// plug, camera, games console or the like. Watched like the machines,
     /// usually without SSH.
     Appliance,
+    /// A phone, tablet or handheld games console. Not a machine: only
+    /// checked that it is there, with no SSH and no stats.
+    Handheld,
     Other,
     /// Seen on the network but the owner doesn't want to track it.
     Ignore,
@@ -36,6 +39,7 @@ impl DeviceKind {
             DeviceKind::Container => "container",
             DeviceKind::Mesh => "mesh",
             DeviceKind::Appliance => "appliance",
+            DeviceKind::Handheld => "handheld",
             DeviceKind::Other => "other",
             DeviceKind::Ignore => "ignore",
         }
@@ -49,6 +53,7 @@ impl DeviceKind {
             "container" => DeviceKind::Container,
             "mesh" => DeviceKind::Mesh,
             "appliance" => DeviceKind::Appliance,
+            "handheld" => DeviceKind::Handheld,
             "ignore" => DeviceKind::Ignore,
             _ => DeviceKind::Other,
         }
@@ -635,6 +640,8 @@ impl Inventory {
                     // sort out. Not Appliance: the maker alone can't tell a printer
                     // from a phone (Samsung, Espressif and others make both), and an
                     // appliance is watched like a machine, so it is the owner's pick.
+                    // Not Handheld either: the Network screen may suggest it from
+                    // the hostname, but only the owner sets it.
                     let kind = if f.looks_like_mesh { DeviceKind::Mesh } else { DeviceKind::Other };
                     tx.execute(
                         "INSERT INTO devices (name, host, kind, os, ssh_port, notes, mac, vendor, hostname,
@@ -826,6 +833,7 @@ mod tests {
             (DeviceKind::Container, "container"),
             (DeviceKind::Mesh, "mesh"),
             (DeviceKind::Appliance, "appliance"),
+            (DeviceKind::Handheld, "handheld"),
             (DeviceKind::Other, "other"),
             (DeviceKind::Ignore, "ignore"),
         ];
@@ -857,6 +865,20 @@ mod tests {
         scan(&inv, &[found("192.168.68.41", Some(MAC_A), Some("BRW1C2D3E4F5A6B"))], 200);
         let d = inv.get(id).unwrap();
         assert_eq!((d.kind, d.host.as_str()), (DeviceKind::Appliance, "192.168.68.41"));
+    }
+
+    #[test]
+    fn a_scan_never_makes_a_phone_a_handheld_and_keeps_one_the_owner_made() {
+        let inv = Inventory::in_memory().unwrap();
+        let id = scan_one(&inv, found("192.168.68.101", Some(MAC_A), Some("Pixel-8")));
+        assert_eq!(inv.get(id).unwrap().kind, DeviceKind::Other, "a scan never sets Handheld, whatever the hostname");
+        let mut phone = input("Sam's phone", "192.168.68.101");
+        phone.kind = DeviceKind::Handheld;
+        phone.ssh_user = None;
+        inv.update(id, phone).unwrap();
+        scan(&inv, &[found("192.168.68.105", Some(MAC_A), Some("Pixel-8"))], 200);
+        let d = inv.get(id).unwrap();
+        assert_eq!((d.kind, d.host.as_str(), d.name.as_str()), (DeviceKind::Handheld, "192.168.68.105", "Sam's phone"));
     }
 
     #[test]

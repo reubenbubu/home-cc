@@ -215,7 +215,7 @@
   }
 
   // A new machine's SSH user, while it still holds the default from Settings, follows the type: an appliance
-  // (most have no SSH) starts without one. The type it had before, to tell what it changed from.
+  // or a handheld (most have no SSH) starts without one. The type it had before, to tell what it changed from.
   let newKind: DeviceKind | null = null;
   $effect(() => {
     const kind = form.kind;
@@ -1181,6 +1181,11 @@
       {/if}
       {#if form.kind === "appliance"}
         <p class="hint">Most appliances have no SSH: leave the SSH user empty and home-cc just checks that it is up.</p>
+      {:else if form.kind === "handheld"}
+        <p class="hint">
+          A phone, tablet or handheld console isn't one of the machines: home-cc just checks that it is up, and shows it on
+          the Overview and the Network screen. Leave the SSH user empty.
+        </p>
       {/if}
       <p class="hint">
         To read stats, home-cc logs in with your key file (the one chosen in <a href="/settings">Settings</a>, or the usual

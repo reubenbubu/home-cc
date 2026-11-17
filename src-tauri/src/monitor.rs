@@ -723,6 +723,7 @@ mod tests {
         assert!(!wants_stats(&device(DeviceKind::Appliance, None)), "an appliance without SSH is only checked");
         assert!(!wants_stats(&device(DeviceKind::Appliance, Some("  "))));
         assert!(wants_stats(&device(DeviceKind::Appliance, Some("admin"))), "a NAS box with SSH");
+        assert!(!wants_stats(&device(DeviceKind::Handheld, None)), "a phone is only checked");
         assert!(wants_stats(&device(DeviceKind::Pc, Some("sam"))));
         assert!(!wants_stats(&device(DeviceKind::Pc, None)));
         assert!(!wants_stats(&device(DeviceKind::Ignore, Some("sam"))));
