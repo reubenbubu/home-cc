@@ -5,7 +5,7 @@
   import type { Container, ContainerStats, DockerHost, Stack } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { stackSummary } from "$lib/docker/logic";
+  import { containerKey, stackKey, stackSummary } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import ConfirmButton from "../ConfirmButton.svelte";
   import Icon from "../Icon.svelte";
@@ -41,7 +41,7 @@
 
   const containers = $derived(stack?.containers ?? others ?? []);
   const summary = $derived(stack ? stackSummary(stack) : null);
-  const key = $derived(stack ? `s:${stack.name}` : "");
+  const key = $derived(stack ? stackKey(host.deviceId, stack.name) : "");
   const action = $derived(stack ? docker.action(key) : undefined);
   const busy = $derived(!!action?.doing);
   const down = $derived(!!stack && stack.containers.length === 0);
@@ -49,7 +49,7 @@
   /** Container actions that went wrong, shown under the list. */
   const failed = $derived(
     containers
-      .map((c) => ({ c, a: docker.action(`c:${c.id}`) }))
+      .map((c) => ({ c, a: docker.action(containerKey(host.deviceId, c.id)) }))
       .filter((x): x is { c: Container; a: NonNullable<typeof x.a> } => !!x.a?.error),
   );
 </script>

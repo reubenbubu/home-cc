@@ -235,6 +235,31 @@ fn needs_check(row: &store::HostRow, problem: Option<&Problem>, now: i64) -> boo
     }
 }
 
+/// What reading a host may do, given the owner's choice and how the last try went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// Don't log in at all.
+    Skip,
+    Go,
+    /// Log in afresh first: Docker refused the user, and a docker group the owner has
+    /// added them to since only applies to a new login.
+    FreshLogin,
+}
+
+/// `auto` is set for what the screen does by itself (its timer, changing tabs, CPU
+/// and memory); without it the owner asked.
+fn gate(mode: HostMode, problem: Option<&Problem>, auto: bool) -> Gate {
+    if mode == HostMode::Off {
+        // The owner said this isn't a Docker host.
+        return Gate::Skip;
+    }
+    match problem {
+        Some(p) if auto && p.is_login() => Gate::Skip,
+        Some(p) if !auto && p.kind == ProblemKind::Permission => Gate::FreshLogin,
+        _ => Gate::Go,
+    }
+}
+
 fn ssh_problem(e: SshError) -> Problem {
     match e {
         SshError::NewHost(_) => Problem::new(
@@ -417,6 +442,17 @@ impl Docker {
         self.conns.lock().unwrap().remove(&device_id);
     }
 
+    /// Why a docker command didn't work. When the user isn't allowed to use Docker the
+    /// connection is closed, so the next try logs in afresh and picks up a docker group
+    /// added in the meantime.
+    fn refused(&self, d: &Device, out: &ExecOutput) -> Problem {
+        let p = docker_problem(d, out);
+        if p.kind == ProblemKind::Permission {
+            self.drop_conn(d.id);
+        }
+        p
+    }
+
     /// The open connection to a machine, or a new one.
     async fn conn(&self, app: &AppHandle, d: &Device) -> std::result::Result<(Arc<Conn>, bool), Problem> {
         let turn = self.dialing.lock().unwrap().entry(d.id).or_default().clone();
@@ -498,11 +534,7 @@ impl Docker {
         if out.exit_status == Some(0) {
             return Ok(out);
         }
-        let p = docker_problem(d, &out);
-        if p.kind == ProblemKind::Permission {
-            // Group changes only apply to a new login.
-            self.drop_conn(d.id);
-        }
+        let p = self.refused(d, &out);
         if matches!(p.kind, ProblemKind::Permission | ProblemKind::Daemon | ProblemKind::NotInstalled) {
             self.note(d.id, Some(&p));
         }
@@ -532,11 +564,7 @@ impl Docker {
                     None => Ok(compose),
                     Some(said) => {
                         let fake = ExecOutput { stderr: said.into_bytes(), exit_status: Some(1), ..ExecOutput::default() };
-                        let p = docker_problem(d, &fake);
-                        if p.kind == ProblemKind::Permission {
-                            self.drop_conn(d.id);
-                        }
-                        Err(p)
+                        Err(self.refused(d, &fake))
                     }
                 }
             }
@@ -547,15 +575,16 @@ impl Docker {
         }
     }
 
-    /// Containers and stacks on one host. `auto` is set for the screen's own timer: a
-    /// host that turned the login away is then not tried again until the owner asks.
+    /// Containers and stacks on one host. `auto` is set for what the screen does by
+    /// itself: a host that turned the login away is then not tried again until the
+    /// owner asks. A host set to "Never show" is not read at all.
     pub async fn overview(&self, app: &AppHandle, device_id: i64, auto: bool) -> Result<HostView> {
         let d = Self::device(app, device_id)?;
-        if auto {
-            let host = self.host(app, &d)?;
-            if host.problem.as_ref().is_some_and(Problem::is_login) {
-                return Ok(HostView { host, overview: None });
-            }
+        let host = self.host(app, &d)?;
+        match gate(host.mode, host.problem.as_ref(), auto) {
+            Gate::Skip => return Ok(HostView { host, overview: None }),
+            Gate::FreshLogin => self.drop_conn(d.id),
+            Gate::Go => {}
         }
         let outcome = self.read_overview(app, &d).await;
         let (overview, problem) = match outcome {
@@ -578,7 +607,7 @@ impl Docker {
         // A container removed between listing and reading makes docker end with an
         // error while the rest is fine; only no answer at all is a failure.
         if out.exit_status != Some(0) && containers.is_empty() {
-            return Err(docker_problem(d, &out));
+            return Err(self.refused(d, &out));
         }
         let (by_project, others) = parse::by_project(containers);
         let seen: Vec<StackPlace> = by_project
@@ -605,9 +634,17 @@ impl Docker {
         Ok(Overview { device_id: d.id, read_at: now(), stacks, others })
     }
 
-    /// CPU and memory of the running containers.
+    /// CPU and memory of the running containers. Only the screen itself asks for
+    /// these, so a login that was turned away is never tried from here.
     pub async fn stats(&self, app: &AppHandle, device_id: i64) -> Result<Vec<ContainerStats>> {
         let d = Self::device(app, device_id)?;
+        let host = self.host(app, &d)?;
+        if gate(host.mode, host.problem.as_ref(), true) == Gate::Skip {
+            return Err(match host.problem {
+                Some(p) if p.is_login() => p.into(),
+                _ => Error::Invalid(format!("{} is set to never show on the Docker screen.", d.name)),
+            });
+        }
         let out = self.run_docker(app, &d, &scripts::stats(), QUICK).await?;
         Ok(parse::stats(&String::from_utf8_lossy(&out.stdout)))
     }
@@ -662,7 +699,7 @@ impl Docker {
         if out.exit_status == Some(0) {
             return Ok(ActionOutput { output: tail(&out) });
         }
-        let p = docker_problem(&d, &out);
+        let p = self.refused(&d, &out);
         if p.kind == ProblemKind::Other {
             // Compose's own output says what went wrong; give the end of it, not just the first line.
             let what = tail(&out);
@@ -931,6 +968,23 @@ mod tests {
 
     fn row(mode: HostMode, found: Option<bool>, checked_at: Option<i64>) -> store::HostRow {
         store::HostRow { mode, found, checked_at, ..store::HostRow::default() }
+    }
+
+    #[test]
+    fn when_a_host_may_be_read() {
+        let refused = Problem::new(ProblemKind::Auth, "no");
+        let group = Problem::new(ProblemKind::Permission, "not in the docker group");
+        let down = Problem::new(ProblemKind::Unreachable, "off");
+        for auto in [true, false] {
+            assert_eq!(gate(HostMode::Off, None, auto), Gate::Skip, "the owner said it isn't a Docker host");
+            assert_eq!(gate(HostMode::Off, Some(&group), auto), Gate::Skip);
+            assert_eq!(gate(HostMode::Auto, None, auto), Gate::Go);
+            assert_eq!(gate(HostMode::On, Some(&down), auto), Gate::Go, "a machine that was off is tried again");
+        }
+        assert_eq!(gate(HostMode::Auto, Some(&refused), true), Gate::Skip, "no login is retried by itself");
+        assert_eq!(gate(HostMode::Auto, Some(&refused), false), Gate::Go, "the owner pressed Try again");
+        assert_eq!(gate(HostMode::Auto, Some(&group), true), Gate::Go, "the screen's own reads keep the login");
+        assert_eq!(gate(HostMode::Auto, Some(&group), false), Gate::FreshLogin, "Try again picks up the new group");
     }
 
     #[test]

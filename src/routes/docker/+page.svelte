@@ -85,7 +85,7 @@
     <h1>Docker</h1>
     <div class="actions">
       {#if host}
-        <button class="btn" disabled={reading} onclick={() => host && docker.select(host.deviceId)}>
+        <button class="btn" disabled={reading} onclick={() => host && docker.refresh(host.deviceId)}>
           <span class="icon" class:spin={reading}><Icon path={icons.refresh} size={16} /></span> Refresh
         </button>
         <button

@@ -4,7 +4,7 @@
   import type { Container, ContainerStats } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { isRunning, portText, publishedPorts, stateText, stateTone } from "$lib/docker/logic";
+  import { containerKey, isRunning, portText, publishedPorts, stateText, stateTone } from "$lib/docker/logic";
   import { bytes } from "$lib/format";
   import Icon from "../Icon.svelte";
 
@@ -27,7 +27,7 @@
 
   let asking = $state<"stop" | "remove" | null>(null);
 
-  const action = $derived(docker.action(`c:${c.id}`));
+  const action = $derived(docker.action(containerKey(hostId, c.id)));
   const busy = $derived(!!action?.doing);
   const running = $derived(isRunning(c));
   const tone = $derived(stateTone(c));

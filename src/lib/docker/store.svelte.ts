@@ -13,14 +13,14 @@ import {
   type Overview,
   type StackAction,
 } from "./api";
-import { isLoginProblem, shownHosts } from "./logic";
+import { containerKey, keptSelection, shownHosts, stackKey } from "./logic";
 
 /** The open host is read again this often while the screen is open. */
 export const REFRESH_SECS = 15;
 /** Looks for Docker going on at once. */
 const PROBES_AT_ONCE = 3;
 
-/** An action under way or just finished, on a container ("c:<id>") or a stack ("s:<name>"). */
+/** An action under way or just finished, on a container or a stack (keys from containerKey and stackKey). */
 export interface Action {
   /** What is being done, as the button said it: "Restarting". */
   doing: string | null;
@@ -59,9 +59,7 @@ class DockerStore {
       if (seq !== this.#seq) return;
       this.hosts = hosts;
       this.error = null;
-      if (this.selected == null || !this.shown.some((h) => h.deviceId === this.selected)) {
-        this.selected = this.shown[0]?.deviceId ?? null;
-      }
+      this.selected = keptSelection(this.selected, this.shown);
     } catch (e) {
       if (seq === this.#seq) this.error = errorText(e);
     } finally {
@@ -73,7 +71,18 @@ class DockerStore {
     this.#seq++;
     const i = this.hosts.findIndex((h) => h.deviceId === host.deviceId);
     this.hosts = i < 0 ? [...this.hosts, host] : this.hosts.map((h, j) => (j === i ? host : h));
-    if (this.selected == null && this.shown.some((h) => h.deviceId === host.deviceId)) this.selected = host.deviceId;
+    // A host set to "Never show" (or found to have no Docker) loses its tab; the screen
+    // moves on rather than keep showing, and reading, it.
+    const next = keptSelection(this.selected, this.shown);
+    if (next !== this.selected) {
+      this.selected = next;
+      if (next != null) this.select(next);
+    }
+  }
+
+  /** CPU and memory, only once the list was read and nothing is wrong: they would be one more login otherwise. */
+  async #statsIfFine(id: number) {
+    if (this.overviews.has(id) && !this.byId.get(id)?.problem) await this.readStats(id);
   }
 
   /** Look for Docker on the machines that need it, a few at a time. */
@@ -146,10 +155,7 @@ class DockerStore {
       const id = this.selected;
       if (id != null && !document.hidden) {
         await this.read(id, auto);
-        const host = this.byId.get(id);
-        if (!stopped && this.overviews.has(id) && !isLoginProblem(host?.problem?.kind) && !host?.problem) {
-          await this.readStats(id);
-        }
+        if (!stopped) await this.#statsIfFine(id);
       }
       if (!stopped) timer = setTimeout(() => round(true), REFRESH_SECS * 1000);
     };
@@ -160,10 +166,15 @@ class DockerStore {
     };
   }
 
-  /** Show another host, and read it straight away. */
+  /** Show another host, and read it straight away. A host whose login was turned away waits for Try again. */
   select(id: number) {
     this.selected = id;
-    void this.read(id, true).then(() => this.readStats(id));
+    void this.read(id, true).then(() => this.#statsIfFine(id));
+  }
+
+  /** The owner's Refresh: read the host now, trying a refused login again too. */
+  refresh(id: number) {
+    void this.read(id, false).then(() => this.#statsIfFine(id));
   }
 
   action(key: string): Action | undefined {
@@ -180,12 +191,12 @@ class DockerStore {
       this.actions.set(key, { doing: null, output: null, error: errorText(e) });
     }
     await this.read(hostId, false);
-    void this.readStats(hostId);
+    void this.#statsIfFine(hostId);
   }
 
   containerAction(hostId: number, c: Container, action: ContainerAction) {
     const doing = { start: "Starting", stop: "Stopping", restart: "Restarting", remove: "Removing" }[action];
-    return this.#run(hostId, `c:${c.id}`, doing, () => dockerApi.containerAction(hostId, c.id, action));
+    return this.#run(hostId, containerKey(hostId, c.id), doing, () => dockerApi.containerAction(hostId, c.id, action));
   }
 
   stackAction(hostId: number, stack: string, action: StackAction) {
@@ -196,7 +207,7 @@ class DockerStore {
       restart: "Restarting",
       build: "Building and starting",
     }[action];
-    return this.#run(hostId, `s:${stack}`, doing, () => dockerApi.stackAction(hostId, stack, action));
+    return this.#run(hostId, stackKey(hostId, stack), doing, () => dockerApi.stackAction(hostId, stack, action));
   }
 
   clearAction(key: string) {
@@ -206,9 +217,9 @@ class DockerStore {
   async forgetStack(hostId: number, stack: string) {
     try {
       await dockerApi.forgetStack(hostId, stack);
-      this.actions.delete(`s:${stack}`);
+      this.actions.delete(stackKey(hostId, stack));
     } catch (e) {
-      this.actions.set(`s:${stack}`, { doing: null, output: null, error: errorText(e) });
+      this.actions.set(stackKey(hostId, stack), { doing: null, output: null, error: errorText(e) });
     }
     await this.read(hostId, false);
   }

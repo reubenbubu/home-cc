@@ -104,6 +104,22 @@ export function shownHosts(hosts: DockerHost[]): DockerHost[] {
   return hosts.filter((h) => h.mode === "on" || (h.mode === "auto" && h.found === true));
 }
 
+/** The host the screen should show: the one it shows, while it still has a tab, else the first that has one. */
+export function keptSelection(selected: number | null, shown: DockerHost[]): number | null {
+  if (selected != null && shown.some((h) => h.deviceId === selected)) return selected;
+  return shown[0]?.deviceId ?? null;
+}
+
+/** Where an action on a stack is kept. Stacks on two hosts often share a name ("monitoring"), so the host is part of it. */
+export function stackKey(hostId: number, stack: string): string {
+  return `s:${hostId}:${stack}`;
+}
+
+/** Where an action on a container is kept. */
+export function containerKey(hostId: number, containerId: string): string {
+  return `c:${hostId}:${containerId}`;
+}
+
 /** Docker's --timestamps prefix: "2026-11-17T14:03:09.123456789Z message". */
 const STAMP = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2}) ?/;
 

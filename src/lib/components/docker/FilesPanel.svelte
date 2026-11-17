@@ -6,7 +6,7 @@
   import { dockerApi, type DockerHost, type SavedFile, type Stack } from "$lib/docker/api";
   import { docker } from "$lib/docker/store.svelte";
   import { dockerIcons } from "$lib/docker/icons";
-  import { baseName } from "$lib/docker/logic";
+  import { baseName, stackKey } from "$lib/docker/logic";
   import { dockerProblem } from "$lib/docker/problem";
   import ConfirmButton from "../ConfirmButton.svelte";
   import Icon from "../Icon.svelte";
@@ -26,7 +26,7 @@
 
   const changed = $derived(path != null && text !== original);
   const name = $derived(device?.name ?? "the host");
-  const action = $derived(docker.action(`s:${stack.name}`));
+  const action = $derived(docker.action(stackKey(host.deviceId, stack.name)));
   const isCompose = $derived(path != null && (stack.configFiles.includes(path) || /compose[^/]*\.ya?ml$/.test(path)));
 
   async function listFiles() {

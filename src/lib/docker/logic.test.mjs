@@ -2,7 +2,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  containerKey,
   defaultPick,
+  keptSelection,
   highlight,
   keepLast,
   logFileName,
@@ -11,6 +13,7 @@ import {
   pickTotals,
   portText,
   shownHosts,
+  stackKey,
   stackOrder,
   stackSummary,
   stateText,
@@ -90,6 +93,21 @@ test("which hosts show", () => {
       ["on", null],
     ],
   );
+});
+
+test("the open host moves on when it loses its tab", () => {
+  const h = (deviceId) => ({ deviceId, mode: "on", found: true, version: null, compose: "plugin", checkedAt: null, problem: null, needsCheck: false });
+  assert.equal(keptSelection(2, [h(1), h(2)]), 2, "still shown: stays");
+  assert.equal(keptSelection(3, [h(1), h(2)]), 1, "set to Never show: the first tab instead");
+  assert.equal(keptSelection(null, [h(4)]), 4);
+  assert.equal(keptSelection(3, []), null, "nothing left to show");
+});
+
+test("actions on same-named stacks of two hosts are kept apart", () => {
+  assert.notEqual(stackKey(1, "monitoring"), stackKey(2, "monitoring"));
+  assert.equal(stackKey(1, "monitoring"), stackKey(1, "monitoring"));
+  assert.notEqual(containerKey(1, "abc"), containerKey(2, "abc"));
+  assert.notEqual(stackKey(1, "abc"), containerKey(1, "abc"));
 });
 
 test("log lines are split from Docker's timestamp", () => {
