@@ -239,7 +239,9 @@ const HOST_KEYS_TABLE: &str = "
 CREATE TABLE ssh_host_keys (
     device_id   INTEGER PRIMARY KEY REFERENCES devices (id) ON DELETE CASCADE,
     algorithm   TEXT NOT NULL,
-    fingerprint TEXT NOT NULL
+    fingerprint TEXT NOT NULL,
+    -- 1 once the owner has been shown the fingerprint and approved it.
+    approved    INTEGER NOT NULL DEFAULT 0
 );
 ";
 
@@ -286,14 +288,15 @@ impl Inventory {
         if version < 2 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} {HOST_KEYS_TABLE} PRAGMA user_version = 2; COMMIT;"))?;
         }
-        // Early test builds of step 3 stored SSH identities by address, in a
-        // table with other columns that every query here would fail on. It is
-        // replaced by an empty one: the identities are learned again under
-        // the first-contact rules.
-        let by_device: Option<i64> = conn
-            .query_row("SELECT 1 FROM pragma_table_info('ssh_host_keys') WHERE name = 'device_id'", [], |r| r.get(0))
+        // Early test builds of step 3 made this table with other columns
+        // (identities stored by address, or with no record of the owner's
+        // approval) that the queries here would fail on. It is replaced by an
+        // empty one: the identities are learned again under the first-contact
+        // rules.
+        let current: Option<i64> = conn
+            .query_row("SELECT 1 FROM pragma_table_info('ssh_host_keys') WHERE name = 'approved'", [], |r| r.get(0))
             .optional()?;
-        if by_device.is_none() {
+        if current.is_none() {
             conn.execute_batch(&format!("BEGIN; DROP TABLE IF EXISTS ssh_host_keys; {HOST_KEYS_TABLE} COMMIT;"))?;
         }
         Ok(Self { conn: Mutex::new(conn), purged: AtomicI64::new(i64::MIN) })

@@ -305,7 +305,7 @@ impl Monitor {
                 "This machine has shown a different identity since. Check the new one and approve again.".into(),
             ));
         };
-        inv.replace_host_key(device_id, &HostKey { algorithm: offered.algorithm, fingerprint: offered.fingerprint })?;
+        inv.approve_host_key(device_id, &HostKey { algorithm: offered.algorithm, fingerprint: offered.fingerprint })?;
         if let Some(state) = self.stats.lock().unwrap().get_mut(&device_id) {
             state.entry.paused = false;
         }
@@ -361,28 +361,36 @@ impl Monitor {
         };
         let prev_ticks = self.stats.lock().unwrap().get(&device_id).and_then(|s| s.ticks);
         let login = login_for(app, &device).await;
+        // The identity the machine shows on a first connection, kept in case
+        // the owner has to be asked about it.
+        let shown: Arc<Mutex<Option<HostKey>>> = Arc::default();
         let outcome = match &login {
-            Ok(login) => {
-                // A machine reached for the first time has its identity stored
-                // before anything else happens, so a later change is noticed.
-                // The exception is a machine with a stored password: its
-                // identity waits for the owner's approval (`NewHost`), or for
-                // a key login that gets in without the password.
-                let (first_app, has_password) = (app.clone(), login.password.is_some());
-                let first_use = move |key: &HostKey| {
-                    if !has_password {
-                        remember(&first_app, device_id, key);
-                    }
-                };
-                stats::collect(login, device.os, prev_ticks, &first_use).await
+            Ok(prepared) => {
+                let seen = shown.clone();
+                let first_use = move |key: &HostKey| *seen.lock().unwrap() = Some(key.clone());
+                stats::collect(&prepared.login, device.os, prev_ticks, &first_use).await
             }
             Err(e) => Err(SshError::Other(e.to_string())),
         };
-        if let (Ok(collected), Ok(login)) = (&outcome, &login) {
-            if login.known_key.is_none() {
-                remember(app, device_id, &collected.host_key);
+        let outcome = match (outcome, &login) {
+            // A key got in, so this is a machine the owner set up for this PC:
+            // remember its identity, to notice if it ever changes.
+            (Ok(collected), Ok(prepared)) => {
+                if prepared.login.known_key.is_none() {
+                    remember(app, device_id, &collected.host_key);
+                }
+                Ok(collected)
             }
-        }
+            // No key got in and the password was held back because the owner
+            // hasn't approved this machine's identity yet: ask them.
+            (Err(SshError::AuthFailed(_)), Ok(prepared)) if prepared.password_held_back => {
+                match prepared.login.known_key.clone().or_else(|| shown.lock().unwrap().clone()) {
+                    Some(key) => Err(SshError::NewHost(key)),
+                    None => Err(SshError::AuthFailed("Could not log in, and the machine did not show an identity to approve.".into())),
+                }
+            }
+            (other, _) => other,
+        };
         let pinned = app.state::<Inventory>().host_key(device_id).ok().flatten().map(|k| k.fingerprint);
 
         let mut known = self.stats.lock().unwrap();
@@ -405,7 +413,12 @@ impl Monitor {
             Err(e) => {
                 // Keep the last good reading on screen next to the error.
                 state.ticks = None;
-                entry.error = Some(e.to_string());
+                entry.error = Some(match &e {
+                    SshError::NewHost(_) => "The stored password has not been sent: this machine's identity \
+                                             needs your approval first."
+                        .to_string(),
+                    other => other.to_string(),
+                });
                 entry.error_kind = Some(error_kind(&e));
                 // A machine that turned the login away isn't tried again by
                 // the timer: repeated failed logins get this PC locked out by
@@ -467,11 +480,20 @@ async fn named_devices(app: &AppHandle, found: &[Found]) -> Result<HashMap<Strin
     Ok(named)
 }
 
+/// A login ready to try, and whether the stored password was left out of it.
+struct Prepared {
+    login: Login,
+    /// A password is stored, but the owner hasn't approved this machine's
+    /// identity yet, so it must not be sent.
+    password_held_back: bool,
+}
+
 /// Gather what is needed to log in: stored identity, key file and secrets.
-async fn login_for(app: &AppHandle, device: &Device) -> Result<Login> {
+async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepared> {
     let inv = app.state::<Inventory>();
     let settings = inv.settings()?;
     let known_key = inv.host_key(device.id)?;
+    let approved = inv.host_key_approved(device.id)?;
     let device_id = device.id;
     // The keychain can be slow to answer, so keep it off the async threads.
     // If it can't be read at all (locked, or no keychain service running),
@@ -488,13 +510,18 @@ async fn login_for(app: &AppHandle, device: &Device) -> Result<Login> {
     })
     .await
     .unwrap_or((None, None));
-    Ok(Login {
-        host: device.host.clone(),
-        port: device.ssh_port,
-        user: device.ssh_user.clone().unwrap_or_default().trim().to_string(),
-        known_key,
-        key_path: Some(settings.ssh_key_path).filter(|p| !p.is_empty()).map(PathBuf::from),
-        key_passphrase,
-        password,
+    let has_password = password.as_deref().is_some_and(|p| !p.is_empty());
+    Ok(Prepared {
+        login: Login {
+            host: device.host.clone(),
+            port: device.ssh_port,
+            user: device.ssh_user.clone().unwrap_or_default().trim().to_string(),
+            known_key,
+            key_path: Some(settings.ssh_key_path).filter(|p| !p.is_empty()).map(PathBuf::from),
+            key_passphrase,
+            // A password only ever goes to an identity the owner approved.
+            password: password.filter(|_| approved),
+        },
+        password_held_back: has_password && !approved,
     })
 }

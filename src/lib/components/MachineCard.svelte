@@ -126,8 +126,8 @@
     </div>
   {:else if entry?.errorKind === "newHost" && offered}
     <div class="alert ask" role="status">
-      <p><strong>First connection to {device.name}.</strong></p>
-      <p>Its identity is</p>
+      <p><strong>Before the stored password is used for {device.name}, check its identity.</strong></p>
+      <p>The machine shows this identity:</p>
       <p class="mono print">{identityText(offered)}</p>
       <p>
         Check it matches, then approve to use the stored password. The password has not been sent, and won't be

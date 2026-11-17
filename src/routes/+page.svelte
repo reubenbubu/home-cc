@@ -36,7 +36,7 @@
 
   /** A machine card's one line about a failed reading. The first two wait for the owner on Machines. */
   const NOTE: Record<StatsErrorKind, string> = {
-    newHost: "First connection: needs your approval",
+    newHost: "Needs your approval before its password is used",
     hostKeyChanged: "Identity changed: needs your approval",
     auth: "Couldn't log in to read stats",
     unreachable: "Couldn't read stats",

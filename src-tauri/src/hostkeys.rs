@@ -4,6 +4,10 @@
 //! An identity belongs to a device, not to an address: it follows the device
 //! when a scan finds it at a new IP address, and it goes when the device is
 //! removed or the owner points the device at another address or port.
+//!
+//! An identity is either just remembered (the app noted it by itself after a
+//! key login worked) or approved (the owner was shown its fingerprint and
+//! said yes). A stored password is only ever sent to an approved identity.
 
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
@@ -20,6 +24,15 @@ impl Inventory {
             .optional()?)
     }
 
+    /// True if the owner has approved the identity stored for this device.
+    pub fn host_key_approved(&self, device_id: i64) -> Result<bool> {
+        Ok(self
+            .conn()
+            .query_row("SELECT approved FROM ssh_host_keys WHERE device_id = ?1", [device_id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// Remember a machine's identity. An identity already stored is kept: it
     /// only changes when the owner approves the new one. Nothing is stored
     /// for a device that was removed in the meantime.
@@ -33,10 +46,10 @@ impl Inventory {
     }
 
     /// Store the identity the owner approved, in place of any stored before.
-    pub fn replace_host_key(&self, device_id: i64, key: &HostKey) -> Result<()> {
+    pub fn approve_host_key(&self, device_id: i64, key: &HostKey) -> Result<()> {
         let stored = self.conn().execute(
-            "INSERT OR REPLACE INTO ssh_host_keys (device_id, algorithm, fingerprint)
-             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM devices WHERE id = ?1)",
+            "INSERT OR REPLACE INTO ssh_host_keys (device_id, algorithm, fingerprint, approved)
+             SELECT ?1, ?2, ?3, 1 WHERE EXISTS (SELECT 1 FROM devices WHERE id = ?1)",
             params![device_id, key.algorithm, key.fingerprint],
         )?;
         if stored == 0 {
@@ -79,6 +92,29 @@ mod tests {
     }
 
     #[test]
+    fn only_the_owner_approves_an_identity() {
+        let inv = Inventory::in_memory().unwrap();
+        let nas = inv.add(input("NAS", "192.168.68.20")).unwrap().id;
+        assert!(!inv.host_key_approved(nas).unwrap());
+
+        // Noted by the app itself: remembered, but not approved.
+        inv.remember_host_key(nas, &key("SHA256:seen")).unwrap();
+        assert!(!inv.host_key_approved(nas).unwrap());
+
+        inv.approve_host_key(nas, &key("SHA256:seen")).unwrap();
+        assert!(inv.host_key_approved(nas).unwrap());
+        // Remembering again doesn't undo the approval.
+        inv.remember_host_key(nas, &key("SHA256:other")).unwrap();
+        assert!(inv.host_key_approved(nas).unwrap());
+        assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:seen")));
+
+        // Pointing the device somewhere else starts again from nothing.
+        inv.update(nas, input("NAS", "192.168.68.99")).unwrap();
+        assert_eq!(inv.host_key(nas).unwrap(), None);
+        assert!(!inv.host_key_approved(nas).unwrap());
+    }
+
+    #[test]
     fn first_identity_is_kept_until_forgotten_or_replaced() {
         let inv = Inventory::in_memory().unwrap();
         let nas = inv.add(input("NAS", "nas.lan")).unwrap().id;
@@ -90,7 +126,7 @@ mod tests {
         // Each device has its own.
         assert_eq!(inv.host_key(other).unwrap(), None);
 
-        inv.replace_host_key(nas, &key("SHA256:approved")).unwrap();
+        inv.approve_host_key(nas, &key("SHA256:approved")).unwrap();
         assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:approved")));
         assert_eq!(pins(&inv), 1);
 
@@ -99,7 +135,7 @@ mod tests {
         inv.remember_host_key(nas, &key("SHA256:second")).unwrap();
         assert_eq!(inv.host_key(nas).unwrap(), Some(key("SHA256:second")));
         // Replacing also works when nothing was stored, and forgetting twice is fine.
-        inv.replace_host_key(other, &key("SHA256:other")).unwrap();
+        inv.approve_host_key(other, &key("SHA256:other")).unwrap();
         assert_eq!(inv.host_key(other).unwrap(), Some(key("SHA256:other")));
         inv.forget_host_key(other).unwrap();
         inv.forget_host_key(other).unwrap();
@@ -116,7 +152,7 @@ mod tests {
         // A reading that finishes after the device was removed stores nothing.
         inv.remember_host_key(nas, &key("SHA256:late")).unwrap();
         assert_eq!(inv.host_key(nas).unwrap(), None);
-        assert!(matches!(inv.replace_host_key(nas, &key("SHA256:late")), Err(Error::NotFound(_))));
+        assert!(matches!(inv.approve_host_key(nas, &key("SHA256:late")), Err(Error::NotFound(_))));
         assert_eq!(pins(&inv), 0);
 
         // A machine added later at the same address starts fresh.
