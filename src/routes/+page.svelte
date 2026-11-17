@@ -19,6 +19,10 @@
   import { summarise } from "$lib/docker/logic";
   import { docker } from "$lib/docker/store.svelte";
   import { byKind, kindHeading } from "$lib/overview";
+  // Pi-hole
+  import PiholeSummary from "$lib/components/pihole/PiholeSummary.svelte";
+  import { piholeIssues } from "$lib/pihole/logic";
+  import { pihole } from "$lib/pihole/store.svelte";
 
   const byName = (a: Device, b: Device) => a.name.localeCompare(b.name, undefined, { numeric: true });
   const shown = $derived(devices.list.filter((d) => d.kind !== "ignore"));
@@ -108,6 +112,12 @@
         warn.push({ key: `docker-${h.deviceId}-more`, text: `${name}: ${attention.length - 3} more containers need a look`, href: "/docker" });
       }
     }
+    // Pi-hole (read by the Pi-hole panel): one that can't be read, or whose blocking is off or paused.
+    const piholes = pihole.hosts.flatMap((h) => {
+      const d = devices.byId.get(h.deviceId);
+      return d ? [{ id: d.id, name: d.name, status: pihole.statuses.get(d.id), readError: pihole.readErrors.get(d.id) }] : [];
+    });
+    for (const i of piholeIssues(piholes, clock.now)) warn.push({ ...i, href: "/pihole" });
     return [...down, ...warn];
   });
 </script>
@@ -319,6 +329,8 @@
       <h2 class="section-title">Containers</h2>
       <DockerSummary />
     </section>
+    <!-- Pi-hole: shows nothing when no machine is a Pi-hole. -->
+    <PiholeSummary />
   </aside>
 </div>
 

@@ -23,7 +23,9 @@ export type Area =
   // Docker (spec 5.5)
   | "docker"
   // Proxmox (spec 5.6)
-  | "proxmox";
+  | "proxmox"
+  // Pi-hole
+  | "pihole";
 
 /** Source files to start from for each area. Paths are from the root of the repository. */
 export const AREA_FILES: Record<Area, string[]> = {
@@ -102,6 +104,14 @@ export const AREA_FILES: Record<Area, string[]> = {
     "src-tauri/src/proxmox/mod.rs (what each action asks Proxmox, and how failures are worded) and src-tauri/src/proxmox/model.rs (reading Proxmox's answers)",
     "src-tauri/src/proxmox/store.rs (token ID, port and certificate per device)",
     "src/lib/proxmox.svelte.ts, src/lib/proxmox.ts and src/routes/proxmox/ with src/lib/components/proxmox/ (the screen)",
+  ],
+  // --- Pi-hole ---
+  pihole: [
+    "src-tauri/src/pihole/client.rs (one HTTPS or HTTP call to the Pi-hole; the certificate check is src-tauri/src/proxmox/pin.rs)",
+    "src-tauri/src/pihole/auth.rs (logging in to Pi-hole's API, keeping and renewing the session, and how login failures are worded)",
+    "src-tauri/src/pihole/mod.rs (what a reading and each action ask Pi-hole) and src-tauri/src/pihole/model.rs (reading Pi-hole's answers)",
+    "src-tauri/src/pihole/store.rs (which devices are Pi-holes, with their scheme, port and certificate)",
+    "src/lib/pihole/ (store, comparison and wording) and src/routes/pihole/ with src/lib/components/pihole/ (the screen)",
   ],
 };
 

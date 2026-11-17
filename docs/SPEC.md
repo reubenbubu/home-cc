@@ -75,6 +75,7 @@ administrator rights on Windows. Nothing in the app needs them.
 | Windows PCs | SSH (Windows' built-in OpenSSH server) | Turn on OpenSSH Server in Windows settings |
 | Docker | Through the same SSH connection to each host | Nothing extra |
 | Proxmox | Proxmox's built-in HTTPS API | An API token created in Proxmox |
+| Pi-hole | Pi-hole v6's own API (HTTPS, or HTTP if the owner chooses) | An app password (or the web password) |
 | Prometheus (optional) | Its HTTP query API | Nothing, if it already collects machine stats |
 
 Using SSH for Docker means no Docker ports are opened on the network, which is
@@ -230,6 +231,62 @@ so the owner recreates it. Old images are left for Clean up to remove.
 Done when: the owner can see every VM, start and stop it, and take a snapshot
 from the app.
 
+### 5.7 Pi-hole
+
+The owner runs two Pi-holes (containers on the Proxmox PC). The Pi-hole screen
+shows them side by side.
+
+- **Which machines:** any saved device can be a Pi-hole. The Add panel suggests
+  machines whose name or hostname says Pi-hole, and, on request ("Look for
+  Pi-holes on my machines"), those that answer Pi-hole's login page over plain
+  HTTP on port 80 (nothing secret is sent). A machine is added only when the
+  owner presses its Add button. "Remove from the Pi-hole screen" (asks first)
+  logs out and forgets its settings and password; nothing on the Pi-hole changes.
+- **Talking to Pi-hole:** Pi-hole v6's REST API under /api. home-cc logs in with
+  POST /api/auth (an app password is best: it also works with two-factor login
+  on) and sends the session ID in the X-FTL-SID header. Pi-hole allows only a
+  few sessions at once (16 unless changed), so home-cc keeps one per Pi-hole,
+  uses it until Pi-hole drops it (a 401 means one new login and one retry, no
+  more; a request that times out or loses its connection keeps the session),
+  and logs out (DELETE /api/auth) when the settings change, the device
+  is removed or its address changes, and when the app closes. Readings use
+  GET /api/stats/summary, /api/dns/blocking, /api/lists and /api/info/version;
+  pausing uses POST /api/dns/blocking with {blocking, timer}. Pi-hole v5 (whose
+  API is /admin/api.php) is recognised and said to be unsupported.
+- **Connection:** HTTPS on 443 by default, with the certificate pinned like
+  Proxmox's: on first contact the owner is shown its SHA-256 fingerprint and
+  approves it; any other certificate stops the connection before the password
+  is sent and needs approving again. Another port, scheme or address is a first
+  contact again. The owner can choose plain HTTP instead, with a warning that
+  the password and session then cross the network unencrypted.
+- **Per Pi-hole:** blocking on, paused (with the time left, counting down) or
+  off; queries and blocked today with the percentage; clients; domains on the
+  blocklists; when the lists were last updated; version; lists that failed to
+  download. Every failure is shown as a problem with an agent prompt, worded
+  for the cause: no password, wrong password, two-factor login without an app
+  password, no free API session, logins held back, certificate new or changed,
+  unreachable, Pi-hole v5.
+- **Pause and resume:** "Pause blocking…" offers 30 seconds, 5 minutes, 30
+  minutes or "until I turn it back on", then asks for confirmation. "Pause
+  both…" does the same for every Pi-hole at once; "Resume" turns blocking back
+  on without asking. Pi-hole switches blocking back on by itself when a timer
+  ends; the screen reads it again just after (only when its latest reading
+  worked: a pause seen before a Pi-hole became unreadable doesn't make the
+  screen read sooner than every 30 seconds).
+- **Blocklists compared:** the lists (block and allow) of the Pi-holes are
+  compared by address (a web address's scheme and host in any letter case, and
+  a "/" at its end, count as the same list; both spellings are shown); lists
+  only on some of them, or switched off on some, are named. Nothing is changed by home-cc; copying lists from one Pi-hole to
+  another may come later. Allow and deny domain counts are not compared yet.
+- **Overview:** a Pi-hole panel with one line per Pi-hole (blocking state and
+  blocked today), and a "Needs attention" entry when a Pi-hole can't be read
+  or its blocking is off or paused. Nothing when no machine is a Pi-hole.
+- Screens read every 30 seconds while they are open and the window is in view.
+  The password lives only in the keychain; problem reports never include it.
+
+Done when: the owner sees both Pi-holes' numbers, pauses and resumes blocking
+on one or both, and can tell which lists only one of them has.
+
 ## 6. Screens and layout
 
 The owner uses three monitors: 2560x1440, 3440x1440 ultrawide, and 1920x1080.
@@ -255,7 +312,7 @@ The app must work well on all three and when moved between them.
 ## 7. Safety
 
 - Anything that deletes or stops things (remove container, cleanup, force stop
-  VM, roll back snapshot) asks for confirmation first.
+  VM, roll back snapshot, pause Pi-hole blocking) asks for confirmation first.
 - Secrets live only in the OS keychain (SSH private keys stay in the owner's
   own files or SSH agent; see section 2).
 - A machine reached over SSH is remembered by its identity (host key). If the
@@ -274,6 +331,7 @@ The app must work well on all three and when moved between them.
 3. **See everything:** network scan, ping and status (5.1, 5.2), and machine
    stats over SSH (5.3).
 4. **Act on things:** terminal tabs (5.4), then Docker (5.5), then Proxmox (5.6).
+5. **Pi-hole** (5.7).
 
 ## 9. Open questions
 

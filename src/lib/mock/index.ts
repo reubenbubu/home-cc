@@ -28,6 +28,8 @@ import { terminalCommands } from "./terminal";
 import { dockerMock } from "./docker";
 // Proxmox
 import { proxmoxMock } from "./proxmox";
+// Pi-hole
+import { piholeMock } from "./pihole";
 
 /** How a sample device behaves when it is checked. */
 type Pattern = "wired" | "wifi" | "flaky" | "recovered" | "noPing" | "self" | "off" | "gone" | "fresh";
@@ -997,6 +999,9 @@ export function installMock() {
   // --- Proxmox: its sample host and commands live in mock/proxmox.ts ---
   Object.assign(commands, proxmoxMock({ find, secrets, query }, idOf("Proxmox")));
   // --- end Proxmox ---
+  // --- Pi-hole: its sample Pi-holes and commands live in mock/pihole.ts ---
+  Object.assign(commands, piholeMock({ find, devices: () => devices, secrets, query }, [idOf("Pi-hole 1"), idOf("Pi-hole 2")]));
+  // --- end Pi-hole ---
 
   mockIPC(
     (cmd, payload) => {

@@ -1,7 +1,7 @@
 # home-cc
 
 A personal desktop app (Windows and Linux) for managing a home network:
-mesh nodes, PCs and VMs, Docker containers, and Proxmox.
+mesh nodes, PCs and VMs, Docker containers, Proxmox, and Pi-hole.
 
 Built with Tauri 2, Rust and Svelte. See [docs/SPEC.md](docs/SPEC.md) for what
 it does and the build plan.
@@ -94,6 +94,9 @@ Windows machine.
   - `terminal.rs` – terminal tabs over SSH, and copy and paste for them. Its
     test against a real SSH server (vim, tmux, htop) runs with
     `HOME_CC_TEST_SSH=host:port:user:password cargo test real_server -- --ignored`.
+  - `pihole/` – Pi-hole v6's API: logging in and keeping one session per
+    Pi-hole (`auth.rs`), HTTPS with the approved certificate or HTTP
+    (`client.rs`), and which devices are Pi-holes (`store.rs`).
   - `commands.rs` – everything the screens can ask the back end to do.
 - `src-tauri/examples/` – small command-line programs for trying the network
   and SSH code by itself, for example

@@ -56,6 +56,8 @@ pub fn add_device(inv: State<Inventory>, monitor: State<Monitor>, input: DeviceI
     secrets::delete(&monitor::password_key(device.id)).ok();
     // Proxmox: the same goes for an API token secret.
     secrets::delete(&crate::proxmox::token_key(device.id)).ok();
+    // Pi-hole: and for a Pi-hole password.
+    secrets::delete(&crate::pihole::password_key(device.id)).ok();
     monitor.wake();
     Ok(device)
 }
@@ -65,6 +67,7 @@ pub fn update_device(
     inv: State<Inventory>,
     monitor: State<Monitor>,
     proxmox: State<crate::proxmox::Proxmox>,
+    pihole: State<crate::pihole::PiHole>,
     id: i64,
     input: DeviceInput,
 ) -> Result<Device> {
@@ -80,6 +83,8 @@ pub fn update_device(
     // checked as at first contact (as Inventory::update does for SSH).
     if !before.host.eq_ignore_ascii_case(&device.host) {
         proxmox.address_changed(&inv, id)?;
+        // Pi-hole: the same for its certificate, and its session ends.
+        pihole.address_changed(&inv, id)?;
     }
     monitor.wake();
     Ok(device)
@@ -100,14 +105,24 @@ pub fn rename_group(inv: State<Inventory>, from: String, to: String) -> Result<u
 }
 
 #[tauri::command(async)]
-pub fn remove_device(app: AppHandle, inv: State<Inventory>, monitor: State<Monitor>, id: i64) -> Result<()> {
+pub fn remove_device(
+    app: AppHandle,
+    inv: State<Inventory>,
+    monitor: State<Monitor>,
+    pihole: State<crate::pihole::PiHole>,
+    id: i64,
+) -> Result<()> {
     inv.remove(id)?;
+    // Pi-hole: its API session is ended (in the background).
+    pihole.device_removed(id);
     monitor.forget(id);
     // Its stored password goes with it. A keychain hiccup here shouldn't
     // stop the device being removed.
     secrets::delete(&monitor::password_key(id)).ok();
     // Proxmox: its API token secret goes too.
     secrets::delete(&crate::proxmox::token_key(id)).ok();
+    // Pi-hole: and its password.
+    secrets::delete(&crate::pihole::password_key(id)).ok();
     app.emit(monitor::EVENT_STATUS, ()).ok();
     app.emit(monitor::EVENT_STATS, ()).ok();
     Ok(())

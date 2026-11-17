@@ -289,6 +289,44 @@ const SCREENS = [
   { name: "proxmox-permission", path: "/proxmox?pveperm", ready: ".alert", before: (page) => page.getByText("Privilege Separation").waitFor() },
   { name: "proxmox-states", path: "/proxmox?pvestates", ready: "table", before: (page) => page.getByText("Hibernated").first().waitFor() },
   // --- end Proxmox ---
+  // --- Pi-hole (see src/lib/mock/pihole.ts for the "?ph…" words) ---
+  { name: "pihole", path: "/pihole", ready: "article", before: (page) => page.getByText("Only on Pi-hole 1").first().waitFor() },
+  {
+    name: "pihole-pause",
+    path: "/pihole",
+    ready: "article",
+    async before(page) {
+      const card = page.getByRole("article", { name: "Pi-hole Pi-hole 1" });
+      await card.getByRole("button", { name: "Pause blocking…" }).click();
+      await card.getByRole("button", { name: "5 minutes" }).click();
+      await card.getByRole("button", { name: "Yes, pause blocking" }).waitFor();
+    },
+  },
+  { name: "pihole-paused", path: "/pihole?phoff", ready: "article", before: (page) => page.getByText(/back on in/).waitFor() },
+  { name: "pihole-cert", path: "/pihole?phcert", ready: "article", before: (page) => page.getByText("check its certificate").waitFor() },
+  { name: "pihole-cert-changed", path: "/pihole?phchanged", ready: "article", before: (page) => page.getByText("shows a different certificate from the one you approved").first().waitFor() },
+  { name: "pihole-wrong-password", path: "/pihole?phwrong", ready: "article", before: (page) => page.getByText("didn't accept the password").first().waitFor() },
+  { name: "pihole-down", path: "/pihole?phdown", ready: "article", before: (page) => page.getByText("Nothing answered at").waitFor() },
+  {
+    name: "pihole-setup-http",
+    path: "/pihole?phnopw",
+    ready: "form",
+    async before(page) {
+      await page.getByLabel("HTTP: only if this Pi-hole doesn't offer HTTPS.").check();
+      await page.getByText("cross your network unencrypted").waitFor();
+    },
+  },
+  {
+    name: "pihole-add",
+    path: "/pihole?phnone",
+    ready: ".add",
+    async before(page) {
+      await page.getByRole("button", { name: "Look for Pi-holes on my machines" }).click();
+      await page.getByText("Answers like Pi-hole v5").waitFor();
+    },
+  },
+  { name: "overview-pihole", path: "/?phoff&phdown", ready: ".card", before: (page) => page.getByText(/Pi-hole 1: paused, back on in/).waitFor() },
+  // --- end Pi-hole ---
   // "?noping": this PC isn't allowed to send pings, so no status check works.
   {
     name: "overview-check-problem",
@@ -645,6 +683,8 @@ async function checkFlows(browser, url) {
   const headings = (page) =>
     page.evaluate(() => [...document.querySelectorAll(".group-title")].map((h) => h.textContent.trim().replace(/\s+/g, " ")));
   const cardsIn = (page, name) => group(page, name).locator("article h3").allTextContents();
+  // Pi-hole: one Pi-hole's card on the Pi-hole screen.
+  const piholeCard = (page, name) => page.getByRole("article", { name: `Pi-hole ${name}`, exact: true });
   const flows = [
     {
       what: "approving a first connection stores that identity and reads the machine",
@@ -2113,6 +2153,141 @@ async function checkFlows(browser, url) {
         await expectValue(page.getByLabel("Passphrase for the key file"), "", "the passphrase after Discard");
       },
     },
+    // --- Pi-hole ---
+    {
+      what: "Pi-hole: a first connection waits for the certificate, and approving it reads the Pi-hole",
+      path: "/pihole?phcert",
+      async run(page) {
+        const two = piholeCard(page, "Pi-hole 2");
+        await two.getByText("The password has not been sent").waitFor();
+        if (await two.getByText("Queries today").count()) throw new Error("numbers were read before the certificate was approved");
+        await two.getByRole("button", { name: "Approve this certificate" }).click();
+        await two.getByRole("button", { name: "Yes, it matches" }).click();
+        await two.getByText("Queries today").waitFor();
+        await two.getByText("check its certificate").waitFor({ state: "detached" });
+      },
+    },
+    {
+      what: "Pi-hole: pausing asks first, counts down, and Resume turns blocking back on",
+      path: "/pihole",
+      async run(page) {
+        const one = piholeCard(page, "Pi-hole 1");
+        await one.getByText("Blocking", { exact: true }).waitFor();
+        await one.getByRole("button", { name: "Pause blocking…" }).click();
+        await one.getByRole("button", { name: "5 minutes" }).click();
+        await one.getByText("for 5 minutes? Ads and trackers get through").waitFor();
+        // Not paused until the owner says yes.
+        await page.waitForTimeout(400);
+        if (!(await one.getByText("Blocking", { exact: true }).count())) throw new Error("blocking changed before the owner confirmed");
+        await one.getByRole("button", { name: "Yes, pause blocking" }).click();
+        await one.getByText("Paused", { exact: true }).waitFor();
+        await one.getByText(/back on in 4:5\d|back on in 5:00/).waitFor();
+        await one.getByRole("button", { name: "Resume blocking" }).click();
+        await one.getByText("Blocking", { exact: true }).waitFor();
+        await one.getByRole("button", { name: "Pause blocking…" }).waitFor();
+      },
+    },
+    {
+      what: "Pi-hole: Pause both asks once and pauses every Pi-hole, Resume both turns them all back on",
+      path: "/pihole",
+      async run(page) {
+        await piholeCard(page, "Pi-hole 2").getByText("Queries today").waitFor();
+        await page.getByRole("button", { name: "Pause both…" }).click();
+        await page.getByRole("group", { name: "How long to pause blocking on both Pi-holes" }).getByRole("button", { name: "Until I turn it back on" }).click();
+        await page.getByText("Pause blocking on both Pi-holes until you turn it back on?").waitFor();
+        await page.getByRole("button", { name: "Yes, pause blocking" }).click();
+        for (const name of ["Pi-hole 1", "Pi-hole 2"]) await piholeCard(page, name).getByText("Blocking off", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "Resume both" }).click();
+        for (const name of ["Pi-hole 1", "Pi-hole 2"]) await piholeCard(page, name).getByText("Blocking", { exact: true }).waitFor();
+        await page.getByRole("button", { name: "Pause both…" }).waitFor();
+      },
+    },
+    {
+      what: "Pi-hole: the lists only one Pi-hole has are named, and nothing offers to change them",
+      path: "/pihole",
+      async run(page) {
+        const lists = page.getByRole("region", { name: "Blocklists compared" });
+        await lists.getByText("2 lists differ").waitFor();
+        const hagezi = lists.locator("li", { hasText: "hagezi" });
+        await hagezi.getByText("Only on Pi-hole 1").waitFor();
+        await hagezi.getByText("Pi-hole 2: not there").waitFor();
+        const easy = lists.locator("li", { hasText: "Easyprivacy" });
+        await easy.getByText("On Pi-hole 1; switched off on Pi-hole 2").waitFor();
+        // Written differently on each Pi-hole (host capitals): one list, with both spellings shown.
+        await easy.getByText(/Pi-hole 2: https:\/\/V\.Firebog\.net\/hosts\/Easyprivacy\.txt/).waitFor();
+        await easy.getByText(/Pi-hole 1: https:\/\/v\.firebog\.net\/hosts\/Easyprivacy\.txt/).waitFor();
+        if (await lists.locator("li", { hasText: "StevenBlack" }).count()) throw new Error("a trailing / made the StevenBlack list look like two lists");
+        if (await lists.getByRole("button").count()) throw new Error("the comparison has buttons; it should only show the difference");
+      },
+    },
+    {
+      what: "Pi-hole: a wrong password is shown as a problem with an agent prompt, and a new password fixes it",
+      path: "/pihole?phwrong",
+      async run(page) {
+        const two = piholeCard(page, "Pi-hole 2");
+        const problem = two.locator(".alert.problem", { hasText: "didn't accept the password" });
+        await problem.waitFor();
+        await problem.getByRole("button", { name: "Copy a prompt for an agent" }).waitFor();
+        await two.getByRole("button", { name: "Connection settings" }).click();
+        await two.getByLabel("Password").fill("the-new-app-password");
+        await two.getByRole("button", { name: "Save", exact: true }).click();
+        await two.getByText("Queries today").waitFor();
+        await problem.waitFor({ state: "detached" });
+      },
+    },
+    {
+      what: "Pi-hole: the Overview is quiet when all is well, and flags a paused or unreachable Pi-hole",
+      path: "/",
+      async run(page) {
+        const panel = page.getByRole("region", { name: "Pi-hole", exact: true });
+        await panel.getByText("Blocking").first().waitFor();
+        await page.waitForTimeout(300);
+        // The sample has other things that need attention (machine stats of Pi-hole 1 among them), but nothing
+        // from the Pi-hole screen.
+        const said = await page.locator('.issues a[href="/pihole"]').allTextContents();
+        if (said.length) throw new Error(`the Overview flags a Pi-hole that is fine: ${said.join("; ")}`);
+        await page.goto(page.url().replace(/\/$/, "") + "/?phoff&phdown", { waitUntil: "networkidle" });
+        const issues = page.locator(".issues");
+        await issues.getByRole("link", { name: /Pi-hole 1: paused, back on in/ }).waitFor();
+        await issues.getByRole("link", { name: "Pi-hole 2 can't be reached" }).waitFor();
+      },
+    },
+    {
+      what: "Pi-hole: a password typed in the setup stays after looking at another screen, and Discard clears it",
+      path: "/pihole?phnopw",
+      async run(page) {
+        const one = piholeCard(page, "Pi-hole 1");
+        await one.getByLabel("Password").fill("typed-secret");
+        await one.getByLabel("HTTP: only if this Pi-hole doesn't offer HTTPS.").check();
+        await expectValue(one.getByLabel("Port"), "80", "the port after choosing HTTP");
+        await awayAndBack(page, "Settings", "Pi-hole");
+        await expectValue(one.getByLabel("Password"), "typed-secret", "the password typed before");
+        if (!(await one.getByLabel("HTTP: only if this Pi-hole doesn't offer HTTPS.").isChecked())) throw new Error("the HTTP choice was lost");
+        await one.getByText("Unsaved changes").waitFor();
+        await one.getByRole("button", { name: "Discard" }).click();
+        await expectValue(one.getByLabel("Password"), "", "the password after Discard");
+        await expectValue(one.getByLabel("Port"), "443", "the port after Discard");
+      },
+    },
+    {
+      what: "Pi-hole: setup adds a machine only when the owner presses Add, then asks for the password and the certificate",
+      path: "/pihole?phnone",
+      async run(page) {
+        await page.getByText("Its name says Pi-hole").first().waitFor();
+        await page.waitForTimeout(300);
+        if (await page.getByRole("article").count()) throw new Error("a suggested machine was added by itself");
+        await page.getByRole("button", { name: "Add Pi-hole 2 as a Pi-hole" }).click();
+        const two = piholeCard(page, "Pi-hole 2");
+        await two.getByText("Add this Pi-hole's password").waitFor();
+        await two.getByLabel("Password").fill("app-password");
+        await two.getByRole("button", { name: "Save", exact: true }).click();
+        await two.getByText("check its certificate").waitFor();
+        await two.getByRole("button", { name: "Approve this certificate" }).click();
+        await two.getByRole("button", { name: "Yes, it matches" }).click();
+        await two.getByText("Queries today").waitFor();
+      },
+    },
+    // --- end Pi-hole ---
   ];
   const problems = [];
   for (const flow of flows) {
