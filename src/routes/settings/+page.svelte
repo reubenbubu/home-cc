@@ -5,6 +5,7 @@
   import { settings } from "$lib/settings.svelte";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import Problem from "$lib/components/Problem.svelte";
 
   type RangeChoice = "auto" | "custom" | string;
 
@@ -244,7 +245,7 @@
             </span>
           </div>
         {/if}
-        {#if secretError}<p class="alert" role="alert">{secretError}</p>{/if}
+        {#if secretError}<Problem problem={{ area: "secrets", what: "Managing the SSH key passphrase on the Settings screen", error: secretError }} />{/if}
         <p class="hint">Kept in your system's keychain, not in the settings file, and never shown again.</p>
       </div>
     </section>
@@ -254,7 +255,13 @@
     <button class="btn primary" type="submit" disabled={saving || !settings.loaded}>{saving ? "Saving…" : "Save settings"}</button>
     {#if savedNote}<span class="saved" role="status"><Icon path={icons.check} size={15} /> Saved</span>{/if}
     {#if tried && !valid}<span class="problem" role="alert">Some values need fixing before they can be saved.</span>{/if}
-    {#if saveError}<span class="alert" role="alert">Not saved: {saveError}</span>{/if}
+    {#if saveError}
+      <Problem
+        class="save-problem"
+        problem={{ area: "settings", what: "Saving the settings", error: saveError, details: { "Tried to save": JSON.stringify(form) } }}
+        message="Not saved: {saveError}"
+      />
+    {/if}
     {#if info}
       <span class="muted small about">home-cc {info.version} on {info.os}</span>
     {:else if infoError}
@@ -277,7 +284,7 @@
   .with-unit { display: flex; align-items: center; gap: 0.6rem; }
   .with-unit input[type="number"] { width: 8rem; }
   .field { display: flex; flex-direction: column; gap: 0.35rem; }
-  .field .hint, .field .alert { margin-top: 0.3rem; }
+  .field .hint, .field :global(.alert) { margin-top: 0.3rem; }
   .hint { margin: 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
   .hint .mono { color: var(--text-soft); font-size: 0.92em; overflow-wrap: anywhere; }
   .problem { color: var(--bad); font-size: 0.92rem; }
@@ -287,6 +294,7 @@
   .stored :global(svg), .saved :global(svg) { color: var(--ok); }
   .stored-actions { display: flex; gap: 0.4rem; }
 
+  .save-bar :global(.save-problem) { flex-basis: 100%; }
   .save-bar { display: flex; align-items: center; gap: 0.6rem 1rem; flex-wrap: wrap; margin-top: var(--gap); }
   .saved { display: flex; align-items: center; gap: 0.35rem; }
   .about { margin-left: auto; }

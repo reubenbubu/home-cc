@@ -5,6 +5,7 @@
   import { scan } from "$lib/scan.svelte";
   import { status } from "$lib/status.svelte";
   import CheckProblem from "$lib/components/CheckProblem.svelte";
+  import Problem from "$lib/components/Problem.svelte";
   import DeviceTable from "$lib/components/DeviceTable.svelte";
   import ScanStatus from "$lib/components/ScanStatus.svelte";
 
@@ -53,7 +54,11 @@
 <CheckProblem />
 <!-- A refusal that only repeats the standing problem above is not said twice. -->
 {#if status.checkError && status.checkError !== status.problem}
-  <p class="alert gap" role="alert">Not checked: {status.checkError}</p>
+  <Problem
+    class="gap"
+    problem={{ area: "status", what: 'Pressing "Check now" on the Network screen', error: status.checkError }}
+    message="Not checked: {status.checkError}"
+  />
 {/if}
 
 <ScanStatus />
@@ -115,7 +120,7 @@
 {/if}
 
 <style>
-  .gap { margin-bottom: var(--gap); }
+  :global(.alert.gap) { margin-bottom: var(--gap); }
   .groups, .side, .main { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
 
   /* Ultrawide: the long device list on the left, the short groups beside it.

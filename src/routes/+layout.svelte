@@ -10,6 +10,8 @@
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import Problem from "$lib/components/Problem.svelte";
+  import type { Problem as ProblemInfo } from "$lib/report";
 
   let { children } = $props();
 
@@ -22,13 +24,28 @@
   /** Loading problems, shown on every screen so stale numbers are never taken for live ones. */
   const problems = $derived(
     [
-      devices.error && `Couldn't load devices: ${devices.error}`,
-      status.error && `Couldn't load device status: ${status.error}`,
-      stats.error && `Couldn't load machine stats: ${stats.error}`,
-      settings.error && `Couldn't load settings: ${settings.error}`,
-      live.error && `Live updates aren't working, so this screen may be out of date: ${live.error}`,
-    ].filter((p): p is string => !!p),
+      devices.error && { area: "devices", what: "Loading the saved devices", lead: "Couldn't load devices", error: devices.error },
+      status.error && { area: "status", what: "Loading device status", lead: "Couldn't load device status", error: status.error },
+      stats.error && { area: "stats", what: "Loading machine stats", lead: "Couldn't load machine stats", error: stats.error },
+      settings.error && { area: "settings", what: "Loading the settings and this PC's networks", lead: "Couldn't load settings", error: settings.error },
+      live.error && {
+        area: "live",
+        what: "Listening for updates from the back end",
+        lead: "Live updates aren't working, so this screen may be out of date",
+        error: live.error,
+      },
+    ].filter((p): p is ProblemInfo & { lead: string } => !!p),
   );
+
+  /** What a screen that couldn't be drawn hands to an agent. The stack says where in the screens it broke. */
+  function screenProblem(error: unknown): ProblemInfo {
+    return {
+      area: "screen",
+      what: `Showing the ${page.url.pathname} screen, which failed while drawing`,
+      error: errorText(error),
+      trace: error instanceof Error ? error.stack : undefined,
+    };
+  }
 
   /** A screen that fails while drawing is replaced by a message; the cause goes to the log for a bug report. */
   function screenFailed(error: unknown) {
@@ -62,8 +79,8 @@
     {#if sample}<div class="sample" title="Not connected to the app: this is made-up sample data">Sample<span class="nav-label">&nbsp;data</span></div>{/if}
   </nav>
   <main class="content">
-    {#each problems as problem}
-      <p class="alert load-problem" role="alert">{problem}</p>
+    {#each problems as problem (problem.area)}
+      <Problem class="load-problem" {problem} message="{problem.lead}: {problem.error}" />
     {/each}
     <!-- Without this, one value a screen can't draw would leave it blank or stuck, with nothing said.
          A new boundary for each screen, so moving to another screen always works. -->
@@ -74,7 +91,7 @@
           <section class="panel broken" role="alert">
             <h1>This screen couldn't be shown</h1>
             <p>Something home-cc was given isn't in a form this screen can show. The other screens still work.</p>
-            <p class="muted small">If it keeps happening, report it with this detail: <span class="mono">{errorText(error)}</span></p>
+            <Problem problem={screenProblem(error)} message="What went wrong: {errorText(error)}" />
             <div><button class="btn" onclick={reset}>Try again</button></div>
           </section>
         {/snippet}
@@ -136,7 +153,7 @@
     overflow-y: auto;
     padding: 1.5rem 1.85rem;
   }
-  .load-problem { margin-bottom: var(--gap); }
+  .content :global(.load-problem) { margin-bottom: var(--gap); }
   .broken { display: flex; flex-direction: column; gap: 0.75rem; max-width: 46rem; border-color: var(--bad); }
   .broken h1 { margin: 0; font-size: 1.3rem; font-weight: 600; }
   .broken p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }

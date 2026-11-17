@@ -16,11 +16,26 @@ use tauri::{AppHandle, Emitter, State};
 pub struct AppInfo {
     version: &'static str,
     os: &'static str,
+    /// Processor family, such as "x86_64".
+    arch: &'static str,
+    /// False for a development build (`tauri dev`).
+    release: bool,
 }
 
 #[tauri::command]
 pub fn app_info() -> AppInfo {
-    AppInfo { version: env!("CARGO_PKG_VERSION"), os: std::env::consts::OS }
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        release: !cfg!(debug_assertions),
+    }
+}
+
+/// Problems the back end ran into on its own, oldest first, for a problem report.
+#[tauri::command]
+pub fn recent_log() -> Vec<crate::diag::LogLine> {
+    crate::diag::recent()
 }
 
 // --- Inventory ---

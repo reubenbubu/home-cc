@@ -5,6 +5,7 @@
   // are the back end's words; they may hold a command to copy.
   import { icons } from "$lib/icons";
   import { status } from "$lib/status.svelte";
+  import AgentPrompt from "./AgentPrompt.svelte";
   import Icon from "./Icon.svelte";
 </script>
 
@@ -14,6 +15,7 @@
     <div>
       <strong>Status checks aren't working, so up and down below can't be trusted.</strong>
       <p>{status.problem}</p>
+      <AgentPrompt problem={{ area: "status", what: "Checking whether devices are up (a standing problem)", error: status.problem }} />
     </div>
   </section>
 {/if}

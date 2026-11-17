@@ -19,6 +19,9 @@
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
+  import Problem from "$lib/components/Problem.svelte";
+  import { deviceDetails } from "$lib/problems.svelte";
+  import type { Problem as ProblemInfo } from "$lib/report";
 
   const blank = (): DeviceInput => ({ name: "", host: "", kind: "vm", os: "linux", sshUser: "", sshPort: 22, notes: "", mac: "" });
 
@@ -26,8 +29,23 @@
   let form = $state<DeviceInput>(blank());
   /** The address, SSH port and hardware address as they are saved, to tell what the form changes. */
   let stored = $state<{ host: string; sshPort: number; mac: string | null }>({ host: "", sshPort: 22, mac: null });
-  let formError = $state<string | null>(null);
-  let listError = $state<string | null>(null);
+  let formError = $state<ProblemInfo | null>(null);
+  let listError = $state<ProblemInfo | null>(null);
+
+  /** A problem with the form. Says which machine and what was typed, but never the password. */
+  function formProblem(area: ProblemInfo["area"], what: string, message: string): ProblemInfo {
+    const d = typeof editing === "number" ? devices.byId.get(editing) : undefined;
+    return {
+      area,
+      what,
+      error: message,
+      details: {
+        ...(d ? deviceDetails(d) : { Device: "a new machine" }),
+        "Typed in the form": JSON.stringify({ ...form, password: undefined }),
+        "A password was typed": !!password,
+      },
+    };
+  }
   let saving = $state(false);
   /** Typed into the form; goes to the keychain on save and is never read back. */
   let password = $state("");
@@ -53,7 +71,7 @@
           if (editing === id) hasPassword = stored;
         },
         (e) => {
-          if (editing === id) formError = `Couldn't check for a stored password: ${errorText(e)}`;
+          if (editing === id) formError = formProblem("secrets", "Opening a machine to edit it", `Couldn't check for a stored password: ${errorText(e)}`);
         },
       );
     }
@@ -104,7 +122,7 @@
           try {
             await api.setSecret(secretKeys.sshPassword(id), password);
           } catch (err) {
-            formError = `Nothing was saved, because the password couldn't be stored: ${errorText(err)}`;
+            formError = formProblem("secrets", "Saving a machine with a new password", `Nothing was saved, because the password couldn't be stored: ${errorText(err)}`);
             return;
           }
           hasPassword = true;
@@ -112,7 +130,7 @@
           try {
             saved = await devices.update(id, input);
           } catch (err) {
-            formError = `The new password was stored, but the rest wasn't saved: ${errorText(err)}`;
+            formError = formProblem("devices", "Saving a machine with a new password", `The new password was stored, but the rest wasn't saved: ${errorText(err)}`);
             return;
           }
         } else {
@@ -135,7 +153,7 @@
       // arrives as a "stats-changed" event; this only clears what the old entry showed.
       stats.load();
     } catch (err) {
-      formError = errorText(err);
+      formError = formProblem("devices", "Saving a machine", errorText(err));
     } finally {
       saving = false;
     }
@@ -151,7 +169,7 @@
       editing = saved.id;
       stored = { host: saved.host, sshPort: saved.sshPort, mac: saved.mac };
       form.mac = saved.mac ?? "";
-      formError = `Saved, but the password couldn't be stored: ${errorText(err)}`;
+      formError = formProblem("secrets", "Storing the password for a machine just saved", `Saved, but the password couldn't be stored: ${errorText(err)}`);
       return false;
     }
   }
@@ -161,7 +179,7 @@
       await api.deleteSecret(secretKeys.sshPassword(id));
       hasPassword = false;
     } catch (err) {
-      formError = `Couldn't remove the password: ${errorText(err)}`;
+      formError = formProblem("secrets", "Removing a machine's stored password", `Couldn't remove the password: ${errorText(err)}`);
     }
   }
 
@@ -171,7 +189,7 @@
       await devices.remove(d.id);
       if (editing === d.id) editing = null;
     } catch (err) {
-      listError = `Couldn't remove "${d.name}": ${errorText(err)}`;
+      listError = { area: "devices", what: `Removing "${d.name}" on the Machines screen`, error: `Couldn't remove "${d.name}": ${errorText(err)}`, details: deviceDetails(d) };
     }
   }
 
@@ -202,10 +220,20 @@
           <!-- A reading this card can't draw must not take the other machines down with it. -->
           <svelte:boundary onerror={(e) => console.error(`The card for "${m.name}" could not be shown:`, e)}>
             <MachineCard device={m} onedit={startEdit} />
-            {#snippet failed(_error, reset)}
+            {#snippet failed(error, reset)}
               <article class="panel broken" role="alert">
                 <h3 class="ellipsis" title={m.name}>{m.name}</h3>
                 <p>This machine's readings can't be shown: something it sent isn't in a form home-cc understands.</p>
+                <Problem
+                  problem={{
+                    area: "screen",
+                    what: `Showing the card for "${m.name}" on the Machines screen, which failed while drawing`,
+                    error: errorText(error),
+                    details: deviceDetails(m),
+                    trace: error instanceof Error ? error.stack : undefined,
+                  }}
+                  message="What went wrong: {errorText(error)}"
+                />
                 <div class="form-actions">
                   <button class="btn small" onclick={reset}>Try again</button>
                   <button class="btn small" onclick={() => startEdit(m)}>Edit</button>
@@ -224,7 +252,7 @@
           <label class="check"><input type="checkbox" bind:checked={showAll} /> Show other devices too ({rest.length})</label>
         {/if}
       </div>
-      {#if listError}<p class="alert" role="alert">{listError}</p>{/if}
+      {#if listError}<Problem problem={listError} />{/if}
       {#if devices.loaded && rows.length === 0}
         <p class="muted pad">Nothing here yet. Use "Add machine" to add your first one, or scan the network and set a device's type to PC, Server or VM.</p>
       {:else}
@@ -330,7 +358,7 @@
         </p>
       {/if}
       <label>Notes <input bind:value={form.notes} /></label>
-      {#if formError}<p class="alert" role="alert">{formError}</p>{/if}
+      {#if formError}<Problem problem={formError} />{/if}
       <div class="form-actions">
         <button class="btn primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
         <button class="btn" type="button" onclick={() => (editing = null)}>Cancel</button>
@@ -379,7 +407,7 @@
   .check { flex-direction: row; align-items: center; gap: 0.5rem; color: var(--muted); cursor: pointer; }
   .check input { width: 1.15rem; min-height: 0; height: 1.15rem; padding: 0; accent-color: var(--accent); }
   .pad { margin: 0; padding: 0.3rem 0.55rem 0.6rem; line-height: 1.5; }
-  .table-wrap .alert { margin: 0 0.55rem 0.5rem; }
+  .table-wrap :global(.alert) { margin: 0 0.55rem 0.5rem; }
 
   .box { container-type: inline-size; }
   table { width: 100%; border-collapse: collapse; table-layout: fixed; }

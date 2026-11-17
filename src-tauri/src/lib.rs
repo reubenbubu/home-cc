@@ -1,4 +1,5 @@
 mod commands;
+mod diag;
 // Public so the small diagnostic programs in examples/ can use them.
 pub mod error;
 pub mod history;
@@ -32,6 +33,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::recent_log,
             commands::list_devices,
             commands::add_device,
             commands::update_device,

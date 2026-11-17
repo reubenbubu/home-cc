@@ -351,7 +351,7 @@ impl Monitor {
         let machines: Vec<Device> = match app.state::<Inventory>().list() {
             Ok(list) => list.into_iter().filter(wants_stats).collect(),
             Err(e) => {
-                eprintln!("home-cc: stats round failed: {e}");
+                crate::diag::note(format!("stats round failed: {e}"));
                 return;
             }
         };
@@ -488,7 +488,7 @@ impl Monitor {
 
 fn remember(app: &AppHandle, device_id: i64, host: &str, port: u16, key: &HostKey) {
     if let Err(e) = app.state::<Inventory>().remember_host_key(device_id, host, port, key) {
-        eprintln!("home-cc: could not store the identity of device {device_id}: {e}");
+        crate::diag::note(format!("could not store the identity of device {device_id}: {e}"));
     }
 }
 
@@ -549,7 +549,7 @@ async fn login_for(app: &AppHandle, device: &Device) -> Result<Prepared> {
     let (key_passphrase, password) = tauri::async_runtime::spawn_blocking(move || {
         let read = |key: &str| {
             secrets::get(key).unwrap_or_else(|e| {
-                eprintln!("home-cc: could not read {key} from the keychain: {e}");
+                crate::diag::note(format!("could not read {key} from the keychain: {e}"));
                 None
             })
         };

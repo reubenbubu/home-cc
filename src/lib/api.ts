@@ -197,6 +197,17 @@ export const secretKeys = {
 export interface AppInfo {
   version: string;
   os: string;
+  /** Processor family, such as "x86_64". */
+  arch: string;
+  /** False for a development build. */
+  release: boolean;
+}
+
+/** Something the back end ran into by itself, in a timed round. */
+export interface LogLine {
+  /** Unix seconds. */
+  at: number;
+  text: string;
 }
 
 export const KIND_LABELS: Record<DeviceKind, string> = {
@@ -218,6 +229,8 @@ export const OS_LABELS: Record<Os, string> = {
 
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
+  /** Problems the back end ran into by itself, oldest first (the last 50), for a problem report. */
+  recentLog: () => invoke<LogLine[]>("recent_log"),
   listDevices: () => invoke<Device[]>("list_devices"),
   addDevice: (input: DeviceInput) => invoke<Device>("add_device", { input }),
   updateDevice: (id: number, input: DeviceInput) => invoke<Device>("update_device", { id, input }),

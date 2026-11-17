@@ -611,7 +611,8 @@ export function installMock() {
   // The arguments arrive untyped, as they do in Rust; each command says what it expects.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const commands: Record<string, (args: any) => unknown> = {
-    app_info: () => ({ version: "0.1.0", os: noPing ? "linux" : "windows" }),
+    app_info: () => ({ version: "0.1.0", os: noPing ? "linux" : "windows", arch: "x86_64", release: false }),
+    recent_log: () => [{ at: nowSecs() - 90, text: "could not read ssh-password:3 from the keychain: sample error" }],
     list_devices: () => devices.map(publicDevice),
     add_device: ({ input }: { input: DeviceInput }) => {
       checkInput(input);

@@ -1,7 +1,7 @@
 <script lang="ts">
   // One machine on the Machines screen: status, system, and bars for CPU, RAM
   // and each disk, or a plain explanation of why there are none.
-  import { OS_LABELS, type Device, type Disk, type HostKey } from "$lib/api";
+  import { api, OS_LABELS, secretKeys, type Device, type Disk, type HostKey } from "$lib/api";
   import { clock } from "$lib/clock.svelte";
   import { ms, relTime, share, uptime, usedOfTotal } from "$lib/format";
   import { identityCommand, identityText } from "$lib/hostkey";
@@ -9,7 +9,10 @@
   import { settings } from "$lib/settings.svelte";
   import { stats } from "$lib/stats.svelte";
   import { status } from "$lib/status.svelte";
+  import { deviceDetails } from "$lib/problems.svelte";
+  import type { Details, Problem as ProblemInfo } from "$lib/report";
   import ConfirmButton from "./ConfirmButton.svelte";
+  import Problem from "./Problem.svelte";
   import Icon from "./Icon.svelte";
   import Meter from "./Meter.svelte";
   import StatusDot from "./StatusDot.svelte";
@@ -27,6 +30,28 @@
   const trustError = $derived(stats.trustErrors.get(device.id) ?? null);
   const ram = $derived(share(st?.memUsedKb, st?.memTotalKb));
   const ramWarn = $derived(ram != null && ram > settings.value.ramWarnPct);
+
+  /** What a problem on this card hands to an agent, besides the message. */
+  function machineProblem(area: ProblemInfo["area"], what: string, error: string): ProblemInfo {
+    return {
+      area,
+      what,
+      error,
+      details: {
+        ...deviceDetails(device),
+        "Kind of error": entry?.errorKind,
+        "Retrying by itself": entry?.error ? !entry.paused : null,
+        "OS the machine reported": st?.osName,
+        "Last good reading": entry?.collectedAt ? relTime(entry.collectedAt, clock.now) : "none yet",
+        "Identity stored for it": entry ? !!entry.pinnedFingerprint : null,
+      },
+    };
+  }
+
+  /** Read only when a prompt is made: whether the login could have used a stored password. */
+  async function passwordDetails(): Promise<Details> {
+    return { "Password stored for it": await api.hasSecret(secretKeys.sshPassword(device.id)) };
+  }
 
   function diskLabel(d: Disk): string {
     // Windows volumes have a label worth showing; on Linux it is a device name, kept for the tooltip.
@@ -96,11 +121,18 @@
   </div>
 
   {#if refreshError}
-    <p class="alert" role="alert">Couldn't read stats: {refreshError}</p>
+    <Problem
+      problem={machineProblem("stats", `Reading stats from "${device.name}" on request`, refreshError)}
+      message="Couldn't read stats: {refreshError}"
+      extra={passwordDetails}
+    />
   {/if}
   <!-- Not inside the approval block: after a refusal the machine may have nothing left to approve. -->
   {#if trustError}
-    <p class="alert" role="alert">Not approved: {trustError}</p>
+    <Problem
+      problem={machineProblem("trust", `Approving the identity of "${device.name}"`, trustError)}
+      message="Not approved: {trustError}"
+    />
   {/if}
 
   {#if !device.sshUser}
@@ -137,7 +169,10 @@
       {@render approve(offered, "Approve and use the password")}
     </div>
   {:else if entry?.error}
-    <p class="alert" role="alert">{entry.error}</p>
+    <Problem
+      problem={machineProblem("stats", `Reading stats from "${device.name}" over SSH`, entry.error)}
+      extra={passwordDetails}
+    />
     {#if entry.paused}
       <p class="muted small paused">
         home-cc has stopped trying this machine by itself, so it doesn't keep knocking with a login that fails. Fix the

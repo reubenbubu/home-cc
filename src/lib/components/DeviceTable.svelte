@@ -11,7 +11,10 @@
   import { ms, relTime } from "$lib/format";
   import { icons } from "$lib/icons";
   import { status } from "$lib/status.svelte";
+  import { deviceDetails } from "$lib/problems.svelte";
+  import type { Problem as ProblemInfo } from "$lib/report";
   import ConfirmButton from "./ConfirmButton.svelte";
+  import Problem from "./Problem.svelte";
   import Icon from "./Icon.svelte";
   import Sparkline from "./Sparkline.svelte";
   import StatusDot from "./StatusDot.svelte";
@@ -21,7 +24,7 @@
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
   const ACCEPT_AS: DeviceKind[] = ["pc", "server", "vm", "mesh", "other"];
 
-  let error = $state<string | null>(null);
+  let error = $state<ProblemInfo | null>(null);
   const saving = new SvelteSet<number>();
   /** Names typed into "fresh" rows but not saved yet. */
   const drafts = new SvelteMap<number, string>();
@@ -35,7 +38,12 @@
       await devices.update(d.id, toInput(d, patch));
       drafts.delete(d.id);
     } catch (e) {
-      error = `Couldn't save "${d.name}": ${errorText(e)}`;
+      error = {
+        area: "devices",
+        what: `Saving a change to "${d.name}" on the Network screen`,
+        error: `Couldn't save "${d.name}": ${errorText(e)}`,
+        details: { ...deviceDetails(d), "Change": JSON.stringify(patch) },
+      };
     } finally {
       saving.delete(d.id);
     }
@@ -72,7 +80,12 @@
     try {
       await devices.remove(d.id);
     } catch (e) {
-      error = `Couldn't remove "${d.name}": ${errorText(e)}`;
+      error = {
+        area: "devices",
+        what: `Removing "${d.name}" on the Network screen`,
+        error: `Couldn't remove "${d.name}": ${errorText(e)}`,
+        details: deviceDetails(d),
+      };
     }
   }
 
@@ -131,7 +144,7 @@
 {/snippet}
 
 <div class="box">
-  {#if error}<p class="alert" role="alert">{error}</p>{/if}
+  {#if error}<Problem problem={error} />{/if}
   <table class={variant}>
     <thead>
       <tr>

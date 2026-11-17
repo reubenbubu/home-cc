@@ -5,6 +5,7 @@
   import { count, relTime } from "$lib/format";
   import { PHASE_TEXT, scan } from "$lib/scan.svelte";
   import { settings } from "$lib/settings.svelte";
+  import Problem from "./Problem.svelte";
 
   let { compact = false }: { compact?: boolean } = $props();
 
@@ -63,7 +64,10 @@
       </div>
     {/if}
     {#if scan.error}
-      <p class="alert" role="alert">The scan didn't finish: {scan.error}</p>
+      <Problem
+        problem={{ area: "scan", what: "Scanning the network", error: scan.error, details: { "Range to scan": settings.scanRangeLabel } }}
+        message="The scan didn't finish: {scan.error}"
+      />
     {/if}
   </section>
 {/if}
