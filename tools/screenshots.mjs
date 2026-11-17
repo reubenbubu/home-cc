@@ -1073,6 +1073,110 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "groups: a machine's form left open doesn't undo a group given meanwhile with the card menu or Ungroup",
+      path: "/machines",
+      async run(page) {
+        const field = page.getByLabel("Group (optional)");
+        const save = () => page.getByRole("button", { name: "Save", exact: true }).click();
+        // The card menu while the form is open: the field follows, and saving the form keeps the group.
+        await page.getByRole("button", { name: "Edit Printer", exact: true }).click();
+        await page.getByRole("button", { name: "Group for Printer" }).click();
+        await page.getByRole("menuitemradio", { name: "Proxmox lab" }).click();
+        await group(page, "Proxmox lab").locator("article", { hasText: "Printer" }).waitFor();
+        if ((await field.inputValue()) !== "Proxmox lab") throw new Error(`the Group field reads "${await field.inputValue()}"`);
+        await page.getByLabel("Notes", { exact: true }).fill("By the stairs");
+        await save();
+        await page.locator("form").waitFor({ state: "detached" });
+        await group(page, "Proxmox lab").locator("article", { hasText: "Printer" }).waitFor();
+        // A group ungrouped while the form of a machine in it is open stays gone after Save.
+        await page.getByRole("button", { name: "Edit NAS", exact: true }).click();
+        const nas = group(page, "NAS PC");
+        await nas.getByRole("button", { name: "Ungroup" }).click();
+        await nas.getByRole("button", { name: "Yes, ungroup" }).click();
+        await nas.waitFor({ state: "detached" });
+        if ((await field.inputValue()) !== "") throw new Error(`after Ungroup the Group field reads "${await field.inputValue()}"`);
+        await save();
+        await page.locator("form").waitFor({ state: "detached" });
+        if ((await group(page, "NAS PC").count()) !== 0) throw new Error("saving the form brought NAS PC back");
+        // A group the owner typed into the field wins over one given with the menu meanwhile.
+        await page.getByRole("button", { name: "Edit Old laptop", exact: true }).click();
+        await field.fill("Attic");
+        await page.getByRole("button", { name: "Group for Old laptop" }).click();
+        await page.getByRole("menuitemradio", { name: "Proxmox lab" }).click();
+        await group(page, "Proxmox lab").locator("article", { hasText: "Old laptop" }).waitFor();
+        if ((await field.inputValue()) !== "Attic") throw new Error(`what was typed became "${await field.inputValue()}"`);
+        await save();
+        await group(page, "Attic").locator("article", { hasText: "Old laptop" }).waitFor();
+      },
+    },
+    {
+      what: "groups: a card put in no group is shown under Other machines even when that was collapsed, and keeps the focus",
+      path: "/machines",
+      async run(page) {
+        const toggle = group(page, "Other machines").getByRole("button", { name: /^Other machines/ });
+        await toggle.click();
+        await card(page, "Printer").waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Group for Pi-hole 1" }).click();
+        await page.getByRole("menuitemradio", { name: "No group" }).click();
+        await group(page, "Other machines").locator("article", { hasText: "Pi-hole 1" }).waitFor();
+        if ((await toggle.getAttribute("aria-expanded")) !== "true") throw new Error("Other machines is still collapsed");
+        const focused = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+        if (focused !== "Group for Pi-hole 1") throw new Error(`the focus is on "${focused}"`);
+      },
+    },
+    {
+      what: "groups: opening a rename keeps a machine's form as typed, and the other way round",
+      path: "/machines",
+      async run(page) {
+        const notes = page.getByLabel("Notes", { exact: true });
+        await page.getByRole("button", { name: "Edit Main PC", exact: true }).click();
+        await notes.fill("Half typed");
+        await page.getByRole("button", { name: "Rename the group NAS PC" }).click();
+        await page.getByText('What you typed for "Main PC" is kept').waitFor();
+        const newName = page.getByLabel("New name for NAS PC");
+        await newName.fill("Stor");
+        // Back to the machine: as it was typed, and the rename waits behind it.
+        await page.getByRole("button", { name: "Edit Main PC", exact: true }).click();
+        if ((await notes.inputValue()) !== "Half typed") throw new Error(`the notes read "${await notes.inputValue()}"`);
+        await page.getByText("The rename of NAS PC you started is kept").waitFor();
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
+        if ((await newName.inputValue()) !== "Stor") throw new Error(`the new name reads "${await newName.inputValue()}"`);
+        await newName.fill("Storage");
+        await page.getByRole("button", { name: "Rename", exact: true }).click();
+        await group(page, "Storage").waitFor();
+        await page.locator("form").waitFor({ state: "detached" });
+      },
+    },
+    {
+      what: "groups: a machine set to Ignore keeps its group, and the screen counts it and joins it as the back end does",
+      path: "/machines",
+      async run(page) {
+        const save = () => page.getByRole("button", { name: "Save", exact: true }).click();
+        await page.getByRole("button", { name: "Edit Dev VM", exact: true }).click();
+        // The label holds the list itself, so its name also has the options' words in it.
+        await page.getByRole("combobox", { name: /^Type/ }).selectOption("ignore");
+        await save();
+        await card(page, "Dev VM").waitFor({ state: "detached" });
+        const title = await group(page, "NAS PC").getByRole("button", { name: "Ungroup" }).getAttribute("title");
+        const want = "Take the 2 machines in NAS PC, and 1 device in it not shown as a card out of this group. The machines stay.";
+        if (title !== want) throw new Error(`Ungroup says "${title}"`);
+        await page.getByRole("button", { name: "Rename the group NAS PC" }).click();
+        await page.getByText("Changes the group of the 2 machines in it, and 1 device in it not shown as a card.").waitFor();
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
+        // With only Dev VM left in it, a name typed in other letter case still joins it, in its spelling.
+        for (const name of ["NAS", "Homelab VM"]) {
+          await page.getByRole("button", { name: `Group for ${name}` }).click();
+          await page.getByRole("menuitemradio", { name: "No group" }).click();
+        }
+        await group(page, "NAS PC").waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Edit Main PC", exact: true }).click();
+        await page.getByLabel("Group (optional)").fill("nas pc");
+        await page.getByText("NAS PC gets a heading of its own on this screen. A device not shown as a card is in it too.").waitFor();
+        await save();
+        await group(page, "NAS PC").locator("article", { hasText: "Main PC" }).waitFor();
+      },
+    },
+    {
       what: "groups: the keys move a card only among its group, the order is kept after a restart, and Reset order undoes it",
       path: "/machines",
       async run(page) {

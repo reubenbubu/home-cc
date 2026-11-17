@@ -4,6 +4,8 @@ import { test } from "node:test";
 import {
   arrange,
   compareGroups,
+  foldGroup,
+  groupToSend,
   keyMove,
   moveItem,
   parseNames,
@@ -177,6 +179,27 @@ test("a typed group name joins the group with that name in any letter case", () 
   assert.equal(sameGroup("PROXMOX lab", groups), "Proxmox lab");
   assert.equal(sameGroup("Attic", groups), null);
   assert.equal(sameGroup(" ", groups), null);
+});
+
+test("letter case is ignored in every alphabet, the way the back end does it", () => {
+  // The back end's fold_group (inventory.rs) has the same cases in its tests.
+  assert.equal(sameGroup("ħal far", ["Ħal Far"]), "Ħal Far");
+  assert.equal(sameGroup("équipe", ["ÉQUIPE"]), "ÉQUIPE");
+  assert.equal(sameGroup("οδοσ", ["ΟΔΟΣ"]), "ΟΔΟΣ", "a final sigma written either way");
+  assert.equal(sameGroup("STRASSE", ["Straße"]), "Straße");
+  assert.equal(foldGroup("Ħal Far"), "ħal far");
+  assert.equal(foldGroup("ΟΔΟΣ"), foldGroup("οδοσ"));
+});
+
+test("the form sends a group only when the owner changed the field", () => {
+  // Left as it opened: nothing is sent, so a group set meanwhile from the card menu stays.
+  assert.equal(groupToSend("", ""), undefined);
+  assert.equal(groupToSend("NAS PC", "NAS PC"), undefined);
+  assert.equal(groupToSend("NAS PC", " NAS  PC "), undefined, "only spaces added");
+  // Changed: the new name, or "" to take the machine out of its group.
+  assert.equal(groupToSend("", " Proxmox  lab"), "Proxmox lab");
+  assert.equal(groupToSend("NAS PC", "nas pc"), "nas pc", "letter case is a change");
+  assert.equal(groupToSend("NAS PC", "  "), "");
 });
 
 test("a card that joins a group goes after that group's other cards", () => {

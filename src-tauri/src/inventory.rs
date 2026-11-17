@@ -191,21 +191,34 @@ pub fn tidy_group(name: &str) -> Result<Option<String>> {
     Ok(Some(tidy))
 }
 
+/// A group name with letter case taken out, in every alphabet: "NAS PC" and
+/// "nas pc", "Équipe" and "équipe", "ΟΔΟΣ" and "οδοσ". SQLite's NOCASE only
+/// knows A to Z, so this is done here. The Machines screen does the same
+/// (foldGroup in arrange.ts) to say which group a typed name joins.
+pub fn fold_group(name: &str) -> String {
+    name.to_uppercase().to_lowercase()
+}
+
 /// The spelling to store for a group name: that of a group that already
 /// exists with the same name in other letter case, so typing "proxmox lab"
 /// puts the machine with the ones in "Proxmox lab". The device `except_id`
 /// and the devices in `except_group` don't count (the only machine in a group
 /// retyped, or a group renamed to fix its letter case).
 fn spelled_as_stored(db: &Connection, name: String, except_id: Option<i64>, except_group: Option<&str>) -> Result<String> {
-    let stored: Option<String> = db
-        .query_row(
-            "SELECT group_name FROM devices WHERE group_name = ?1 COLLATE NOCASE
-             AND id IS NOT ?2 AND group_name IS NOT ?3 ORDER BY group_name = ?1 DESC, id LIMIT 1",
-            params![name, except_id, except_group],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(stored.unwrap_or(name))
+    // Every group name there is, the oldest first, to match the way the
+    // screen does it.
+    let mut stmt = db.prepare(
+        "SELECT group_name FROM devices WHERE group_name IS NOT NULL AND id IS NOT ?1 AND group_name IS NOT ?2
+         GROUP BY group_name ORDER BY MIN(id)",
+    )?;
+    let names = stmt
+        .query_map(params![except_id, except_group], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if names.contains(&name) {
+        return Ok(name);
+    }
+    let folded = fold_group(&name);
+    Ok(names.into_iter().find(|g| fold_group(g) == folded).unwrap_or(name))
 }
 
 impl DeviceInput {
@@ -913,6 +926,28 @@ mod tests {
         inv.set_group(nas, "Nas Pc").unwrap();
         assert_eq!(group_of(&inv, nas).as_deref(), Some("Nas Pc"));
         assert_eq!(group_of(&inv, a).as_deref(), Some("Proxmox lab"));
+    }
+
+    #[test]
+    fn letter_case_is_ignored_in_every_alphabet() {
+        // The same cases as foldGroup's test in arrange.test.mjs, which the
+        // screen uses to say a typed name joins a group.
+        assert_eq!(fold_group("Ħal Far"), "ħal far");
+        assert_eq!(fold_group("ΟΔΟΣ"), fold_group("οδοσ"));
+        assert_eq!(fold_group("Straße"), fold_group("STRASSE"));
+
+        let inv = Inventory::in_memory().unwrap();
+        let malta = inv.add(in_group("pve", "192.168.68.30", "Ħal Far")).unwrap().id;
+        let b = inv.add(in_group("pihole", "192.168.68.31", "ħal far")).unwrap().id;
+        assert_eq!(group_of(&inv, b).as_deref(), Some("Ħal Far"));
+        let c = inv.add(input("dev", "192.168.68.22")).unwrap().id;
+        inv.set_group(c, "ĦAL FAR").unwrap();
+        assert_eq!(group_of(&inv, c).as_deref(), Some("Ħal Far"));
+        let d = inv.add(in_group("nas", "192.168.68.10", "ÉQUIPE")).unwrap().id;
+        // Renamed to the other group's name in other letter case: they join it.
+        assert_eq!(inv.rename_group("ÉQUIPE", "ħAL fAR").unwrap(), 1);
+        assert_eq!(group_of(&inv, d).as_deref(), Some("Ħal Far"));
+        assert_eq!(group_of(&inv, malta).as_deref(), Some("Ħal Far"));
     }
 
     #[test]

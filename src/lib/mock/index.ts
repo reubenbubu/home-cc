@@ -23,6 +23,7 @@ import type {
   StatsErrorKind,
   Subnet,
 } from "../api";
+import { foldGroup } from "../arrange";
 import { terminalCommands } from "./terminal";
 import { dockerMock } from "./docker";
 // Proxmox
@@ -731,10 +732,11 @@ export function installMock() {
   }
 
   /** The spelling of a group that already has this name in other letter case, as the back end does it:
-   *  typing "nas pc" puts a machine in "NAS PC". */
+   *  typing "nas pc" puts a machine in "NAS PC". Letter case is taken out with the back end's own rule
+   *  (foldGroup), not a looser one, so the screens can't be shown working here and fail in the app. */
   function storedSpelling(name: string, exceptId: number | null, exceptGroup: string | null): string {
     const others = devices.filter((d) => d.id !== exceptId && d.group && d.group !== exceptGroup).map((d) => d.group as string);
-    return others.find((g) => g === name) ?? others.find((g) => g.toLowerCase() === name.toLowerCase()) ?? name;
+    return others.find((g) => g === name) ?? others.find((g) => foldGroup(g) === foldGroup(name)) ?? name;
   }
 
   /** The group to store for a device: `typed` not given keeps `current`. */

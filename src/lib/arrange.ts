@@ -107,17 +107,34 @@ export function compareGroups(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0);
 }
 
+/** A group name with letter case taken out, to tell names that differ only in case: "NAS PC", "nas pc",
+ *  and in any alphabet ("Équipe", "équipe"). The same in every language setting, and the same as
+ *  fold_group in the back end's inventory.rs, which decides what is stored. */
+export function foldGroup(name: string): string {
+  return name.toUpperCase().toLowerCase();
+}
+
 /** The existing group a typed name puts a machine in: the one with the same name in any letter case (the
  *  back end stores it under that spelling), or null when it would be a new group. */
 export function sameGroup(typed: string, existing: Iterable<string>): string | null {
   const name = tidyGroup(typed);
   if (!name) return null;
+  const folded = foldGroup(name);
   let match: string | null = null;
   for (const group of existing) {
     if (group === name) return group;
-    if (match === null && group.toLocaleLowerCase() === name.toLocaleLowerCase()) match = group;
+    if (match === null && foldGroup(group) === folded) match = group;
   }
   return match;
+}
+
+/** The group to send when the Machines form is saved: nothing when the field still holds the group the
+ *  form opened with, which leaves the machine's group as it is now. Its group may have been changed since
+ *  (with the card's group menu, or by renaming or ungrouping its group), and a save of the other fields
+ *  must not undo that. "" when the field was emptied, which takes the machine out of its group. */
+export function groupToSend(opened: string, typed: string): string | undefined {
+  const tidy = tidyGroup(typed);
+  return tidy === tidyGroup(opened) ? undefined : tidy;
 }
 
 /** One heading's worth of cards. `group` is null for the machines in no group. */

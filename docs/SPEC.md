@@ -148,7 +148,10 @@ can take one more timer period to show as down.
   takes the machines out of it. A card is moved only among its own group's
   cards; the saved order is one list for all cards, and a card that joins a
   group goes at its end. The group is kept with the machine in the back end
-  and a scan never changes it.
+  and a scan never changes it. A machine set to Ignore (or made a phone, say)
+  keeps its group and comes back in it; Rename and Ungroup change it too, and
+  say so. A machine's open form only sends its group when the owner changed
+  that field, so it never undoes a group given meanwhile from the card.
 
 Done when: stats for every connected Linux and Windows machine show and update
 at least once a minute.

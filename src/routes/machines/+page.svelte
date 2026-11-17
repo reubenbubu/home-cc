@@ -19,6 +19,7 @@
     arrange,
     compareGroups,
     GROUP_MAX,
+    groupToSend,
     keyMove,
     moveItem,
     sameGroup,
@@ -58,8 +59,8 @@
 
   let editing = $state<number | "new" | null>(null);
   let form = $state<DeviceInput>(blank());
-  /** The address, SSH port and hardware address as they are saved, to tell what the form changes. */
-  let stored = $state<{ host: string; sshPort: number; mac: string | null }>({ host: "", sshPort: 22, mac: null });
+  /** The address, SSH port, hardware address and group as they are saved, to tell what the form changes. */
+  let stored = $state<{ host: string; sshPort: number; mac: string | null; group: string }>({ host: "", sshPort: 22, mac: null, group: "" });
   let formError = $state<ProblemInfo | null>(null);
   let listError = $state<ProblemInfo | null>(null);
 
@@ -101,13 +102,21 @@
   const rows = $derived(showAll ? [...machines, ...rest] : machines);
 
   async function open(id: number | "new", input: DeviceInput) {
+    if (editing === id && showRename) {
+      // This machine's form is open behind a group rename: it comes back as it was typed.
+      front = "machine";
+      await tick();
+      formEl?.scrollIntoView({ block: "nearest" });
+      return;
+    }
     form = input;
     typedHost = input.host.trim();
-    stored = { host: input.host, sshPort: input.sshPort ?? 22, mac: input.mac || null };
+    stored = { host: input.host, sshPort: input.sshPort ?? 22, mac: input.mac || null, group: tidyGroup(input.group ?? "") };
     formError = null;
     password = "";
     hasPassword = false;
-    renaming = null;
+    // A group rename that was open stays as typed, behind this form, and comes back when this one closes.
+    front = "machine";
     editing = id;
     if (typeof id === "number") {
       api.hasSecret(secretKeys.sshPassword(id)).then(
@@ -184,11 +193,12 @@
     formError = null;
     try {
       // The hardware address: nothing when the box wasn't touched (kept), "" when it was emptied (removed).
+      // The group the same way, so a group given meanwhile with the card's menu isn't undone.
       const input = {
         ...form,
         sshPort: Number(form.sshPort) || 22,
         mac: macToSend(stored.mac, form.mac ?? ""),
-        group: tidyGroup(form.group ?? ""),
+        group: groupToSend(stored.group, form.group ?? ""),
       };
       let saved: Device;
       if (typeof editing === "number") {
@@ -244,8 +254,9 @@
       return true;
     } catch (err) {
       editing = saved.id;
-      stored = { host: saved.host, sshPort: saved.sshPort, mac: saved.mac };
+      stored = { host: saved.host, sshPort: saved.sshPort, mac: saved.mac, group: saved.group ?? "" };
       form.mac = saved.mac ?? "";
+      form.group = saved.group ?? "";
       formError = formProblem("secrets", "Storing the password for a machine just saved", `Saved, but the password couldn't be stored: ${errorText(err)}`);
       return false;
     }
@@ -286,6 +297,18 @@
     const host = form.host.trim();
     const timer = setTimeout(() => (typedHost = host), 400);
     return () => clearTimeout(timer);
+  });
+
+  // The machine in the form was put in another group meanwhile (with its card's menu, or its group renamed
+  // or ungrouped): the Group field follows, unless the owner has typed another group into it.
+  $effect(() => {
+    if (typeof editing !== "number") return;
+    const now = devices.byId.get(editing)?.group ?? "";
+    untrack(() => {
+      if (now === stored.group) return;
+      if (groupToSend(stored.group, form.group ?? "") === undefined) form.group = now;
+      stored.group = now;
+    });
   });
 
   const kinds = Object.entries(KIND_LABELS) as [DeviceKind, string][];
@@ -407,7 +430,8 @@
    *  have an order of the owner's it goes at the end of its new group, rather than wherever its old place
    *  happens to fall among those cards. */
   function joinedGroup(d: Device) {
-    if (d.group) collapsedGroups.set(d.group, false);
+    // "Other machines" too, when it was put in no group.
+    collapsedGroups.set(d.group ?? NO_GROUP, false);
     if (!machineOrder.saved.includes(d.id)) return;
     const shown = groupsShown.flatMap((s) => s.items.map((m) => m.id));
     const members = groupsShown.find((s) => s.group === (d.group ?? null))?.items.map((m) => m.id) ?? [];
@@ -437,39 +461,82 @@
   async function ungroup(group: string) {
     groupError = null;
     const count = sectionOf(group)?.items.length ?? 0;
+    const hidden = hiddenIn(group);
     try {
       await devices.renameGroup(group, "");
       collapsedGroups.set(group, false);
-      if (renaming === group) renaming = null;
+      // Its machines are now under Other machines, which is opened to show them.
+      collapsedGroups.set(NO_GROUP, false);
+      if (renameForm?.from === group) closeRename();
       tell(`${group} is gone: its ${machinesText(count)} moved to Other machines.`);
+      // The heading and its buttons are gone: the focus goes to the heading the machines are now under,
+      // or with no groups left, to the first card.
+      await tick();
+      (mainEl?.querySelector<HTMLElement>(`[data-group-toggle="${NO_GROUP}"]`) ?? mainEl?.querySelector<HTMLElement>("[data-move]"))?.focus();
     } catch (err) {
       groupError = {
         area: "devices",
         what: `Taking the machines out of the group "${group}" on the Machines screen`,
         error: `Couldn't ungroup ${group}: ${errorText(err)}`,
-        details: { Group: group, "Machines in it": count },
+        details: { Group: group, "Machines in it": count, "Devices in it not shown as cards": hidden },
       };
     }
   }
 
-  // Renaming a group: the side form shows a box for the new name instead of a machine's details.
+  // Devices that are in a group but not among the cards: a machine set to "Ignore" on the Network screen,
+  // or made a phone, keeps its group, so it comes back in it, the way it keeps its place among the cards.
+  // The back end counts them when it matches a typed name, and a rename or Ungroup changes them too, so
+  // the screen says so.
 
-  /** The group being renamed, while the form shows that. */
-  let renaming = $state<string | null>(null);
-  let newName = $state("");
+  /** Every group name there is, those of devices not among the cards included. */
+  const allGroupNames = $derived([...new Set(devices.list.flatMap((d) => (d.group ? [d.group] : [])))]);
+  const onCards = $derived(new Set(machines.map((m) => m.id)));
+  /** How many devices in the group aren't among the cards, leaving out the device `except`. */
+  const hiddenIn = (group: string, except: number | "new" | null = null) =>
+    devices.list.filter((d) => d.group === group && d.id !== except && !onCards.has(d.id)).length;
+  /** ", and 1 device in it not shown as a card", or nothing. */
+  function alsoHidden(group: string): string {
+    const n = hiddenIn(group);
+    if (n === 0) return "";
+    return `, and ${n === 1 ? "1 device" : `${n} devices`} in it not shown as ${n === 1 ? "a card" : "cards"}`;
+  }
+
+  // Renaming a group: the side panel shows a box for the new name instead of a machine's details.
+  //
+  // What is typed there is kept in `renameForm`, the rename's counterpart of `form`: the drafts store
+  // (drafts.svelte.ts, coming on another branch) is to keep it the way it keeps `form`, so a name half typed
+  // survives a switch to another screen. Both forms can be open at once, and opening one never throws away
+  // what was typed in the other: `front` says which one shows, and the other waits behind it, as typed,
+  // until this one is saved or cancelled.
+
+  /** The group being renamed and the new name typed for it, while that form is open. */
+  let renameForm = $state<{ from: string; name: string } | null>(null);
+  /** Which form the side panel shows when a machine's form and a rename are both open. */
+  let front = $state<"machine" | "rename">("machine");
+  const showRename = $derived(renameForm !== null && (front === "rename" || editing === null));
+  let renameEl = $state<HTMLFormElement>();
   let renameError = $state<ProblemInfo | null>(null);
-  const typedName = $derived(tidyGroup(newName));
+  const typedName = $derived(tidyGroup(renameForm?.name ?? ""));
   /** Another group the typed name would put the machines with. */
-  const renameJoins = $derived(renaming === null ? null : sameGroup(typedName, groupNames.filter((g) => g !== renaming)));
+  const renameJoins = $derived.by(() => {
+    const from = renameForm?.from;
+    return from === undefined ? null : sameGroup(typedName, allGroupNames.filter((g) => g !== from));
+  });
+
+  function closeRename() {
+    renameForm = null;
+    renameError = null;
+  }
 
   async function startRename(group: string) {
-    editing = null;
-    password = "";
-    renameError = null;
-    newName = group;
-    renaming = group;
+    // The same group's rename, already open behind the machine's form, comes back as it was typed.
+    if (renameForm?.from !== group) {
+      renameForm = { from: group, name: group };
+      renameError = null;
+    }
+    front = "rename";
     await tick();
-    formEl?.scrollIntoView({ block: "nearest" });
+    renameEl?.scrollIntoView({ block: "nearest" });
     const field = document.getElementById("group-new-name");
     if (field instanceof HTMLInputElement) {
       field.focus();
@@ -479,22 +546,27 @@
 
   async function rename(e: SubmitEvent) {
     e.preventDefault();
-    const from = renaming;
-    if (from === null) return;
+    if (renameForm === null) return;
+    const { from, name } = renameForm;
     renameError = null;
     const to = typedName;
     const problem = (error: string): ProblemInfo => ({
       area: "devices",
       what: `Renaming the group "${from}" on the Machines screen`,
       error,
-      details: { Group: from, "Name typed": newName, "Machines in it": sectionOf(from)?.items.length ?? 0 },
+      details: {
+        Group: from,
+        "Name typed": name,
+        "Machines in it": sectionOf(from)?.items.length ?? 0,
+        "Devices in it not shown as cards": hiddenIn(from),
+      },
     });
     if (!to) {
       renameError = problem('A group needs a name. To take the machines out of it, use "Ungroup" by its heading.');
       return;
     }
     if (to === from) {
-      renaming = null;
+      closeRename();
       return;
     }
     saving = true;
@@ -503,11 +575,13 @@
       // was collapsed) and the new one is taken.
       const joins = renameJoins;
       const into = joins ?? to;
+      // A group that only devices not shown as cards are in has no heading yet, so nothing to take after.
+      const joinsHeading = joins !== null && groupNames.includes(joins);
       const wasCollapsed = collapsedGroups.has(from);
       await devices.renameGroup(from, to);
-      // A renamed group stays collapsed; one that joined another group takes that group's state.
-      if (wasCollapsed && !joins) collapsedGroups.set(into, true);
-      renaming = null;
+      // A renamed group stays collapsed; one that joined another heading takes that heading's state.
+      if (wasCollapsed && !joinsHeading) collapsedGroups.set(into, true);
+      closeRename();
       tell(joins ? `The machines in ${from} joined ${into}.` : `${from} is now called ${into}.`);
       focusOn(`[data-group-toggle="${CSS.escape(into)}"]`);
     } catch (err) {
@@ -521,11 +595,20 @@
   const groupHint = $derived.by(() => {
     const typed = tidyGroup(form.group ?? "");
     if (!typed) return "";
-    const joins = sameGroup(typed, groupNames);
-    if (joins === null) return `A new group: ${typed} gets a heading of its own on this screen.`;
-    const others = sectionOf(joins)?.items.filter((m) => m.id !== editing).length ?? 0;
-    if (others === 0) return "";
-    return `Shown with the ${others === 1 ? "other machine" : `${others} other machines`} in ${joins}.`;
+    const id = editing;
+    // Matched as the back end does it: against every other device's group, those not shown as cards too.
+    const joins = sameGroup(typed, devices.list.flatMap((d) => (d.id !== id && d.group ? [d.group] : [])));
+    const own = typeof id === "number" ? (devices.byId.get(id)?.group ?? null) : null;
+    if (joins === null) {
+      // Only this machine is in a group of that name: retyping it only changes how it is written.
+      return own && sameGroup(typed, [own]) ? "" : `A new group: ${typed} gets a heading of its own on this screen.`;
+    }
+    const others = sectionOf(joins)?.items.filter((m) => m.id !== id).length ?? 0;
+    if (others > 0) return `Shown with the ${others === 1 ? "other machine" : `${others} other machines`} in ${joins}.`;
+    // Its heading is this machine's own already.
+    if (joins === own && onCards.has(id as number)) return "";
+    const hidden = hiddenIn(joins, id);
+    return `${joins} gets a heading of its own on this screen. ${hidden === 1 ? "A device not shown as a card is" : `${hidden} devices not shown as cards are`} in it too.`;
   });
 
   /** Where a point on screen is in the grid's own pixels, which differ when the window is zoomed. */
@@ -761,7 +844,7 @@
   </div>
 </header>
 
-<div class="layout" class:with-form={editing !== null || renaming !== null}>
+<div class="layout" class:with-form={editing !== null || renameForm !== null}>
   <div class="main" bind:this={mainEl}>
     {#if machines.length > 0}
       {#if groupError}<Problem problem={groupError} />{/if}
@@ -798,7 +881,7 @@
                     <ConfirmButton
                       label="Ungroup"
                       confirmLabel="Yes, ungroup"
-                      title="Take the {machinesText(s.items.length)} in {group} out of this group. The machines stay."
+                      title="Take the {machinesText(s.items.length)} in {group}{alsoHidden(group)} out of this group. The machines stay."
                       onconfirm={() => ungroup(group)}
                     />
                   </span>
@@ -892,8 +975,12 @@
   </div>
 
   {#if editing !== null}
-    <form class="panel form" onsubmit={save} bind:this={formEl}>
+    <!-- Behind a group rename it is only hidden, so everything in it stays as it was. -->
+    <form class="panel form" class:parked={showRename} onsubmit={save} bind:this={formEl}>
       <h2 class="section-title">{editing === "new" ? "Add machine" : "Edit machine"}</h2>
+      {#if renameForm}
+        <p class="hint">The rename of {renameForm.from} you started is kept, and comes back when you save or cancel this.</p>
+      {/if}
       <label>Name <input bind:value={form.name} placeholder="Homelab VM" required /></label>
       <label>Address (IP or hostname) <input class="mono" bind:value={form.host} placeholder="192.168.68.21" required /></label>
       {#if isIpv4(form.host.trim()) || isIpv6(form.host.trim())}
@@ -1000,24 +1087,32 @@
         <button class="btn" type="button" onclick={() => (editing = null)}>Cancel</button>
       </div>
     </form>
-  {:else if renaming !== null}
-    {@const count = sectionOf(renaming)?.items.length ?? 0}
-    <form class="panel form" onsubmit={rename} bind:this={formEl}>
+  {/if}
+  {#if showRename && renameForm}
+    {@const from = renameForm.from}
+    {@const count = sectionOf(from)?.items.length ?? 0}
+    <form class="panel form" onsubmit={rename} bind:this={renameEl}>
       <h2 class="section-title">Rename group</h2>
-      <label>New name for {renaming}
-        <input id="group-new-name" bind:value={newName} maxlength={GROUP_MAX} autocomplete="off" spellcheck="false" />
+      {#if editing !== null}
+        <p class="hint">
+          What you typed for {editing === "new" ? "the new machine" : `"${form.name}"`} is kept, and comes back when you
+          rename or cancel this.
+        </p>
+      {/if}
+      <label>New name for {from}
+        <input id="group-new-name" bind:value={renameForm.name} maxlength={GROUP_MAX} autocomplete="off" spellcheck="false" />
       </label>
       <p class="hint under">
         {#if renameJoins}
-          {renameJoins} already exists: the {machinesText(count)} in {renaming} join it.
+          {renameJoins} already exists: the {machinesText(count)} in {from}{alsoHidden(from)} join it.
         {:else}
-          Changes the group of the {machinesText(count)} in it.
+          Changes the group of the {machinesText(count)} in it{alsoHidden(from)}.
         {/if}
       </p>
       {#if renameError}<Problem problem={renameError} />{/if}
       <div class="form-actions">
         <button class="btn primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Rename"}</button>
-        <button class="btn" type="button" onclick={() => (renaming = null)}>Cancel</button>
+        <button class="btn" type="button" onclick={closeRename}>Cancel</button>
       </div>
     </form>
   {/if}
@@ -1193,6 +1288,8 @@
   }
 
   .form { display: flex; flex-direction: column; gap: 0.9rem; }
+  /* A machine's form waiting behind a group rename. */
+  .form.parked { display: none; }
   .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
   .form-actions { display: flex; gap: 0.6rem; }
   .stored { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-top: -0.4rem; color: var(--text-soft); }
