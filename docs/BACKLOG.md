@@ -72,6 +72,19 @@ work is understood so far and are open to change. Remove an item once it has lan
   Hyper-V VM where one can be had.
 - Shutting down, stopping or applying a checkpoint asks first.
 
+## A Handheld device type
+
+> later : add a device type Handheld
+
+- A new type, "Handheld", for phones, tablets and handheld consoles (in the sample data, Sam's phone and the
+  Tablet are "Other" today), chosen like the other types on the Network and Machines screens.
+- On the Overview, handhelds are small tiles like appliances and other devices, under their own heading on
+  the tiles' line. Like appliances, they need no SSH user and show no stats.
+- Each place that lists or counts the types learns the new one: the Rust `DeviceKind` and the database
+  (existing devices keep their type), `KIND_LABELS`, the Network screen's type choice, the Overview's
+  counts, problem reports and the sample data. The network scan may suggest it from the maker (Apple,
+  Samsung and so on) but never sets it without the owner.
+
 ## Smaller follow-ups
 
 - Screenshot flows for drafts not covered yet: the Docker log search, key login and the Network rename.
