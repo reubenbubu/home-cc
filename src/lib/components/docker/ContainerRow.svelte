@@ -163,8 +163,9 @@
   .ask { color: var(--text); margin-right: 0.3rem; }
   .slot { width: 2.25rem; flex: none; }
 
-  /* A narrow card: name and controls on top, the rest on a second line. */
-  @container stack (max-width: 46rem) {
+  /* A narrow card, too narrow for the columns (see StackCard.svelte): name and controls on top, the rest on a
+     second line. */
+  @container stack (max-width: 49rem) {
     .row { grid-template-columns: minmax(0, 1fr) auto; }
     .info { display: flex; flex-wrap: wrap; gap: 0.15rem 1rem; grid-column: 1 / -1; padding-left: 1.2rem; }
     .num { text-align: left; }

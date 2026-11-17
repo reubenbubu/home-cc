@@ -207,7 +207,9 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
-  @container stack (max-width: 46rem) {
+  /* Below what the columns need: the minimums in --cols (44rem) and five gaps of 0.9rem. Change it with them,
+     here and in ContainerRow.svelte. */
+  @container stack (max-width: 49rem) {
     .head { display: none; }
   }
 </style>
