@@ -38,7 +38,7 @@ export interface DeviceInput {
   sshUser?: string | null;
   sshPort?: number | null;
   notes?: string;
-  /** Left as it is when not given. */
+  /** Not given (or null): left as it is. An empty string clears it. */
   mac?: string | null;
 }
 
@@ -118,6 +118,8 @@ export interface DeviceStatus {
   checkedAt: number;
   /** Unix seconds of the last time it was there. */
   lastSeen: number | null;
+  /** True when this device is the PC home-cc runs on (it is always up and has no response time). */
+  isSelf: boolean;
   history: Sample[];
 }
 
@@ -145,8 +147,22 @@ export interface MachineStats {
   reduced: boolean;
 }
 
-/** Why a stats reading failed. hostKeyChanged needs the owner to confirm before trusting the machine again. */
-export type StatsErrorKind = "hostKeyChanged" | "auth" | "unreachable" | "other";
+/** A machine's SSH identity: what `ssh-keygen -lf` prints on that machine. */
+export interface HostKey {
+  /** For example "ssh-ed25519". */
+  algorithm: string;
+  /** For example "SHA256:…". */
+  fingerprint: string;
+}
+
+/** Why a stats reading failed.
+ *  - newHost: first connection, and getting in needs the stored password. The password is NOT sent
+ *    until the owner approves the identity in offeredKey (trustHostKey).
+ *  - hostKeyChanged: the machine's identity is not the one stored (expectedFingerprint); offeredKey is
+ *    what it presents now. Nothing is sent to it until the owner approves (trustHostKey).
+ *  - auth: no key or password was accepted.
+ *  - unreachable: could not connect at all. */
+export type StatsErrorKind = "newHost" | "hostKeyChanged" | "auth" | "unreachable" | "other";
 
 /** Stats for one machine that has an SSH user. Either stats or error is set once it has been tried. */
 export interface MachineStatsEntry {
@@ -157,6 +173,17 @@ export interface MachineStatsEntry {
   /** Readable message from the latest try, if it failed. Older stats are kept alongside. */
   error: string | null;
   errorKind: StatsErrorKind | null;
+  /** With newHost and hostKeyChanged: the identity the machine presented, for the owner to check. */
+  offeredKey: HostKey | null;
+  /** With hostKeyChanged: the fingerprint that was stored. */
+  expectedFingerprint: string | null;
+  /** The identity currently stored for this machine, if any. Show it somewhere unobtrusive so the
+   *  owner can compare it with the machine's own. */
+  pinnedFingerprint: string | null;
+  /** True after a login failure (auth): the app has stopped retrying by itself, so it doesn't keep
+   *  knocking with a wrong password. It tries again when the machine or a secret is edited, or on
+   *  refreshStats. */
+  paused: boolean;
 }
 
 /** Keychain entry names used with setSecret / hasSecret / deleteSecret. */
@@ -203,7 +230,9 @@ export const api = {
   /** Returns the settings as saved. Rejects with a readable message if a value is out of range. */
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
 
-  /** Local networks worth scanning, best first. */
+  /** Local networks worth scanning, best first. One entry per adapter, so the same cidr can appear
+   *  twice (cable and Wi-Fi on one network). Can change while the app runs; reload it when the
+   *  Settings screen opens and after a scan. */
   listSubnets: () => invoke<Subnet[]>("list_subnets"),
   /** Scans the range from settings (or the best local network), saves what it finds into the
    *  inventory and resolves when done; a /22 takes about 25 seconds. "scan-progress" events arrive
@@ -216,16 +245,24 @@ export const api = {
 
   /** Latest check and recent history of every device that has been checked. Ignored devices are not checked. */
   deviceStatuses: () => invoke<DeviceStatus[]>("device_statuses"),
-  /** Check every device now instead of waiting for the timer. Resolves when the round is done. */
+  /** Check every device now instead of waiting for the timer. Resolves when the round is done.
+   *  Rejects with a readable message while a scan is running (devices are checked when it ends),
+   *  or when this PC can't send pings at all. */
   checkNow: () => invoke<void>("check_now"),
+  /** A standing problem that stops status checks from working at all (for example a Linux PC that
+   *  doesn't allow programs to send pings), with what to do about it. Null when checks work.
+   *  Reload it on every "status-changed" event and show it prominently. */
+  checkProblem: () => invoke<string | null>("check_problem"),
 
   /** One entry per machine that has an SSH user. */
   machineStats: () => invoke<MachineStatsEntry[]>("machine_stats"),
-  /** Read one machine's stats now. Resolves with the new entry (which may hold an error). */
+  /** Read one machine's stats now (also ends a pause). Resolves with the new entry (which may hold an error). */
   refreshStats: (deviceId: number) => invoke<MachineStatsEntry>("refresh_stats", { deviceId }),
-  /** After a hostKeyChanged error: forget the stored identity so the next reading trusts the new one.
-   *  Ask the owner to confirm first. */
-  forgetHostKey: (deviceId: number) => invoke<void>("forget_host_key", { deviceId }),
+  /** Approve the identity a machine presented (newHost or hostKeyChanged): pass the fingerprint from
+   *  entry.offeredKey that the owner was shown and confirmed. From then on only that identity is
+   *  accepted. Rejects if the machine has presented a different one since; reload and ask again.
+   *  Follow it with refreshStats. */
+  trustHostKey: (deviceId: number, fingerprint: string) => invoke<void>("trust_host_key", { deviceId, fingerprint }),
 };
 
 /** Events from the back end. Each returns a function that stops listening. */

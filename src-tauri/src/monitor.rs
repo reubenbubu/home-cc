@@ -304,11 +304,20 @@ async fn login_for(app: &AppHandle, device: &Device) -> Result<Login> {
     let known_key = inv.host_key(&device.host, device.ssh_port)?;
     let device_id = device.id;
     // The keychain can be slow to answer, so keep it off the async threads.
+    // If it can't be read at all (locked, or no keychain service running),
+    // carry on without the secrets: a key file with no passphrase or the
+    // SSH agent may still get in, and if not the login error says what to do.
     let (key_passphrase, password) = tauri::async_runtime::spawn_blocking(move || {
-        Ok::<_, Error>((secrets::get(KEY_PASSPHRASE)?, secrets::get(&password_key(device_id))?))
+        let read = |key: &str| {
+            secrets::get(key).unwrap_or_else(|e| {
+                eprintln!("home-cc: could not read {key} from the keychain: {e}");
+                None
+            })
+        };
+        (read(KEY_PASSPHRASE), read(&password_key(device_id)))
     })
     .await
-    .map_err(|e| Error::Invalid(format!("Could not read the keychain: {e}")))??;
+    .unwrap_or((None, None));
     Ok(Login {
         host: device.host.clone(),
         port: device.ssh_port,

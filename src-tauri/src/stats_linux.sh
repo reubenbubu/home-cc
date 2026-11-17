@@ -1,4 +1,4 @@
-# home-cc machine stats, Linux. POSIX sh only (dash, busybox ash); needs awk, df, uname.
+# home-cc machine stats, Linux. POSIX sh only (dash, busybox ash); needs awk, df, sort, uname.
 # Sent on stdin to `sh -s`, so no quoting layer and no dependence on the login shell.
 LC_ALL=C; export LC_ALL
 PATH="$PATH:/usr/sbin:/sbin:/usr/bin:/bin"; export PATH
@@ -33,7 +33,8 @@ fi
 # overlay, squashfs, proc, nfs, cifs and anything new and virtual are skipped, and a dead
 # network mount can never hang df because df is only run on the mounts picked here).
 # One line per device (bind mounts and btrfs subvolumes repeat the device): the shortest
-# mount point wins.
+# mount point that is a folder wins. Single files mounted from elsewhere, such as
+# /etc/hosts inside a container, are not disks the owner would recognise.
 awk '
 function unesc(s,   out, i, o) {   # /proc/mounts writes space, tab, newline, backslash as \040 \011 \012 \134
   out = ""
@@ -49,12 +50,13 @@ function unesc(s,   out, i, o) {   # /proc/mounts writes space, tab, newline, ba
 $3 ~ /^(ext[234]|xfs|btrfs|zfs|f2fs|vfat|exfat|ntfs|ntfs3|fuseblk|jfs|reiserfs|bcachefs|ufs|hfsplus)$/ {
   dev = unesc($1); mp = unesc($2)
   if (dev ~ /[\t\n]/ || mp ~ /[\t\n]/) next
-  if (!(dev in best)) { order[++n] = dev; best[dev] = mp; typ[dev] = $3 }
-  else if (length(mp) < length(best[dev])) best[dev] = mp
+  printf "%d\t%s\t%s\t%s\n", length(mp), $3, dev, mp
 }
-END { for (i = 1; i <= n; i++) printf "%s\t%s\t%s\n", typ[order[i]], order[i], best[order[i]] }
-' /proc/mounts |
-while IFS="$TAB" read -r fs dev mp; do
+' /proc/mounts | sort -n |
+while IFS="$TAB" read -r len fs dev mp; do
+  [ -d "$mp" ] || continue
+  case "$seen" in *"$TAB$dev$TAB"*) continue ;; esac
+  seen="$seen$TAB$dev$TAB"
   # POSIX df line: device, 1024-blocks, used, available, capacity%, mount point.
   # Device and mount point may contain spaces, so pick the numbers out by pattern.
   nums=$(df -Pk -- "$mp" 2>/dev/null | awk '
