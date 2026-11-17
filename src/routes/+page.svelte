@@ -38,11 +38,13 @@
   const fresh = $derived(shown.filter((d) => !d.reviewed));
 
   const upOf = (list: Device[]) => list.filter((d) => status.health(d) === "up").length;
-  /** Down, leaving out the machines the owner has silenced (known to be off). */
-  const downOf = (list: Device[]) => list.filter((d) => status.health(d) === "down" && !silences.has(d)).length;
-  const silencedOf = (list: Device[]) => list.filter((d) => status.health(d) === "down" && silences.has(d)).length;
+  /** A down machine the owner has silenced (known to be off): left out of the Down counts and Needs attention. */
+  const hushed = (d: Device) => status.health(d) === "down" && silences.has(d);
+  /** Down, leaving out the machines the owner has silenced. */
+  const downOf = (list: Device[]) => list.filter((d) => status.health(d) === "down" && !hushed(d)).length;
+  const silencedOf = (list: Device[]) => list.filter(hushed).length;
   /** The status dot's words for a silenced machine, which is still down. */
-  const dotLabel = (d: Device) => (status.health(d) === "down" && silences.has(d) ? "Down, silenced" : undefined);
+  const dotLabel = (d: Device) => (hushed(d) ? "Down, silenced" : undefined);
 
   // A silence ends when the machine is up again, and one of a machine that was removed is forgotten.
   $effect(() => {
@@ -81,8 +83,10 @@
     const down: Issue[] = [];
     const warn: Issue[] = [];
     for (const d of [...machines, ...meshNodes]) {
+      // A silenced machine is off on purpose: nothing about it needs a look until it is up again.
+      if (hushed(d)) continue;
       const href = d.kind === "mesh" ? "/network" : "/machines";
-      if (status.health(d) === "down" && !silences.has(d)) {
+      if (status.health(d) === "down") {
         const seen = status.get(d)?.lastSeen ?? d.lastSeen;
         down.push({ key: `down-${d.id}`, text: `${d.name} is down (last seen ${relTime(seen, clock.now)})`, href });
       }
@@ -111,7 +115,9 @@
     }
     // Docker hosts (read by the Containers panel): a host that can't be read, and containers that need a look.
     for (const h of docker.shown) {
-      const name = devices.byId.get(h.deviceId)?.name ?? `Device ${h.deviceId}`;
+      const host = devices.byId.get(h.deviceId);
+      if (host && hushed(host)) continue;
+      const name = host?.name ?? `Device ${h.deviceId}`;
       if (h.problem) {
         warn.push({ key: `docker-${h.deviceId}`, text: `${name}: Docker couldn't be read`, href: "/docker" });
         continue;
@@ -129,7 +135,7 @@
     // Pi-hole (read by the Pi-hole panel): one that can't be read, or whose blocking is off or paused.
     const piholes = pihole.hosts.flatMap((h) => {
       const d = devices.byId.get(h.deviceId);
-      return d ? [{ id: d.id, name: d.name, status: pihole.statuses.get(d.id), readError: pihole.readErrors.get(d.id) }] : [];
+      return d && !hushed(d) ? [{ id: d.id, name: d.name, status: pihole.statuses.get(d.id), readError: pihole.readErrors.get(d.id) }] : [];
     });
     for (const i of piholeIssues(piholes, clock.now)) warn.push({ ...i, href: "/pihole" });
     return [...down, ...warn];
@@ -141,30 +147,25 @@
 {#snippet response(d: Device, compact = false)}
   {@const s = status.get(d)}
   {#if s && !s.up}
+    {@const silenced = silences.has(d)}
     <span class="response">
-      {#if silences.has(d)}
+      {#if silenced}
         <span class="muted small" title="Left out of Needs attention and the Down count until it is up again">silenced</span>
-        <button
-          class="btn hush"
-          class:icon-only={compact}
-          aria-label="Undo silencing {d.name}"
-          title="Undo: count {d.name} as down again"
-          onclick={() => silences.undo(d)}
-        >
-          {#if compact}<Icon path={icons.undo} size={15} />{:else}Undo{/if}
-        </button>
       {:else}
         <span class="down small">down</span>
-        <button
-          class="btn hush"
-          class:icon-only={compact}
-          aria-label="Silence {d.name}"
-          title="Silence: known to be off? Leave it out of Needs attention and the Down count until it is up again"
-          onclick={() => silences.silence(d)}
-        >
-          {#if compact}<Icon path={icons.bellOff} size={15} />{:else}Silence{/if}
-        </button>
       {/if}
+      <!-- One button for both, so it keeps the focus when pressed from the keyboard. -->
+      <button
+        class="btn hush"
+        class:icon-only={compact}
+        aria-label={silenced ? `Undo silencing ${d.name}` : `Silence ${d.name}`}
+        title={silenced
+          ? `Undo: count ${d.name} as down again`
+          : "Silence: known to be off? Leave it out of Needs attention and the Down count until it is up again"}
+        onclick={() => (silences.has(d) ? silences.undo(d) : silences.silence(d))}
+      >
+        {#if compact}<Icon path={silenced ? icons.undo : icons.bellOff} size={15} />{:else}{silenced ? "Undo" : "Silence"}{/if}
+      </button>
     </span>
   {:else if s?.up && s.rttMs != null}
     <span class="mono muted small">{ms(s.rttMs)}</span>
@@ -256,7 +257,7 @@
     <div class="muted">Down</div>
     <div class="value mono" class:alarm={downOf(shown) > 0}>{downOf(shown)}</div>
     <div class="muted small">
-      {downOf(machines) + downOf(meshNodes)} of them machines or mesh nodes{#if silencedOf(shown) > 0}{" "}· {silencedOf(shown)} silenced{/if}
+      {downOf(machines) + downOf(meshNodes)} of them machines or mesh nodes{#if silencedOf(shown) > 0}{" "}<span class="nowrap">· {silencedOf(shown)} silenced</span>{/if}
     </div>
   </div>
   <div class="panel stat">
@@ -385,6 +386,8 @@
   .stat .value { margin: 0.3rem 0 0.15rem; font-size: 1.85rem; }
   .stat .value.alarm { color: var(--bad); }
   .stat .of { margin-left: 0.5rem; color: var(--muted); font-size: 1.1rem; }
+  /* "· 1 silenced" goes to the next line whole rather than split in two. */
+  .stat .nowrap { white-space: nowrap; }
 
   .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.4rem; }
   .main { display: flex; flex-direction: column; gap: 1.4rem; min-width: 0; }

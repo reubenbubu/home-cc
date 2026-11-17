@@ -538,13 +538,13 @@ async function forgetSilences(page) {
   await page.evaluate(() => localStorage.removeItem("home-cc.silenced"));
 }
 
-/** Runs in the page. From now on the back end reports the device of this name as up, seen just now (true),
- *  or as it really is (false). */
-function reportUp([name, up]) {
+/** Runs in the page. From now on the back end reports the device of this name as up, seen just now ("up"),
+ *  as down, last seen an hour ago ("down"), or as it really is (null). */
+function reportAs([name, state]) {
   const tauri = window.__TAURI_INTERNALS__;
   tauri.realInvoke ??= tauri.invoke;
   const invoke = tauri.realInvoke;
-  if (!up) {
+  if (!state) {
     tauri.invoke = invoke;
     return;
   }
@@ -553,7 +553,9 @@ function reportUp([name, up]) {
     if (cmd !== "device_statuses") return result;
     const id = (await invoke("list_devices")).find((d) => d.name === name)?.id;
     const now = Math.floor(Date.now() / 1000);
-    return result.map((s) => (s.deviceId === id ? { ...s, up: true, rttMs: 3.2, checkedAt: now, lastSeen: now } : s));
+    const as =
+      state === "up" ? { up: true, rttMs: 3.2, checkedAt: now, lastSeen: now } : { up: false, rttMs: null, checkedAt: now, lastSeen: now - 3600 };
+    return result.map((s) => (s.deviceId === id ? { ...s, ...as } : s));
   };
 }
 
@@ -1513,6 +1515,9 @@ async function checkFlows(browser, url) {
         await laptop.getByRole("button", { name: "Silence Old laptop" }).click();
         await laptop.getByText("silenced", { exact: true }).waitFor();
         await said.waitFor({ state: "detached" });
+        // The same button turns into Undo, so the focus stays on it.
+        const focused = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+        if (focused !== "Undo silencing Old laptop") throw new Error(`after Silence the focus is on "${focused}"`);
         const after = await downCount();
         if (after !== before - 1) throw new Error(`the Down count went from ${before} to ${after}`);
         const heading = (await pcs.innerText()).replace(/\s+/g, " ");
@@ -1551,17 +1556,36 @@ async function checkFlows(browser, url) {
         await laptop.getByRole("button", { name: "Silence Old laptop" }).click();
         await said.waitFor({ state: "detached" });
         // A round of checks finds it up.
-        await page.evaluate(reportUp, ["Old laptop", true]);
+        await page.evaluate(reportAs, ["Old laptop", "up"]);
         await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("check_now"));
         await laptop.getByText("silenced", { exact: true }).waitFor({ state: "detached" });
         if (await laptop.getByRole("button", { name: /Silence|Undo/ }).count()) throw new Error("a machine that is up offers Silence or Undo");
         const stored = await page.evaluate(() => localStorage.getItem("home-cc.silenced"));
         if (stored !== null) throw new Error(`the silence of a machine that is up again is still kept: ${stored}`);
         // And down again: back in Needs attention, with Silence offered again.
-        await page.evaluate(reportUp, ["Old laptop", false]);
+        await page.evaluate(reportAs, ["Old laptop", null]);
         await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("check_now"));
         await said.waitFor();
         await laptop.getByRole("button", { name: "Silence Old laptop" }).waitFor();
+      },
+    },
+    {
+      what: "on the Overview a silenced Docker host that is off says nothing in Needs attention, not even that Docker couldn't be read",
+      path: "/",
+      async run(page) {
+        const vm = page.locator("article.card", { hasText: "Dev VM" });
+        const issues = page.locator(".issues");
+        await issues.getByRole("link", { name: "Dev VM: Docker couldn't be read" }).waitFor();
+        await page.evaluate(reportAs, ["Dev VM", "down"]);
+        await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("check_now"));
+        await issues.getByRole("link", { name: /^Dev VM is down/ }).waitFor();
+        await vm.getByRole("button", { name: "Silence Dev VM" }).click();
+        await vm.getByText("silenced", { exact: true }).waitFor();
+        const left = (await issues.getByRole("link").allInnerTexts()).filter((t) => t.startsWith("Dev VM"));
+        if (left.length) throw new Error(`Needs attention still says: ${left.join("; ")}`);
+        await vm.getByRole("button", { name: "Undo silencing Dev VM" }).click();
+        await issues.getByRole("link", { name: "Dev VM: Docker couldn't be read" }).waitFor();
+        await issues.getByRole("link", { name: /^Dev VM is down/ }).waitFor();
       },
     },
     // Terminals
