@@ -1,7 +1,7 @@
 <script lang="ts">
   // Docker (spec 5.5): the compose stacks and containers on each Docker host, with their logs, files and a
   // cleanup. On a wide screen the log (or files, or cleanup) sits beside the stacks; on a narrower one above them.
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { clock } from "$lib/clock.svelte";
   import { devices } from "$lib/devices.svelte";
   import type { Container, Stack } from "$lib/docker/api";
@@ -47,6 +47,17 @@
     const o = docker.overviews.get(panel.hostId);
     const fresh = o && [...o.stacks.flatMap((s) => s.containers), ...o.others].find((c) => c.id === id);
     return fresh ?? panel.container;
+  });
+
+  // The side panel follows the host tab. Cleanup is about a whole host, so it moves to the new one and
+  // reads its preview afresh; a log or a compose file belongs to the host it came from, so it closes (a log
+  // stops following). The hosts list is about every host and stays.
+  $effect(() => {
+    const id = docker.selected;
+    untrack(() => {
+      if (!panel || panel.kind === "hosts" || panel.hostId === id) return;
+      panel = panel.kind === "cleanup" && id != null ? { kind: "cleanup", hostId: id } : null;
+    });
   });
 
   function hostName(id: number): string {

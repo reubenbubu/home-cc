@@ -1068,6 +1068,26 @@ async function checkFlows(browser, url) {
       },
     },
     {
+      what: "Docker: an open cleanup moves to the host tab picked next, and an open log closes",
+      path: "/docker",
+      async run(page) {
+        await page.getByRole("button", { name: "Clean up…" }).click();
+        await page.getByRole("heading", { name: "Clean up Homelab VM" }).waitFor();
+        await page.getByRole("tab", { name: /Dev VM/ }).click();
+        await page.getByRole("heading", { name: "Clean up Dev VM" }).waitFor();
+        if (await page.getByRole("heading", { name: "Clean up Homelab VM" }).count()) throw new Error("the cleanup for Homelab VM is still open");
+        // A log is about one container on one host: it closes rather than showing another host's.
+        await page.getByRole("tab", { name: /Homelab VM/ }).click();
+        await page.getByRole("heading", { name: "Clean up Homelab VM" }).waitFor();
+        await page.getByRole("button", { name: "Close the cleanup" }).click();
+        const logs = page.getByRole("button", { name: "Logs" }).first();
+        await logs.click();
+        await page.locator("aside.side").waitFor();
+        await page.getByRole("tab", { name: /Dev VM/ }).click();
+        await page.locator("aside.side").waitFor({ state: "detached" });
+      },
+    },
+    {
       what: "Docker: a compose file is saved after a confirm, says where the old one went, and offers to start the stack",
       path: "/docker",
       async run(page) {
