@@ -11,7 +11,8 @@
 // the end. Exits with an error if any screen is wider than its window, logs
 // an error, can't cope with the unusual readings of "?awkward", or if one of
 // the things the owner does on a screen (approving a machine's identity,
-// emptying a hardware address, ...) doesn't end the way it should.
+// emptying a hardware address, ...) doesn't end the way it should, or if the
+// hardware address can't be read in full on the Network screen at some width.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -232,6 +233,72 @@ async function checkAwkward(browser, url) {
   return problems;
 }
 
+/** Runs in the page. From now on the name of every request to the back end is noted in window.__calls,
+ *  in the order the requests were made. */
+function recordCalls() {
+  const tauri = window.__TAURI_INTERNALS__;
+  const invoke = tauri.invoke;
+  window.__calls = [];
+  tauri.invoke = (cmd, ...rest) => {
+    window.__calls.push(cmd);
+    return invoke(cmd, ...rest);
+  };
+}
+
+/** Runs in the page. From now on the back end behaves as if a round of readings the screen hasn't heard
+ *  about found the machines that were waiting for an approval unreachable: nothing is on offer any more,
+ *  so an approval is refused. */
+function withdrawOffers() {
+  const tauri = window.__TAURI_INTERNALS__;
+  const invoke = tauri.invoke;
+  tauri.invoke = async (cmd, ...rest) => {
+    if (cmd === "trust_host_key") throw "This machine isn't waiting for its identity to be approved.";
+    const result = await invoke(cmd, ...rest);
+    if (cmd !== "machine_stats") return result;
+    return result.map((e) =>
+      e.errorKind === "hostKeyChanged"
+        ? { ...e, error: "Couldn't reach this machine: the connection timed out.", errorKind: "unreachable", offeredKey: null, expectedFingerprint: null }
+        : e,
+    );
+  };
+}
+
+/** The sample NAS, a device with a hardware address that is on the Network screen from the start. */
+const NAS_MAC = "d8:bb:c1:7a:02:6e";
+
+/** Runs in the page, on the Network screen. Says how the hardware address of one device (and the line that
+ *  stands in for the column in every row) is shown. */
+function hardwareAddressShown(mac) {
+  const shown = (el) => !!el && el.getClientRects().length > 0;
+  const whole = (el) => el.scrollWidth <= el.clientWidth;
+  /** Inside the cell it is in, so the cell doesn't cut it either. */
+  const inside = (el, cell) => {
+    const a = el.getBoundingClientRect();
+    const b = cell.getBoundingClientRect();
+    return a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5;
+  };
+  const rows = [...document.querySelectorAll("tbody tr")].filter((tr) => tr.textContent.includes(mac));
+  const row = rows[0];
+  const line = row?.querySelector(".mac-line");
+  const address = row?.querySelector("td.c-ip");
+  const column = row?.querySelector("td.c-mac");
+  const lines = [...document.querySelectorAll(".mac-line")];
+  return {
+    rows: rows.length,
+    title: address?.getAttribute("title") ?? "",
+    lineShown: shown(line),
+    lineText: line?.textContent ?? "",
+    lineWhole: shown(line) && whole(line) && inside(line, address),
+    columnShown: shown(column),
+    columnText: column?.textContent.trim() ?? "",
+    columnWhole: shown(column) && whole(column),
+    lines: lines.length,
+    linesShown: lines.filter(shown).length,
+    linesCut: lines.filter((el) => shown(el) && !(whole(el) && inside(el, el.closest("td")))).length,
+    pageScrolls: document.documentElement.scrollWidth > window.innerWidth,
+  };
+}
+
 /** Things the owner does that a still picture can't show, tried against the sample back end. Each starts
  *  from a fresh page, so from fresh sample data. Returns what went wrong. */
 async function checkFlows(browser, url) {
@@ -329,16 +396,165 @@ async function checkFlows(browser, url) {
         await page.locator("form").getByRole("alert").filter({ hasText: "needs four" }).waitFor();
       },
     },
+    {
+      what: "a new password is stored first for a machine that stays where it is, and last when its address or port changes",
+      path: "/machines",
+      async run(page) {
+        await page.evaluate(recordCalls);
+        /** What was asked of the back end since the last look, as far as saving goes. */
+        const calls = () =>
+          page.evaluate(() =>
+            window.__calls
+              .splice(0)
+              .filter((c) => c === "set_secret" || c === "update_device")
+              .join(", "),
+          );
+        const expectCalls = async (want, when) => {
+          const got = await calls();
+          if (got !== want) throw new Error(`${when}: asked the back end for "${got}", not "${want}"`);
+        };
+        const save = page.getByRole("button", { name: "Save", exact: true });
+        const password = page.getByLabel("SSH password (optional)");
+        const alert = page.locator("form").getByRole("alert");
+        const edit = async (name) => {
+          await page.getByRole("button", { name: `Edit ${name}` }).click();
+          await page.waitForFunction((n) => document.querySelector("form input")?.value === n, name);
+        };
+
+        await edit("Homelab VM");
+        await page.getByLabel("Notes").fill("same place, new password");
+        await password.fill("first");
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await expectCalls("set_secret, update_device", "same address and port");
+
+        await edit("Homelab VM");
+        await page.getByLabel("Address (IP or hostname)").fill("192.168.68.99");
+        await password.fill("second");
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await expectCalls("update_device, set_secret", "another address");
+
+        await edit("Monitoring");
+        await page.getByLabel("SSH port").fill("2222");
+        await password.fill("third");
+        await save.click();
+        await save.waitFor({ state: "detached" });
+        await expectCalls("update_device, set_secret", "another SSH port");
+
+        // An address the back end refuses: nothing is saved, so the password must not be stored either.
+        await edit("NAS");
+        await page.getByLabel("Address (IP or hostname)").fill("192.168.1");
+        await password.fill("fourth");
+        await save.click();
+        await alert.filter({ hasText: "needs four" }).waitFor();
+        await expectCalls("update_device", "an address that is refused");
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
+        await save.waitFor({ state: "detached" });
+
+        // Same place, but the rest of the form is refused: the password is in by then, and the form says so.
+        await edit("NAS");
+        await page.getByLabel("Hardware address (optional)").fill("zz");
+        await password.fill("fifth");
+        await save.click();
+        await alert.filter({ hasText: "The new password was stored, but the rest wasn't saved: Hardware address should look like" }).waitFor();
+        await expectCalls("set_secret, update_device", "a hardware address that is refused");
+        if ((await password.inputValue()) !== "") throw new Error("the password that was stored is still in its box, to be stored again");
+        await page.getByText("A password is stored").waitFor();
+      },
+    },
+    {
+      what: "an approval given while the machine is being read is held back, and is followed by a reading of its own",
+      path: "/machines",
+      async run(page) {
+        await page.evaluate(recordCalls);
+        const media = card(page, "Media PC");
+        await media.getByRole("button", { name: "Approve and use the password" }).click();
+        const yes = media.getByRole("button", { name: "Yes, it matches" });
+        await yes.waitFor();
+        // A reading starts before the approval is stored. It comes back still asking for the approval.
+        await media.getByRole("button", { name: "Read stats for Media PC now" }).click();
+        if (!(await yes.isDisabled())) throw new Error("the approval can be completed while the machine is being read");
+        // As if it had been pressed all the same, while that reading was still going.
+        await yes.evaluate((b) => {
+          b.disabled = false;
+          b.click();
+        });
+        await media.getByText("RAM", { exact: true }).waitFor();
+        await media.getByText("First connection").waitFor({ state: "detached" });
+        const calls = await page.evaluate(() => window.__calls.filter((c) => c === "trust_host_key" || c === "refresh_stats").join(", "));
+        if (calls !== "refresh_stats, trust_host_key, refresh_stats") {
+          throw new Error(`expected a second reading after the approval, but the back end was asked for "${calls}"`);
+        }
+      },
+    },
+    {
+      what: "a refused approval says why, also when the machine has nothing left to approve",
+      path: "/machines",
+      async run(page) {
+        const proxmox = card(page, "Proxmox");
+        await proxmox.getByRole("button", { name: "Approve the new identity" }).click();
+        await proxmox.getByRole("button", { name: "Yes, it matches" }).waitFor();
+        await page.evaluate(withdrawOffers);
+        await proxmox.getByRole("button", { name: "Yes, it matches" }).click();
+        await proxmox.getByText("This machine's identity has changed").waitFor({ state: "detached" });
+        await proxmox.getByText("Couldn't reach this machine").waitFor();
+        await proxmox.getByRole("alert").filter({ hasText: "Not approved: This machine isn't waiting for its identity to be approved." }).waitFor();
+        if ((await proxmox.getByText("Not approved:").count()) !== 1) throw new Error("the reason is shown more than once");
+        // Trying the machine again makes the refusal old news.
+        await proxmox.getByRole("button", { name: "Read stats for Proxmox now" }).click();
+        await proxmox.getByText("Not approved:").waitFor({ state: "detached" });
+      },
+    },
+    {
+      // A 1080p monitor at 125% scaling: the table is too narrow for the Hardware address column.
+      what: "in a narrow window the hardware address is under the address, in full, and in the tooltip",
+      path: "/network",
+      viewport: { width: 1536, height: 864 },
+      scale: 1.25,
+      async run(page) {
+        await page.locator("tbody tr", { hasText: NAS_MAC }).first().waitFor();
+        const got = await page.evaluate(hardwareAddressShown, NAS_MAC);
+        if (got.rows !== 1) throw new Error(`expected one row with the NAS's hardware address, found ${got.rows}`);
+        if (got.columnShown) throw new Error("the Hardware address column is shown at this width: this check needs a width where it is not");
+        if (!got.lineShown) throw new Error("no hardware address is shown in the NAS row");
+        if (!got.lineText.includes(NAS_MAC)) throw new Error(`the line under the address reads "${got.lineText}"`);
+        if (!got.lineWhole) throw new Error("the hardware address under the address is cut short");
+        if (!got.title.includes(NAS_MAC)) throw new Error(`the address's tooltip doesn't have the hardware address (it reads "${got.title}")`);
+        if (got.linesShown !== got.lines) throw new Error(`${got.lines - got.linesShown} of ${got.lines} rows don't show their hardware address`);
+        if (got.linesCut > 0) throw new Error(`${got.linesCut} hardware addresses are cut short`);
+        if (got.pageScrolls) throw new Error("the page scrolls sideways");
+      },
+    },
+    {
+      what: "in a wide window the hardware address has its own column, and is not repeated under the address",
+      path: "/network",
+      viewport: { width: 2560, height: 1440 },
+      async run(page) {
+        await page.locator("tbody tr", { hasText: NAS_MAC }).first().waitFor();
+        const got = await page.evaluate(hardwareAddressShown, NAS_MAC);
+        if (got.rows !== 1) throw new Error(`expected one row with the NAS's hardware address, found ${got.rows}`);
+        if (!got.columnShown) throw new Error("the Hardware address column is missing");
+        if (got.columnText !== NAS_MAC) throw new Error(`the Hardware address column reads "${got.columnText}"`);
+        if (!got.columnWhole) throw new Error("the hardware address in its column is cut short");
+        if (got.linesShown > 0) throw new Error("the hardware address is shown twice: in its column and under the address");
+        if (!got.title.includes(NAS_MAC)) throw new Error(`the address's tooltip doesn't have the hardware address (it reads "${got.title}")`);
+      },
+    },
   ];
   const problems = [];
   for (const flow of flows) {
-    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    const page = await browser.newPage({
+      viewport: flow.viewport ?? { width: 1920, height: 1080 },
+      deviceScaleFactor: flow.scale ?? 1,
+    });
     page.setDefaultTimeout(10_000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
     try {
       await page.goto(url + flow.path, { waitUntil: "networkidle" });
+      await page.evaluate(() => document.fonts.ready);
       await flow.run(page);
     } catch (e) {
       problems.push(`${flow.what}: ${String(e.message ?? e).split("\n")[0]}`);

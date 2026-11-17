@@ -1,7 +1,7 @@
 // Run with "npm test" (Node 24 reads the .ts file directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isThisPc, macToSend, ownAddresses, scanRanges } from "./net.ts";
+import { isThisPc, macToSend, ownAddresses, repointed, scanRanges } from "./net.ts";
 
 const subnet = (cidr, name, ownIp, best = false) => ({ cidr, interface: name, ownIp, best });
 const found = (ip, isSelf) => ({ ip, mac: null, vendor: null, hostname: null, looksLikeMesh: false, rttMs: null, isSelf });
@@ -84,4 +84,20 @@ test("a changed hardware address is sent as typed, for the back end to check", (
   assert.equal(macToSend("a0:36:bc:5e:11:90", " a0:36:bc:5e:11:91 "), "a0:36:bc:5e:11:91");
   assert.equal(macToSend(null, "aa-bb-cc-dd-ee-ff"), "aa-bb-cc-dd-ee-ff");
   assert.equal(macToSend(null, "not an address"), "not an address");
+});
+
+test("an edit that leaves the address and the SSH port alone doesn't point the machine elsewhere", () => {
+  const stored = { host: "192.168.68.20", sshPort: 22 };
+  assert.equal(repointed(stored, "192.168.68.20", 22), false);
+  assert.equal(repointed(stored, "  192.168.68.20 ", 22), false, "spaces around the address are not a change");
+  assert.equal(repointed({ host: "nas.lan", sshPort: 2222 }, "nas.lan", 2222), false);
+});
+
+test("another address or another SSH port points the machine elsewhere", () => {
+  const stored = { host: "192.168.68.20", sshPort: 22 };
+  assert.equal(repointed(stored, "192.168.68.21", 22), true);
+  assert.equal(repointed(stored, "192.168.68.20", 2222), true);
+  assert.equal(repointed(stored, "192.168.1", 22), true, "also when the new address is one the back end will refuse");
+  // The back end compares the text as typed, so a name in other letters counts as changed there too.
+  assert.equal(repointed({ host: "nas.lan", sshPort: 22 }, "NAS.lan", 22), true);
 });

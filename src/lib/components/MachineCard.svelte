@@ -45,9 +45,9 @@
 {/snippet}
 
 <!-- Approves exactly the identity on screen. Drawn afresh when that changes, so a half-given confirmation
-     never carries over to an identity the owner hasn't read. -->
+     never carries over to an identity the owner hasn't read. Held back while the machine is being read:
+     that reading may come back with another identity, or none to approve. -->
 {#snippet approve(key: HostKey, label: string)}
-  {#if trustError}<p class="refused" role="alert">Not approved: {trustError}</p>{/if}
   <div class="confirm">
     {#key key.fingerprint}
       <ConfirmButton
@@ -77,7 +77,7 @@
           class:spin={refreshing}
           aria-label="Read stats for {device.name} now"
           title="Read stats now"
-          disabled={refreshing}
+          disabled={refreshing || trusting}
           onclick={() => stats.refresh(device.id)}
         >
           <Icon path={icons.refresh} size={16} />
@@ -97,6 +97,10 @@
 
   {#if refreshError}
     <p class="alert" role="alert">Couldn't read stats: {refreshError}</p>
+  {/if}
+  <!-- Not inside the approval block: after a refusal the machine may have nothing left to approve. -->
+  {#if trustError}
+    <p class="alert" role="alert">Not approved: {trustError}</p>
   {/if}
 
   {#if !device.sshUser}
@@ -218,7 +222,6 @@
   .prints dd, .print, .cmd { font-size: 0.92rem; overflow-wrap: anywhere; user-select: text; }
   .alert .print { margin: 0.2rem 0 0.4rem; }
   .cmd { color: var(--text-soft); font-size: 0.92em; }
-  .refused { margin-top: 0.5rem; color: var(--bad); }
   .paused { margin-top: -0.2rem; }
 
   /* Readings from before the latest try failed: still shown, but clearly old. */

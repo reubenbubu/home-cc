@@ -15,7 +15,7 @@
     type Os,
   } from "$lib/api";
   import { icons } from "$lib/icons";
-  import { macToSend } from "$lib/net";
+  import { macToSend, repointed } from "$lib/net";
   import ConfirmButton from "$lib/components/ConfirmButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MachineCard from "$lib/components/MachineCard.svelte";
@@ -24,8 +24,8 @@
 
   let editing = $state<number | "new" | null>(null);
   let form = $state<DeviceInput>(blank());
-  /** The address and hardware address as they were when the form opened, to tell what was changed. */
-  let stored = $state<{ host: string; mac: string | null }>({ host: "", mac: null });
+  /** The address, SSH port and hardware address as they are saved, to tell what the form changes. */
+  let stored = $state<{ host: string; sshPort: number; mac: string | null }>({ host: "", sshPort: 22, mac: null });
   let formError = $state<string | null>(null);
   let listError = $state<string | null>(null);
   let saving = $state(false);
@@ -42,7 +42,7 @@
 
   async function open(id: number | "new", input: DeviceInput) {
     form = input;
-    stored = { host: input.host, mac: input.mac || null };
+    stored = { host: input.host, sshPort: input.sshPort ?? 22, mac: input.mac || null };
     formError = null;
     password = "";
     hasPassword = false;
@@ -97,32 +97,35 @@
       const input = { ...form, sshPort: Number(form.sshPort) || 22, mac: macToSend(stored.mac, form.mac ?? "") };
       let saved: Device;
       if (typeof editing === "number") {
-        // A new password goes in first. Saving the machine makes home-cc try its login again straight
-        // away, and that try must not knock once more with the old password.
-        if (password) {
+        const id = editing;
+        if (password && !repointed(stored, input.host, input.sshPort)) {
+          // Still the same machine: the new password goes in first. Saving the machine makes home-cc try
+          // its login again straight away, and that try must not knock once more with the old password.
           try {
-            await api.setSecret(secretKeys.sshPassword(editing), password);
+            await api.setSecret(secretKeys.sshPassword(id), password);
           } catch (err) {
             formError = `Nothing was saved, because the password couldn't be stored: ${errorText(err)}`;
             return;
           }
           hasPassword = true;
-        }
-        saved = await devices.update(editing, input);
-      } else if (editing === "new") {
-        saved = await devices.add(input);
-        if (password) {
+          password = "";
           try {
-            await api.setSecret(secretKeys.sshPassword(saved.id), password);
+            saved = await devices.update(id, input);
           } catch (err) {
-            // The machine itself is saved: keep the form open on it so the password can be tried again.
-            editing = saved.id;
-            stored = { host: saved.host, mac: saved.mac };
-            form.mac = saved.mac ?? "";
-            formError = `Saved, but the password couldn't be stored: ${errorText(err)}`;
+            formError = `The new password was stored, but the rest wasn't saved: ${errorText(err)}`;
             return;
           }
+        } else {
+          // Pointed at another address or port: the machine is saved first. Storing a password starts a
+          // login at once, and with the old address still saved it would be offered to the machine this
+          // entry is moving away from. Saved first, home-cc forgets the identity it had approved, and
+          // sends no password before the owner has approved what answers at the new place.
+          saved = await devices.update(id, input);
+          if (password && !(await storePassword(saved))) return;
         }
+      } else if (editing === "new") {
+        saved = await devices.add(input);
+        if (password && !(await storePassword(saved))) return;
       } else {
         return;
       }
@@ -135,6 +138,21 @@
       formError = errorText(err);
     } finally {
       saving = false;
+    }
+  }
+
+  /** Stores the typed password for a machine that has just been saved. If that fails the form stays
+   *  open on the machine, as it is now saved, so the password can be tried again. */
+  async function storePassword(saved: Device): Promise<boolean> {
+    try {
+      await api.setSecret(secretKeys.sshPassword(saved.id), password);
+      return true;
+    } catch (err) {
+      editing = saved.id;
+      stored = { host: saved.host, sshPort: saved.sshPort, mac: saved.mac };
+      form.mac = saved.mac ?? "";
+      formError = `Saved, but the password couldn't be stored: ${errorText(err)}`;
+      return false;
     }
   }
 

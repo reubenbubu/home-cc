@@ -51,3 +51,10 @@ export function macToSend(stored: string | null, typed: string): string | null {
   if (text.toLowerCase() === (stored ?? "").trim().toLowerCase()) return null;
   return text;
 }
+
+/** Whether an edit points a machine somewhere else: another address or another SSH port. The back end
+ *  then forgets the identity it had approved for that machine, so the stored password is not sent
+ *  again until the owner has approved whatever answers at the new place. */
+export function repointed(stored: { host: string; sshPort: number }, host: string, sshPort: number): boolean {
+  return host.trim() !== stored.host.trim() || sshPort !== stored.sshPort;
+}

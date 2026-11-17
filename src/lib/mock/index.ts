@@ -403,14 +403,16 @@ export function installMock() {
   entry("Old laptop", 30 * 3600, "Couldn't reach 192.168.68.95: the connection timed out. Is the machine switched on?", "unreachable");
   // First connection, and getting in needs the stored password: it waits for the owner's approval.
   const mediaPc = devices.find((d) => d.name === "Media PC");
-  if (mediaPc) entry("Media PC", null, say.newHost, "newHost", { offeredKey: serverKey(mediaPc) });
+  if (mediaPc) entry("Media PC", null, say.newHost, "newHost", { offeredKey: serverKey(mediaPc), paused: true });
 
   /** One try at reading a machine, by the same rules as the back end:
    *  - an identity that differs from the stored one stops everything until the owner approves it;
    *  - on a first connection the stored password is not sent before the owner approves the identity
    *    (a key file may be used, and the identity is then stored without asking);
-   *  - a failed login pauses the machine. */
-  function readStats(d: MockDevice): MachineStatsEntry {
+   *  - a failed login pauses the machine, and so does waiting for a first approval.
+   *  "known" is the identity stored when the try began; a try that takes a while doesn't see one
+   *  approved in the meantime. */
+  function readStats(d: MockDevice, known: HostKey | null = pinned.get(d.id) ?? null): MachineStatsEntry {
     const prev = entries.get(d.id);
     const stats = goodStats.get(d.id);
     const failed = (errorKind: StatsErrorKind, error: string, more: Partial<MachineStatsEntry> = {}): MachineStatsEntry => ({
@@ -422,7 +424,6 @@ export function installMock() {
       ...more,
     });
     const key = serverKey(d);
-    const known = pinned.get(d.id);
     const needsPassword = d.access === "password";
     let next: MachineStatsEntry;
     if (d.pattern === "gone" && prev?.errorKind === "unreachable") {
@@ -432,10 +433,12 @@ export function installMock() {
     } else if (known && known.fingerprint !== key.fingerprint) {
       next = failed("hostKeyChanged", say.changed(known, key), { offeredKey: key, expectedFingerprint: known.fingerprint });
     } else if (!known && needsPassword && hasPassword(d)) {
-      next = failed("newHost", say.newHost, { offeredKey: key });
+      // Waiting for the owner, so not tried again by the timer.
+      next = failed("newHost", say.newHost, { offeredKey: key, paused: true });
     } else {
       // First use with nothing reusable at stake: the identity is stored before the login is tried.
-      if (!known) pinned.set(d.id, key);
+      // The first one stored stays: an approval given while this try was under way is not overwritten.
+      if (!known && !pinned.has(d.id)) pinned.set(d.id, key);
       if (needsPassword && !hasPassword(d)) {
         next = failed("auth", say.auth(d), { paused: true });
       } else {
@@ -711,8 +714,10 @@ export function installMock() {
     refresh_stats: async ({ deviceId }: { deviceId: number }) => {
       const d = find(deviceId);
       if (!d.sshUser) throw "This machine has no SSH user yet";
+      // The try starts now, with the identity stored at this moment, and takes a while.
+      const known = pinned.get(d.id) ?? null;
       await sleep(1100);
-      return publicEntry(readStats(d));
+      return publicEntry(readStats(d, known));
     },
     trust_host_key: ({ deviceId, fingerprint }: { deviceId: number; fingerprint: string }) => {
       const d = find(deviceId);
